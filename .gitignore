@@ -16,6 +16,7 @@ Thumbs.db
 # Node (future relay server)
 node_modules/
 dist/
+packages/*/dist/
 .env
 .env.*
 
@@ -27,3 +28,8 @@ poc/dist/
 __pycache__/
 *.pyc
 .venv/
+
+# Go
+*.exe
+/cmd/server/server
+/cmd/hand/hand
