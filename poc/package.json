@@ -1,0 +1,19 @@
+{
+  "name": "axon-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "poc:basic": "npx tsx src/basic.ts",
+    "poc:tool-intercept": "npx tsx src/tool-intercept.ts",
+    "poc:remote-exec": "npx tsx src/remote-exec.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest"
+  },
+  "devDependencies": {
+    "tsx": "latest",
+    "typescript": "latest",
+    "@types/node": "latest"
+  }
+}
