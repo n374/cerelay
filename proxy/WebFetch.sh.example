@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# ============================================================================
+# WebFetch.sh.example — WebFetch 工具代理示例
+#
+# 功能：拦截对内网地址的 HTTP 请求（SSRF 防护）。
+#
+# 启用方式：
+#   cp WebFetch.sh.example WebFetch.sh && chmod +x WebFetch.sh
+#
+# stdin:  {"tool_name":"WebFetch","tool_input":{"url":"..."}}
+# stdout: 决策 JSON 或无输出
+# exit:   0=放行, 2=拒绝
+# ============================================================================
+set -euo pipefail
+
+source "${CLAUDE_PROXY_DIR}/lib.sh"
+
+INPUT=$(cat)
+URL=$(proxy_get_field "$INPUT" ".tool_input.url")
+
+if [[ -z "$URL" ]]; then
+  proxy_passthrough
+fi
+
+# 内网地址模式
+INTERNAL_PATTERNS='(^https?://(localhost|127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|0\.0\.0\.0|::1|\[::1\])|\.internal\.|\.local\.|\.corp\.|\.intranet\.)'
+
+if [[ "$URL" =~ $INTERNAL_PATTERNS ]]; then
+  proxy_audit_log "WebFetch" "deny" "internal URL: $URL"
+  proxy_deny "Proxy: access to internal network blocked: $URL"
+fi
+
+proxy_passthrough

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Bash.sh.example — Bash 工具代理示例
+#
+# 功能：拦截通过 Bash 命令访问敏感文件的操作。
+#       - cat/head/tail/less/more/bat 读取敏感文件 → 替换为 mock 路径
+#       - cp/mv 源为敏感文件 → 拒绝
+#       - python/python3 含 open() 引用敏感文件 → 拒绝
+#       - git show/log -p 涉及敏感文件 → 拒绝
+#       - grep/rg 搜索敏感目录 → 追加排除参数
+#
+# 启用方式：
+#   cp Bash.sh.example Bash.sh && chmod +x Bash.sh
+#
+# stdin:  {"tool_name":"Bash","tool_input":{"command":"..."}}
+# stdout: 决策 JSON 或无输出
+# exit:   0=放行, 2=拒绝
+# ============================================================================
+set -euo pipefail
+
+source "${CLAUDE_PROXY_DIR}/lib.sh"
+
+INPUT=$(cat)
+COMMAND=$(proxy_get_field "$INPUT" ".tool_input.command")
+
+if [[ -z "$COMMAND" ]]; then
+  proxy_passthrough
+fi
+
+# --- 文件读取命令检测 ---
+# 提取 cat/head/tail/less/more/bat/base64/xxd 后面的文件参数
+READ_CMDS='(cat|head|tail|less|more|bat|base64|xxd)'
+if [[ "$COMMAND" =~ $READ_CMDS[[:space:]] ]]; then
+  # 简单提取：命令后的非选项参数（不以 - 开头）
+  while IFS= read -r arg; do
+    if proxy_matches_sensitive "$arg"; then
+      MOCK_PATH=$(proxy_get_mock_path "$arg")
+      if [[ -n "$MOCK_PATH" ]]; then
+        # 替换命令中的敏感路径为 mock 路径
+        NEW_COMMAND="${COMMAND//$arg/$MOCK_PATH}"
+        proxy_audit_log "Bash" "mock" "read cmd: $arg → $MOCK_PATH"
+        printf '{"decision":"allow","updatedInput":{"command":"%s"}}\n' \
+          "$(printf '%s' "$NEW_COMMAND" | sed 's/\\/\\\\/g;s/"/\\"/g')"
+        exit 0
+      else
+        proxy_audit_log "Bash" "deny" "read cmd: $arg (no mock)"
+        proxy_deny "Proxy: access to sensitive file blocked: $arg"
+      fi
+    fi
+  done <<< "$(printf '%s' "$COMMAND" | grep -oE '(/[^ ]+|[^ ]+\.(env|pem|key|p12|pfx|jks)[^ ]*)' 2>/dev/null || true)"
+fi
+
+# --- cp/mv 源为敏感文件 ---
+if [[ "$COMMAND" =~ ^[[:space:]]*(cp|mv)[[:space:]] ]]; then
+  # 提取所有非选项参数（不以 - 开头的参数）
+  # 最后一个非选项参数是目标，之前的都是源
+  NON_OPT_ARGS=()
+  while IFS= read -r token; do
+    [[ -z "$token" ]] && continue
+    [[ "$token" == -* ]] && continue
+    NON_OPT_ARGS+=("$token")
+  done <<< "$(printf '%s' "$COMMAND" | sed 's/^[[:space:]]*\(cp\|mv\)[[:space:]]*//' | tr ' ' '\n')"
+
+  # 检查所有源参数（排除最后一个目标参数）
+  for ((i=0; i<${#NON_OPT_ARGS[@]}-1; i++)); do
+    SRC="${NON_OPT_ARGS[$i]}"
+    if proxy_matches_sensitive "$SRC"; then
+      proxy_audit_log "Bash" "deny" "cp/mv sensitive: $SRC"
+      proxy_deny "Proxy: copying sensitive file blocked: $SRC"
+    fi
+  done
+fi
+
+# --- python/python3 含 open() 引用敏感文件 ---
+if [[ "$COMMAND" =~ python3?[[:space:]] ]] && [[ "$COMMAND" =~ open\( ]]; then
+  # 提取 open() 中的文件路径
+  while IFS= read -r path; do
+    if proxy_matches_sensitive "$path"; then
+      proxy_audit_log "Bash" "deny" "python open: $path"
+      proxy_deny "Proxy: python access to sensitive file blocked: $path"
+    fi
+  done <<< "$(printf '%s' "$COMMAND" | grep -oE "open\(['\"]([^'\"]+)['\"]\)" | sed "s/open(['\"]\(.*\)['\"])/\1/" || true)"
+fi
+
+# --- git show/log -p 涉及敏感文件 ---
+if [[ "$COMMAND" =~ git[[:space:]]+(show|log[[:space:]]+-p) ]]; then
+  while IFS= read -r path; do
+    if [[ -n "$path" ]] && proxy_matches_sensitive "$path"; then
+      proxy_audit_log "Bash" "deny" "git sensitive: $path"
+      proxy_deny "Proxy: git access to sensitive file blocked: $path"
+    fi
+  done <<< "$(printf '%s' "$COMMAND" | grep -oE '-- [^ ]+' | sed 's/^-- //' || true)"
+fi
+
+# 默认放行
+proxy_passthrough

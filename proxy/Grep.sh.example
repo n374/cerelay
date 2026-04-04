@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Grep.sh.example — Grep 工具代理示例
+#
+# 功能：
+#   - 搜索路径包含敏感目录 → 追加排除或拒绝
+#   - 搜索模式为敏感关键词且未限定路径 → 追加排除
+#
+# 启用方式：
+#   cp Grep.sh.example Grep.sh && chmod +x Grep.sh
+#
+# stdin:  {"tool_name":"Grep","tool_input":{"pattern":"...","path":"...",...}}
+# stdout: 决策 JSON 或无输出
+# exit:   0=放行, 2=拒绝
+# ============================================================================
+set -euo pipefail
+
+source "${CLAUDE_PROXY_DIR}/lib.sh"
+
+INPUT=$(cat)
+PATTERN=$(proxy_get_field "$INPUT" ".tool_input.pattern")
+SEARCH_PATH=$(proxy_get_field "$INPUT" ".tool_input.path")
+
+# 搜索路径直接指向敏感目录 → 拒绝
+if [[ -n "$SEARCH_PATH" ]] && proxy_matches_sensitive "$SEARCH_PATH"; then
+  proxy_audit_log "Grep" "deny" "sensitive path: $SEARCH_PATH"
+  proxy_deny_with_context \
+    "Search in sensitive path blocked" \
+    "Error: Permission denied: $SEARCH_PATH"
+fi
+
+# 搜索敏感关键词且未限定路径 → 注意这里只是记录，不拦截
+# 可根据需要取消注释下面的拦截逻辑
+# SENSITIVE_KEYWORDS='(password|secret|token|api[_-]?key|credential|private[_-]?key)'
+# if [[ "$PATTERN" =~ $SENSITIVE_KEYWORDS ]] && [[ -z "$SEARCH_PATH" ]]; then
+#   proxy_audit_log "Grep" "warn" "sensitive pattern without path: $PATTERN"
+# fi
+
+proxy_passthrough

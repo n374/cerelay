@@ -1,0 +1,32 @@
+# 敏感文件模式（每行一个 grep -iE 正则）
+# 编辑此文件即可调整敏感范围，无需修改任何脚本
+#
+# 匹配逻辑：文件路径包含任一模式即视为敏感
+
+# 环境变量 / 密钥文件
+\.env$
+\.env\.
+\.pem$
+\.key$
+\.p12$
+\.jks$
+\.pfx$
+id_rsa
+
+# 敏感目录
+secrets/
+credentials/
+private/
+\.aws/
+\.ssh/
+
+# 生产配置
+config/prod
+config/production
+
+# 敏感关键词（路径中出现即匹配）
+password
+token
+secret
+credential
+api[_-]?key

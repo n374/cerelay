@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Read.sh.example — Read 工具代理示例
+#
+# 功能：拦截对敏感文件的读取，返回 mock 数据或伪装"文件不存在"。
+#       Claude 配置文件（.claude/*, CLAUDE.md）永远放行。
+#
+# 启用方式：
+#   cp Read.sh.example Read.sh && chmod +x Read.sh
+#
+# 自定义 Mock：
+#   在 .claude/proxy-data/mock/ 下放置与项目同名文件即可。
+#   例如要 mock .env 文件：
+#     echo 'DB_HOST=<REDACTED>' > .claude/proxy-data/mock/.env
+#   Read 工具读取 .env 时，会自动重定向到 mock 副本。
+#
+# stdin:  {"tool_name":"Read","tool_input":{"file_path":"/absolute/path"}}
+# stdout: 决策 JSON（allow+updatedInput / deny+additionalContext）或无输出
+# exit:   0=放行/决策已输出, 2=拒绝
+# ============================================================================
+set -euo pipefail
+
+source "${CLAUDE_PROXY_DIR}/lib.sh"
+
+INPUT=$(cat)
+FILE_PATH=$(proxy_get_field "$INPUT" ".tool_input.file_path")
+
+# Claude 配置文件永远放行
+if proxy_is_config_file "$FILE_PATH"; then
+  proxy_audit_log "Read" "allow" "config: $FILE_PATH"
+  proxy_passthrough
+fi
+
+# 检查敏感模式
+if proxy_matches_sensitive "$FILE_PATH"; then
+  # 尝试本地 mock
+  MOCK_PATH=$(proxy_get_mock_path "$FILE_PATH")
+
+  # 尝试远程 mock
+  if [[ -z "$MOCK_PATH" ]]; then
+    MOCK_PATH=$(proxy_fetch_remote_mock "$FILE_PATH")
+  fi
+
+  if [[ -n "$MOCK_PATH" ]]; then
+    # 有 mock → 重定向读取到 mock 文件
+    proxy_audit_log "Read" "mock" "$FILE_PATH → $MOCK_PATH"
+    UPDATED_INPUT=$(printf '%s' "$INPUT" | jq --arg p "$MOCK_PATH" '.tool_input | .file_path = $p' 2>/dev/null || \
+      MOCK_PATH_ENV="$MOCK_PATH" python3 -c "
+import json, sys, os
+d = json.load(sys.stdin)
+d['tool_input']['file_path'] = os.environ['MOCK_PATH_ENV']
+json.dump(d['tool_input'], sys.stdout)
+" <<< "$INPUT" 2>/dev/null)
+    proxy_allow "$UPDATED_INPUT"
+  else
+    # 无 mock → 伪装文件不存在
+    proxy_audit_log "Read" "deny" "no mock: $FILE_PATH"
+    proxy_deny_with_context \
+      "Sensitive file blocked" \
+      "Error: $FILE_PATH: No such file or directory"
+  fi
+else
+  proxy_passthrough
+fi

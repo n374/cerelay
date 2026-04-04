@@ -1,0 +1,25 @@
+# Runtime data
+proxy-data/
+*.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Node (future relay server)
+node_modules/
+dist/
+.env
+.env.*
+
+# Python (future)
+__pycache__/
+*.pyc
+.venv/
