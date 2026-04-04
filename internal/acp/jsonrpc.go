@@ -60,24 +60,24 @@ func (t *Transport) NextID() int64 {
 	return t.nextID.Add(1)
 }
 
-// ReadMessage 读取下一条消息（阻塞）
-// 返回的 json.RawMessage 是完整的 JSON-RPC 消息
+// ReadMessage 读取下一条消息（阻塞），跳过空行
 func (t *Transport) ReadMessage() (json.RawMessage, error) {
-	if !t.reader.Scan() {
-		if err := t.reader.Err(); err != nil {
-			return nil, fmt.Errorf("read error: %w", err)
+	for {
+		if !t.reader.Scan() {
+			if err := t.reader.Err(); err != nil {
+				return nil, fmt.Errorf("read error: %w", err)
+			}
+			return nil, io.EOF
 		}
-		return nil, io.EOF
+		line := t.reader.Bytes()
+		if len(line) == 0 {
+			continue // 跳过空行
+		}
+		// 复制一份，因为 scanner 的 buffer 会被复用
+		msg := make(json.RawMessage, len(line))
+		copy(msg, line)
+		return msg, nil
 	}
-	line := t.reader.Bytes()
-	if len(line) == 0 {
-		// 跳过空行，递归读取下一条
-		return t.ReadMessage()
-	}
-	// 复制一份，因为 scanner 的 buffer 会被复用
-	msg := make(json.RawMessage, len(line))
-	copy(msg, line)
-	return msg, nil
 }
 
 // WriteMessage 发送一条 JSON 消息（线程安全）

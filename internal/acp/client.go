@@ -190,15 +190,37 @@ func (c *Client) Close() error {
 
 // call 发送请求并等待响应
 func (c *Client) call(method string, params any) (*Response, error) {
-	id, err := c.transport.SendRequest(method, params)
-	if err != nil {
-		return nil, fmt.Errorf("send %s: %w", method, err)
-	}
-
+	// 先注册 pending channel，再发送请求
+	// 防止 claude CLI 回复极快时 readLoop 找不到 pending channel
+	id := c.transport.NextID()
 	ch := make(chan *Response, 1)
 	c.pendingMu.Lock()
 	c.pending[id] = ch
 	c.pendingMu.Unlock()
+
+	var rawParams json.RawMessage
+	if params != nil {
+		var err error
+		rawParams, err = json.Marshal(params)
+		if err != nil {
+			c.pendingMu.Lock()
+			delete(c.pending, id)
+			c.pendingMu.Unlock()
+			return nil, fmt.Errorf("marshal %s params: %w", method, err)
+		}
+	}
+	req := Request{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  method,
+		Params:  rawParams,
+	}
+	if err := c.transport.WriteMessage(req); err != nil {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return nil, fmt.Errorf("send %s: %w", method, err)
+	}
 
 	select {
 	case resp := <-ch:
