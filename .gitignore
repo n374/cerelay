@@ -33,3 +33,4 @@ __pycache__/
 *.exe
 /cmd/server/server
 /cmd/hand/hand
+/bin/

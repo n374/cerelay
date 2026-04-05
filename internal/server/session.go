@@ -42,8 +42,9 @@ type BrainSession struct {
 }
 
 // NewBrainSession 创建并初始化一个 BrainSession
-// 会启动 claude CLI 子进程并完成 ACP 握手
-func NewBrainSession(ctx context.Context, id, cwd, model string, hand HandConn) (*BrainSession, error) {
+// 会启动 claude CLI 子进程并完成 ACP 握手。
+// claudePath 为空时使用默认值 "claude"。
+func NewBrainSession(ctx context.Context, id, cwd, model, claudePath string, hand HandConn) (*BrainSession, error) {
 	s := &BrainSession{
 		id:        id,
 		cwd:       cwd,
@@ -55,7 +56,8 @@ func NewBrainSession(ctx context.Context, id, cwd, model string, hand HandConn) 
 	}
 
 	cfg := acp.ClientConfig{
-		Model: model,
+		Model:      model,
+		ClaudePath: claudePath,
 	}
 	client, err := acp.NewClient(ctx, s, cfg)
 	if err != nil {

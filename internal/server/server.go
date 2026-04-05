@@ -20,11 +20,12 @@ import (
 //   - 管理 BrainSession（每个 Session 对应一个 claude CLI 子进程）
 //   - 路由 Hand 消息到对应 Session
 type Server struct {
-	port     int
-	model    string
-	sessions map[string]*BrainSession
-	upgrader websocket.Upgrader
-	mu       sync.RWMutex
+	port       int
+	model      string
+	claudePath string // claude CLI 路径，空字符串表示使用默认值 "claude"
+	sessions   map[string]*BrainSession
+	upgrader   websocket.Upgrader
+	mu         sync.RWMutex
 
 	httpServer *http.Server
 }
@@ -179,7 +180,7 @@ func (s *Server) handleCreateSession(ctx context.Context, hc *handConn, msg prot
 		cwd = "."
 	}
 
-	sess, err := NewBrainSession(ctx, id, cwd, model, hc)
+	sess, err := NewBrainSession(ctx, id, cwd, model, s.claudePath, hc)
 	if err != nil {
 		return fmt.Errorf("创建 BrainSession 失败: %w", err)
 	}
