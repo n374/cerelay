@@ -5,9 +5,9 @@
 
 ## 一、项目概述
 
-Axon 是 Claude Code 的分体式架构：Hand（用户交互+工具执行）↔ Axon Server（Brain）↔ claude CLI（LLM 推理）。
+Axon 是 Claude Code 的分体式架构：Hand（Go，用户交互+工具执行）↔ Axon Server（TypeScript，基于 Claude Agent SDK 的 Brain）↔ claude CLI（LLM 推理）。`internal/server/` 中的 Go Server 作为 fallback 保留。
 
-## 二、已完成的工作（5 次提交）
+## 二、已完成的工作（6 次提交）
 
 | Commit | 内容 |
 |--------|------|
@@ -16,139 +16,104 @@ Axon 是 Claude Code 的分体式架构：Hand（用户交互+工具执行）↔
 | `00b8eae` | Go 基础层：ACP 协议（JSON-RPC 2.0）+ WebSocket 协议定义 |
 | `1a97a28` | Axon Server + Hand CLI 完整 Go 实现 + 交叉验证修复 |
 | `bf3b273` | 12 个集成测试 + README 重写 |
+| `8b3dee8` | 选项 C：TypeScript Server + Claude Agent SDK 直接集成 |
 
-## 三、核心架构决策：方案 B（Hook + HTTP 回调）
+## 三、核心架构决策：选项 C（SDK 直接集成）
 
 ### 背景
 
-ACP 协议的 client-side methods（`fs/read_text_file`, `terminal/create`）**不是** claude CLI 原生发出的——它们是 `claude-agent-acp`（Node.js 桥接层）内部用 SDK 的 `hooks.PreToolUse` 拦截后转换出来的。直接启动 `claude` CLI，它会在本地执行 Bash/Read 等工具，不会发 ACP 回调给我们。
+ACP 协议的 client-side methods（如 `fs/read_text_file`、`terminal/create`）并不是 claude CLI 的原生行为；它们本质上是 `claude-agent-acp` 在客户端侧对 Claude Agent SDK hooks 的包装。继续沿着 ACP bridge 或 Hook HTTP relay 往下做，只是在重复实现 SDK 已经原生提供的能力。
 
-### 方案 B 设计
+因此从方案 B 切换到选项 C：**Server 直接使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` + `hooks.PreToolUse`**，消除以下四层间接：
+
+1. `claude-agent-acp` 对 SDK hooks 的再封装
+2. `dispatch.sh` 对 Hook JSON 的脚本转发
+3. HTTP hookbridge 的阻塞式中继
+4. `settings.json` / `settings.local.json` 的动态注入
+
+### 选项 C 架构图
 
 ```
-Hand CLI ←── WebSocket ──→ Axon Server ←── HTTP 回调 ──→ Hook 脚本（Bash）
-                                │
-                                │ stdio (ACP / stream-json)
-                                ↓
-                          claude CLI 子进程
-                                │
-                                │ PreToolUse Hook 触发
-                                ↓
-                          dispatch.sh → 各工具 Proxy 脚本
-                                │
-                                │ HTTP POST 回调 Axon Server
-                                ↓
-                          Server 通过 WS 转发给 Hand
-                          Hand 执行 → WS 返回结果 → Server
-                                │
-                                │ Hook 脚本收到 HTTP 响应
-                                ↓
-                          Hook 输出 JSON（allow+updatedInput / deny+additionalContext）
-                          claude CLI 继续推理
+Hand CLI (Go)
+  │
+  │ WebSocket
+  ▼
+Axon Server (TypeScript)
+  │
+  │ query() + hooks.PreToolUse
+  ▼
+Claude Agent SDK
+  │
+  │ spawn / stream
+  ▼
+claude CLI
+
+工具调用路径：
+query() → hooks.PreToolUse → WS 发给 Hand → Hand 执行本地工具 → WS 返回结果 → hook return
 ```
 
 ### 关键要点
 
-1. **claude CLI 通过 `--input-format stream-json --output-format stream-json` 启动**，Server 通过 stdin/stdout 发送 prompt 和接收流式输出
+1. **主实现切换到 TypeScript Server**：核心目录是 `server/src/`，而不是 `internal/server/`
+2. **工具拦截走 SDK hooks**：`hooks.PreToolUse` 在同进程内把 Claude 原生工具调用转成 WS `tool_call`
+3. **Hand 执行 Claude 原生工具**：当前支持 `Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`
+4. **Go Server 保留为 fallback**：`internal/server/` 仍可作为历史实现和备用路径
+5. **Phase 0 Proxy 保留但降级为非主路径**：`proxy/` 的 relay 能力存在，但选项 C 不依赖它
 
-2. **PreToolUse Hook 通过 settings.json 配置**，指向 `dispatch.sh`（已有的 Phase 0 代码）
+## 四、选项 C 的代码结构
 
-3. **Hook 脚本改造**：当前 Phase 0 的 Hook 脚本做本地安全过滤。方案 B 需要将它们改造为 HTTP 回调模式：
-   - Hook 脚本拦截工具调用 JSON
-   - HTTP POST 到 Axon Server 的内部端点（如 `http://localhost:${AXON_PORT}/internal/tool-call`）
-   - **阻塞等待** HTTP 响应（curl 会阻塞直到 Server 返回）
-   - 将 Server 返回的决策 JSON 输出到 stdout
-   - Server 端收到工具调用后通过 WS 转发给 Hand，等 Hand 返回后回复 HTTP
+### 4.1 主路径代码
 
-4. **Session/Prompt 的消息流**：
-   - Hand 发 WS `prompt` → Server 通过 stdin 发给 claude CLI
-   - claude CLI 输出通过 stdout 流式到 Server → Server 通过 WS 发 `text_chunk` 给 Hand
-   - claude CLI 触发工具调用 → Hook 脚本 HTTP → Server WS → Hand 执行 → WS → Server HTTP → Hook 脚本 → claude CLI
-
-5. **两个通信端口**：
-   - 外部端口（如 8765）：Hand WS 连接
-   - 内部端口或 Unix Socket：Hook 脚本 HTTP 回调（应只允许本机访问）
-
-## 四、需要改造的代码
-
-### 4.1 需要新增/修改的 Server 端代码
-
-| 文件 | 改动 |
+| 路径 | 作用 |
 |------|------|
-| `internal/server/session.go` | 不再实现 `acp.Handler`。改为：通过 stdin/stdout 与 claude CLI 通信（stream-json 格式），生成 settings.json 配置 Hook |
-| `internal/server/server.go` | 新增 `/internal/tool-call` HTTP 端点，接收 Hook 脚本的回调 |
-| `internal/server/hookbridge.go`（新）| Hook HTTP 回调处理：接收工具调用 → ToolRelay.CreatePending → WS 转发 Hand → 等 Hand 返回 → HTTP 响应给 Hook 脚本 |
+| `server/src/index.ts` | TypeScript Server 入口，解析 `--port` / `--model` |
+| `server/src/server.ts` | HTTP + WebSocket Server，管理连接与 Session 生命周期 |
+| `server/src/session.ts` | `query()` 驱动、多轮串行化、`hooks.PreToolUse` 工具拦截 |
+| `server/src/relay.ts` | Promise-based ToolRelay，等待 Hand 返回工具结果 |
+| `server/src/protocol.ts` | TypeScript 侧消息协议定义 |
 
-### 4.2 需要改造的 Hook 脚本
+### 4.2 Hand 端代码
 
-| 文件 | 改动 |
+| 路径 | 作用 |
 |------|------|
-| `proxy/dispatch.sh` | 新增 HTTP 回调模式：检测环境变量 `AXON_CALLBACK_URL`，存在则走 HTTP 回调，不存在则走现有本地过滤逻辑 |
-| `proxy/lib.sh` | 新增 `proxy_relay_to_server()` 函数：curl POST 到 Server，阻塞等待响应 |
+| `cmd/hand/main.go` | Hand CLI 入口 |
+| `internal/hand/client.go` | WebSocket 客户端、消息循环、UI 输出 |
+| `internal/hand/executor.go` | 工具分发 |
+| `internal/hand/tools_fs.go` | `Read` / `Write` / `Edit` / `MultiEdit` |
+| `internal/hand/tools_bash.go` | `Bash` |
+| `internal/hand/tools_search.go` | `Grep` / `Glob` |
+| `internal/protocol/` | Go 侧协议与工具结果类型 |
 
-### 4.3 Claude CLI 启动配置
+### 4.3 保留组件
 
-Server 启动 claude CLI 时需要：
-```bash
-claude --input-format stream-json --output-format stream-json \
-  --dangerously-skip-permissions
-```
+| 路径 | 当前状态 |
+|------|----------|
+| `internal/server/` | Go Server fallback，保留作为备用实现 |
+| `internal/claude/` | 历史 stream-json 支撑代码，非当前主路径 |
+| `proxy/` | Phase 0 Hook/审计系统保留，Axon relay 已实现但非主路径 |
+| `internal/acp/` | 已删除 |
 
-同时在会话目录下生成 `.claude/settings.local.json`：
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": ".*",
-      "hooks": [{
-        "type": "command",
-        "command": "AXON_CALLBACK_URL=http://localhost:${INTERNAL_PORT}/internal/tool-call AXON_SESSION_ID=${SESSION_ID} \"${PROXY_DIR}/dispatch.sh\""
-      }]
-    }]
-  }
-}
-```
+## 五、当前状态与维护边界
 
-### 4.4 internal/acp/ 的变化
+### 已完成
 
-当前的 `internal/acp/` 包实现了完整的 ACP JSON-RPC Client，包含 Handler 接口。方案 B 下：
-- `internal/acp/client.go` 的 Handler 机制**不再需要**（claude CLI 不会发 ACP 回调）
-- 但 `jsonrpc.go` 的 Transport 和 `types.go` 的 SessionUpdate 类型仍然有用——claude CLI 的 `--output-format stream-json` 输出就是这些类型
-- 需要简化：去掉 Handler 接口，改为纯 stdin writer + stdout reader
+- 选项 C 主路径已落地：TypeScript Server + Claude Agent SDK + WebSocket Hand
+- Go Hand 已适配 Claude 原生工具：`Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`
+- 文本流、思考流、工具调用与结果回传已打通
+- Go Server 保留为 fallback
 
-### 4.5 stream-json 格式
+### 已明确删除或不再需要
 
-claude CLI 的 `--output-format stream-json` 输出的不是 ACP JSON-RPC，而是 SDK 定义的 `SDKMessage` 格式（POC 中验证过）：
-
-```jsonl
-{"type":"system","subtype":"init",...}
-{"type":"assistant","message":{"content":[{"type":"text","text":"..."}]},...}
-{"type":"result","subtype":"success","result":"..."}
-```
-
-`--input-format stream-json` 的输入格式：
-```jsonl
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"用户输入"}]}}
-```
-
-这些不是 JSON-RPC，是独立的 NDJSON 消息。需要定义对应的 Go 类型。
-
-## 五、不需要改动的代码
-
-| 文件/目录 | 原因 |
-|-----------|------|
-| `internal/server/relay.go` | ToolRelay 的 CreatePending/Resolve/Reject 机制不变 |
-| `internal/hand/` 全部 | Hand CLI 的 WS 客户端 + Executor + UI 不变 |
-| `internal/protocol/messages.go` | WS 消息协议不变 |
-| `cmd/hand/main.go` | 不变 |
-| `proxy/lib.sh` | 在现有基础上扩展，不破坏本地过滤功能 |
-| `proxy/dispatch.sh` | 在现有基础上扩展，不破坏本地过滤功能 |
+- HTTP hookbridge 不是选项 C 主路径
+- `dispatch.sh` relay 不是选项 C 主路径
+- `settings.json` / `settings.local.json` 生成不是选项 C 主路径
+- ACP client-side methods 不再作为当前实现前提
 
 ## 六、测试 & 验证
 
-- 现有 12 个测试需要适配 session.go 的改造
-- 新增 hookbridge 的测试：模拟 Hook 脚本 HTTP 回调 → Server 处理 → 返回决策 JSON
-- 端到端测试需要实际的 claude CLI
+- 已有 12 个集成测试和 Hand 工具测试覆盖 Go 侧主逻辑
+- TypeScript Server 的主验证点是：`query()` 流式输出、`hooks.PreToolUse` 转发、WS 往返闭环
+- 端到端验证仍需要实际可用的 `claude` CLI 与认证环境
 
 ## 七、用量监控
 
