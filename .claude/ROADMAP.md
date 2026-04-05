@@ -62,8 +62,8 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 |------|----------|------|
 | Axon Server | TypeScript (Node.js) | 当前主实现，直接使用 `@anthropic-ai/claude-agent-sdk` |
 | Hand CLI | TypeScript (Node.js) | 终端交互与本地工具执行 |
-| Hand Web | TypeScript (待定) | 后续浏览器端 |
-| 编辑器集成 | ACP Server（规划中） | 预计由 Hand 侧暴露 |
+| Hand Web | TypeScript | 浏览器端已实现，持续补可靠性 |
+| 编辑器集成 | ACP Server | 已由 Hand 侧暴露 |
 | 工具拦截 | SDK `hooks.PreToolUse` | 进程内回调，不走 HTTP hookbridge |
 | Server ↔ Hand | WebSocket | 全双工文本流与工具回传 |
 | Proxy | Bash Hook 系统 | `proxy/` 独立可用，但非主路径 |
@@ -100,7 +100,7 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 - [x] 使用 npm workspaces 统一管理 server/ 和 hand/
 - [x] 移除所有 Go 代码
 
-### Phase 3: Brain 容器化
+### Phase 3: Brain 容器化 ✅ 已完成
 
 **目标**：将主路径打包成可分发的 Brain 运行环境。
 
@@ -112,7 +112,7 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 
 **依赖**：Phase 2
 
-### Phase 4: Hand CLI — ACP Server
+### Phase 4: Hand CLI — ACP Server ✅ 已完成
 
 **目标**：Hand CLI 对外暴露 ACP 接口，让编辑器可把 Hand 当作 Claude Code 使用。
 
@@ -123,7 +123,7 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 
 **依赖**：Phase 2
 
-### Phase 5: Hand Web
+### Phase 5: Hand Web ✅ 已完成
 
 **目标**：提供浏览器端交互界面。
 
@@ -135,33 +135,34 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 
 **依赖**：Phase 2
 
-### Phase 6: 生产化
+### Phase 6: 生产化 🚧 进行中
 
 **目标**：安全、可管理、可扩展。
 
 #### 6.1 认证与安全
 
-- Token 认证
-- TLS 由反向代理承担
-- Token 生命周期管理
+- [x] Token 认证
+- [ ] TLS 由反向代理承担
+- [x] Token 生命周期管理
 
 #### 6.2 管理后台
 
-- 用户与 Token 管理
-- 当前在线 Hand 列表
-- Session 与工具调用统计
-- 结构化日志与监控
+- [x] 用户与 Token 管理
+- [x] 当前在线 Hand 列表
+- [x] Session 与工具调用统计
+- [x] 结构化日志
+- [ ] 监控接入
 
 #### 6.3 Multi-Hand 调度
 
-- 多 Hand 同时连接时的任务分配
-- Session Affinity
+- [ ] 多 Hand 同时连接时的任务分配
+- [x] Session Affinity
 
 #### 6.4 可靠性
 
-- 优雅关闭
-- 断线恢复
-- Prometheus metrics / tracing
+- [x] 优雅关闭
+- [~] 断线恢复
+- [ ] Prometheus metrics / tracing
 
 **依赖**：Phase 3-5
 

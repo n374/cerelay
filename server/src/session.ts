@@ -9,6 +9,35 @@ import type {
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
 
 type SessionStatus = "idle" | "active" | "ended";
+type SupportedToolName = "Read" | "Write" | "Edit" | "MultiEdit" | "Bash" | "Grep" | "Glob";
+type CanUseToolHandler = (
+  toolName: string,
+  input: Record<string, unknown>,
+  options: {
+    signal: AbortSignal;
+    suggestions?: unknown[];
+    blockedPath?: string;
+    decisionReason?: string;
+    title?: string;
+    displayName?: string;
+    description?: string;
+    toolUseID: string;
+    agentID?: string;
+  }
+) => Promise<
+  | { behavior: "allow" }
+  | { behavior: "deny"; message: string }
+>;
+
+const SUPPORTED_REMOTE_TOOLS = new Set<SupportedToolName>([
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Bash",
+  "Grep",
+  "Glob",
+]);
 
 interface HookInput {
   tool_name: string;
@@ -58,6 +87,7 @@ export class BrainSession {
 
   private readonly relay = new ToolRelay();
   private readonly transport: SessionTransport;
+  private readonly canUseTool: CanUseToolHandler;
   private status: SessionStatus = "idle";
   private closed = false;
   private promptChain: Promise<void> = Promise.resolve();
@@ -68,6 +98,7 @@ export class BrainSession {
     this.model = options.model;
     this.transport = options.transport;
     this.createdAt = new Date();
+    this.canUseTool = async (toolName: string) => this.handleCanUseTool(toolName);
   }
 
   static createSession(options: BrainSessionOptions): BrainSession {
@@ -119,8 +150,8 @@ export class BrainSession {
         options: {
           cwd: this.cwd,
           model: this.model,
-          permissionMode: "bypassPermissions",
-          allowDangerouslySkipPermissions: true,
+          permissionMode: "default",
+          canUseTool: this.canUseTool,
           maxTurns: 100,
           hooks: {
             PreToolUse: [
@@ -195,6 +226,15 @@ export class BrainSession {
       throw new Error("会话已关闭");
     }
 
+    if (!isSupportedRemoteTool(input.tool_name)) {
+      return {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Axon 不支持工具 ${input.tool_name}`,
+        additionalContext: "",
+      };
+    }
+
     const requestId = `hook-${this.id}-${randomUUID()}`;
     const pending = this.relay.createPending(requestId, input.tool_name);
 
@@ -240,6 +280,22 @@ export class BrainSession {
       error: error ? error.message : undefined,
     });
   }
+
+  private async handleCanUseTool(toolName: string): Promise<{
+    behavior: "allow";
+  } | {
+    behavior: "deny";
+    message: string;
+  }> {
+    if (isSupportedRemoteTool(toolName)) {
+      return { behavior: "allow" };
+    }
+
+    return {
+      behavior: "deny",
+      message: `Axon 当前仅允许远程执行以下工具: ${Array.from(SUPPORTED_REMOTE_TOOLS).join(", ")}`,
+    };
+  }
 }
 
 function summarizeToolResult(result: RemoteToolResult): string {
@@ -268,4 +324,8 @@ function asError(error: unknown): Error {
   }
 
   return new Error(typeof error === "string" ? error : JSON.stringify(error));
+}
+
+function isSupportedRemoteTool(toolName: string): toolName is SupportedToolName {
+  return SUPPORTED_REMOTE_TOOLS.has(toolName as SupportedToolName);
 }

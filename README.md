@@ -186,10 +186,17 @@ After Hand connects, it creates a session automatically. Each prompt triggers on
 | Phase 0 | Proxy Hook 安全过滤系统 | ✅ 已完成 |
 | Phase 1 | SDK / ACP 可行性 POC | ✅ 已完成 |
 | Phase 2 | TypeScript Server + SDK hooks + TypeScript Hand | ✅ 已完成 |
-| Phase 3 | Brain 容器化（Docker） | 待开始 |
-| Phase 4 | Hand CLI ACP Server（编辑器集成） | 待开始 |
-| Phase 5 | Hand Web（浏览器端） | 待开始 |
-| Phase 6 | 生产化（TLS / 认证 / Multi-Hand） | 待开始 |
+| Phase 3 | Brain 容器化（Docker） | ✅ 已完成 |
+| Phase 4 | Hand CLI ACP Server（编辑器集成） | ✅ 已完成 |
+| Phase 5 | Hand Web（浏览器端） | ✅ 已完成 |
+| Phase 6 | 生产化（TLS / 认证 / Multi-Hand） | 🚧 进行中 |
+
+当前未完成的高优先级项：
+
+- Web/Hand 断线后的 session 恢复，而不只是重连后新建 session
+- `query()` 权限策略从 `bypassPermissions` 收敛到更细粒度的 `canUseTool`
+- 指标与 tracing（Prometheus / OpenTelemetry）
+- 反向代理下的 TLS / 部署示例
 
 详细规划见 [`.claude/ROADMAP.md`](./.claude/ROADMAP.md)。
 

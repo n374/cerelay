@@ -21,10 +21,15 @@ const state = {
   cwd: DEFAULT_CWD,
   model: DEFAULT_MODEL,
   isWaiting: false, // 等待 session_end
+  shouldReconnect: false,
+  reconnectAttempts: 0,
+  reconnectTimer: /** @type {number|null} */ (null),
   /** @type {Map<string, HTMLElement>} */
   toolItems: new Map(),
   /** 当前正在累积的 assistant 消息元素 */
   currentAssistantEl: /** @type {HTMLElement|null} */ (null),
+  /** 当前正在累积的 thought 消息元素 */
+  currentThoughtEl: /** @type {HTMLElement|null} */ (null),
 };
 
 // ============================================================
@@ -143,21 +148,34 @@ async function onConnectClick() {
 // WebSocket 连接
 // ============================================================
 
-async function connectWebSocket() {
+async function connectWebSocket(options = {}) {
+  const autoReconnect = options.autoReconnect === true;
+  clearReconnectTimer();
+
   if (state.ws) {
+    state.ws.onopen = null;
+    state.ws.onmessage = null;
+    state.ws.onclose = null;
+    state.ws.onerror = null;
     state.ws.close();
     state.ws = null;
   }
 
+  state.shouldReconnect = true;
   setStatus("connecting");
-  appendSystemMessage("正在连接 Brain...");
+  appendSystemMessage(autoReconnect ? "正在重新连接 Brain..." : "正在连接 Brain...");
 
   const ws = new WebSocket(state.brainUrl);
   state.ws = ws;
 
   ws.onopen = () => {
+    if (state.ws !== ws) {
+      return;
+    }
+
+    state.reconnectAttempts = 0;
     setStatus("connected");
-    appendSystemMessage("已连接");
+    appendSystemMessage(autoReconnect ? "已重新连接" : "已连接");
     dom.btnNewSession.classList.remove("hidden");
     // 自动创建 session
     void createNewSession();
@@ -173,20 +191,52 @@ async function connectWebSocket() {
   };
 
   ws.onclose = () => {
+    if (state.ws === ws) {
+      state.ws = null;
+    }
+
     setStatus("disconnected");
     state.sessionId = null;
-    state.ws = null;
+    state.isWaiting = false;
     setInputEnabled(false);
     dom.btnNewSession.classList.add("hidden");
     dom.sessionLabel.classList.add("hidden");
     dom.sessionIdEl.classList.add("hidden");
+    state.currentAssistantEl = null;
+    state.currentThoughtEl = null;
     appendSystemMessage("连接已断开");
+
+    if (state.shouldReconnect) {
+      scheduleReconnect();
+    }
   };
 
   ws.onerror = () => {
     appendSystemMessage("连接错误");
     setStatus("disconnected");
   };
+}
+
+function scheduleReconnect() {
+  if (state.reconnectTimer !== null || !state.shouldReconnect) {
+    return;
+  }
+
+  state.reconnectAttempts += 1;
+  const delayMs = Math.min(1000 * 2 ** (state.reconnectAttempts - 1), 10000);
+  appendSystemMessage(`连接断开，${Math.round(delayMs / 1000)} 秒后自动重连...`);
+
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = null;
+    void connectWebSocket({ autoReconnect: true });
+  }, delayMs);
+}
+
+function clearReconnectTimer() {
+  if (state.reconnectTimer !== null) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
 }
 
 // ============================================================
@@ -199,6 +249,8 @@ async function createNewSession() {
   }
 
   state.sessionId = null;
+  state.currentAssistantEl = null;
+  state.currentThoughtEl = null;
   setInputEnabled(false);
   clearToolCalls();
 
@@ -248,6 +300,7 @@ function handleServerMessage(msg) {
       if (msg.sessionId === state.sessionId) {
         // 中断当前 assistant 消息，新工具调用从新行开始
         state.currentAssistantEl = null;
+        state.currentThoughtEl = null;
         showToolCall(msg.requestId, msg.toolName, "running");
       }
       break;
@@ -261,6 +314,7 @@ function handleServerMessage(msg) {
     case "session_end":
       if (msg.sessionId === state.sessionId) {
         state.currentAssistantEl = null;
+        state.currentThoughtEl = null;
         state.isWaiting = false;
         setInputEnabled(true);
 
@@ -301,6 +355,7 @@ function sendPrompt() {
   dom.promptInput.value = "";
   appendUserMessage(text);
   state.currentAssistantEl = null;
+  state.currentThoughtEl = null;
   state.isWaiting = true;
   setInputEnabled(false);
 
@@ -332,6 +387,7 @@ function setInputEnabled(enabled) {
 }
 
 function appendUserMessage(text) {
+  state.currentThoughtEl = null;
   const el = document.createElement("div");
   el.className = "message message-user";
   el.textContent = text;
@@ -340,6 +396,7 @@ function appendUserMessage(text) {
 }
 
 function appendTextChunk(text) {
+  state.currentThoughtEl = null;
   if (!state.currentAssistantEl) {
     state.currentAssistantEl = document.createElement("div");
     state.currentAssistantEl.className = "message message-assistant";
@@ -350,15 +407,18 @@ function appendTextChunk(text) {
 }
 
 function appendThoughtChunk(text) {
-  // 思考内容独立展示，不合并
-  const el = document.createElement("div");
-  el.className = "message message-thought";
-  el.textContent = text;
-  dom.messages.appendChild(el);
+  state.currentAssistantEl = null;
+  if (!state.currentThoughtEl) {
+    state.currentThoughtEl = document.createElement("div");
+    state.currentThoughtEl.className = "message message-thought";
+    dom.messages.appendChild(state.currentThoughtEl);
+  }
+  state.currentThoughtEl.textContent += text;
   scrollToBottom();
 }
 
 function appendErrorMessage(message) {
+  state.currentThoughtEl = null;
   const el = document.createElement("div");
   el.className = "message message-error";
   el.textContent = `错误: ${message}`;
@@ -367,6 +427,7 @@ function appendErrorMessage(message) {
 }
 
 function appendSystemMessage(text) {
+  state.currentThoughtEl = null;
   const el = document.createElement("div");
   el.className = "message message-system";
   el.textContent = text;
