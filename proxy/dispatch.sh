@@ -20,7 +20,8 @@
 # ============================================================================
 set -euo pipefail
 
-PROXY_DIR="${CLAUDE_PROXY_DIR:-"${CLAUDE_PROJECT_DIR:-.}"/.claude/proxy}"
+PROXY_DIR="${CLAUDE_PROXY_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"}"
+source "$PROXY_DIR/lib.sh"
 
 # 一次性读取 stdin
 INPUT=$(cat)
@@ -34,6 +35,34 @@ fi
 
 # 安全校验：TOOL_NAME 仅允许字母、数字、下划线、连字符（防路径穿越）
 if [[ "$TOOL_NAME" =~ [^a-zA-Z0-9_-] ]]; then
+  exit 0
+fi
+
+# Axon relay 模式：若设置了回调地址，优先把工具调用转发给 Axon Server
+# Axon relay mode: when callback URL is set, forward the tool call before local proxy dispatch
+if [[ -n "${AXON_CALLBACK_URL:-}" ]]; then
+  TOOL_INPUT_JSON=""
+
+  if command -v jq &>/dev/null; then
+    TOOL_INPUT_JSON=$(printf '%s' "$INPUT" | jq -c '.tool_input' 2>/dev/null || true)
+  elif command -v python3 &>/dev/null; then
+    TOOL_INPUT_JSON=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(json.dumps(data.get("tool_input", None), separators=(",", ":")))
+except Exception:
+    sys.exit(1)
+' 2>/dev/null || true)
+  fi
+
+  if [[ -z "$TOOL_INPUT_JSON" || "$TOOL_INPUT_JSON" == "null" ]]; then
+    proxy_emit_deny "无法提取 tool_input / Failed to extract tool_input"
+    exit 0
+  fi
+
+  printf '{"session_id":"%s","tool_name":"%s","tool_use_id":"","tool_input":%s}\n' \
+    "${AXON_SESSION_ID:-}" "$TOOL_NAME" "$TOOL_INPUT_JSON" | proxy_relay_to_server
   exit 0
 fi
 

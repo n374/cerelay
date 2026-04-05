@@ -1,5 +1,7 @@
 package protocol
 
+import "encoding/json"
+
 // ============================================================================
 // Hand <-> Server WebSocket 消息协议
 //
@@ -25,11 +27,12 @@ type ThoughtChunk struct {
 
 // ToolCall 工具调用请求（需要 Hand 执行）
 type ToolCall struct {
-	Type      string `json:"type"` // "tool_call"
-	SessionID string `json:"sessionId"`
-	RequestID string `json:"requestId"`
-	Method    string `json:"method"` // ACP 方法名，如 "fs/read_text_file", "terminal/create"
-	Params    any    `json:"params"` // 原始 ACP 参数
+	Type      string          `json:"type"` // "tool_call"
+	SessionID string          `json:"sessionId"`
+	RequestID string          `json:"requestId"`
+	ToolName  string          `json:"toolName"`            // Claude 原生工具名
+	ToolUseID string          `json:"toolUseId,omitempty"` // Claude tool_use ID
+	Input     json.RawMessage `json:"input"`               // 工具原始输入
 }
 
 // ToolCallComplete 工具调用完成通知
@@ -37,7 +40,7 @@ type ToolCallComplete struct {
 	Type      string `json:"type"` // "tool_call_complete"
 	SessionID string `json:"sessionId"`
 	RequestID string `json:"requestId"`
-	Method    string `json:"method"`
+	ToolName  string `json:"toolName"`
 }
 
 // SessionEnd 会话结束
@@ -85,11 +88,12 @@ type Prompt struct {
 
 // ToolResult 工具执行结果（Hand -> Server）
 type ToolResult struct {
-	Type      string `json:"type"` // "tool_result"
-	SessionID string `json:"sessionId"`
-	RequestID string `json:"requestId"`
-	Result    any    `json:"result"`         // ACP 方法的返回值
-	Error     string `json:"error,omitempty"` // 错误信息（如果执行失败）
+	Type      string          `json:"type"` // "tool_result"
+	SessionID string          `json:"sessionId"`
+	RequestID string          `json:"requestId"`
+	Output    json.RawMessage `json:"output,omitempty"`  // 工具原始输出
+	Summary   string          `json:"summary,omitempty"` // 工具结果摘要
+	Error     string          `json:"error,omitempty"`   // 工具执行错误
 }
 
 // ListSessions 列出会话请求

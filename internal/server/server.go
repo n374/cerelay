@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -27,14 +28,17 @@ type Server struct {
 	upgrader   websocket.Upgrader
 	mu         sync.RWMutex
 
-	httpServer *http.Server
+	httpServer     *http.Server
+	internalServer *http.Server
+	internalAddr   string
+	internalLn     net.Listener
 }
 
 // NewServer 创建 Server 实例
 func NewServer(port int, model string) *Server {
 	return &Server{
-		port:  port,
-		model: model,
+		port:     port,
+		model:    model,
 		sessions: make(map[string]*BrainSession),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -44,16 +48,35 @@ func NewServer(port int, model string) *Server {
 
 // Start 启动 HTTP 服务器（阻塞）
 func (s *Server) Start() error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/health", s.handleHealth)
+	extMux := http.NewServeMux()
+	extMux.HandleFunc("/ws", s.handleWS)
+	extMux.HandleFunc("/health", s.handleHealth)
+
+	bridge := &HookBridge{server: s}
+	intMux := http.NewServeMux()
+	intMux.Handle("/internal/tool-call", bridge)
+
+	intLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("启动内部 HTTP listener 失败: %w", err)
+	}
+	s.internalLn = intLn
+	s.internalAddr = intLn.Addr().String()
+	s.internalServer = &http.Server{
+		Handler: intMux,
+	}
+	go func() {
+		if serveErr := s.internalServer.Serve(intLn); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("[Server] 内部 HTTP 服务异常退出: %v", serveErr)
+		}
+	}()
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: mux,
+		Handler: extMux,
 	}
 
-	log.Printf("[Server] 启动在 :%d，默认模型: %s", s.port, s.model)
+	log.Printf("[Server] 启动在 :%d，默认模型: %s，内部地址: %s", s.port, s.model, s.internalAddr)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -68,7 +91,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
+	if s.internalServer != nil {
+		return s.internalServer.Shutdown(ctx)
 	}
 	return nil
 }
@@ -180,7 +208,7 @@ func (s *Server) handleCreateSession(ctx context.Context, hc *handConn, msg prot
 		cwd = "."
 	}
 
-	sess, err := NewBrainSession(ctx, id, cwd, model, s.claudePath, hc)
+	sess, err := NewBrainSession(ctx, id, cwd, model, s.claudePath, s.internalAddr, hc)
 	if err != nil {
 		return fmt.Errorf("创建 BrainSession 失败: %w", err)
 	}
@@ -216,17 +244,11 @@ func (s *Server) handleToolResult(msg protocol.ToolResult) error {
 		return fmt.Errorf("会话不存在: %s", msg.SessionID)
 	}
 
-	if msg.Error != "" {
-		sess.relay.Reject(msg.RequestID, fmt.Errorf("%s", msg.Error))
-		return nil
-	}
-
-	// 将 Result 序列化为 json.RawMessage
-	raw, err := json.Marshal(msg.Result)
-	if err != nil {
-		return fmt.Errorf("序列化 tool_result 失败: %w", err)
-	}
-	sess.relay.Resolve(msg.RequestID, raw)
+	sess.relay.Resolve(msg.RequestID, protocol.RemoteToolResult{
+		Output:  msg.Output,
+		Summary: msg.Summary,
+		Error:   msg.Error,
+	})
 	return nil
 }
 

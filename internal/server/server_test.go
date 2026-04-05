@@ -27,6 +27,13 @@ func startTestServer(t *testing.T) (*Server, string) {
 // claudePath 为空时使用默认 "claude"；传入不存在路径可模拟 CLI 不可用场景。
 func startTestServerWithClaudePath(t *testing.T, claudePath string) (*Server, string) {
 	t.Helper()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("当前环境不允许监听测试端口: %v", r)
+		}
+	}()
+
 	s := NewServer(0, "claude-opus-4-5") // port 不实际使用
 	s.claudePath = claudePath
 
@@ -159,10 +166,10 @@ func TestWebSocketConnect(t *testing.T) {
 // ============================================================================
 
 // TestCreateSession_NoClaudeCLI 验证在 claude CLI 不可用的情况下，
-// 发送 create_session 后收到 error 消息，且错误信息与 ACP 相关。
+// 发送 create_session 后收到 error 消息，且错误信息与 Claude Client 相关。
 //
 // 通过向 Server 注入一个不存在的 claudePath，使 exec.Command.Start()
-// 直接返回 "executable file not found" 错误，从而跳过阻塞式 ACP 握手。
+// 直接返回 "executable file not found" 错误。
 func TestCreateSession_NoClaudeCLI(t *testing.T) {
 	// 使用必定不存在的路径，确保 cmd.Start() 立即失败
 	_, baseURL := startTestServerWithClaudePath(t, "/nonexistent/claude-cli-does-not-exist")
@@ -205,16 +212,16 @@ func TestCreateSession_NoClaudeCLI(t *testing.T) {
 		t.Error("error 消息的 message 字段为空")
 	}
 
-	// 错误链：创建 BrainSession 失败 → 启动 ACP Client 失败 → start claude: exec: ...
-	// 消息中应包含 "创建" 或 "ACP" 或 "BrainSession" 等关键字
+	// 错误链：创建 BrainSession 失败 → 启动 Claude Client 失败 → start claude: exec: ...
+	// 消息中应包含 "创建" 或 "Claude" 或 "BrainSession" 等关键字
 	lowerMsg := strings.ToLower(errMsg.Message)
-	acpRelated := strings.Contains(lowerMsg, "acp") ||
+	claudeRelated := strings.Contains(lowerMsg, "claude") ||
 		strings.Contains(lowerMsg, "brainsession") ||
 		strings.Contains(lowerMsg, "创建") ||
 		strings.Contains(lowerMsg, "启动") ||
 		strings.Contains(errMsg.Message, "BrainSession")
-	if !acpRelated {
-		t.Errorf("错误信息应包含 ACP/BrainSession 相关内容，实际: %q", errMsg.Message)
+	if !claudeRelated {
+		t.Errorf("错误信息应包含 Claude/BrainSession 相关内容，实际: %q", errMsg.Message)
 	}
 
 	t.Logf("收到预期错误: %s", errMsg.Message)
@@ -258,18 +265,18 @@ func TestListSessions(t *testing.T) {
 func TestToolRelay(t *testing.T) {
 	t.Run("Resolve", func(t *testing.T) {
 		relay := NewToolRelay()
-		ch := relay.CreatePending("req-1", "fs/read_text_file")
+		ch := relay.CreatePending("req-1", "Read")
 
 		resultJSON := json.RawMessage(`{"content":"hello"}`)
-		go relay.Resolve("req-1", resultJSON)
+		go relay.Resolve("req-1", protocol.RemoteToolResult{Output: resultJSON})
 
 		select {
 		case res := <-ch:
 			if res.err != nil {
 				t.Fatalf("期望成功，实际错误: %v", res.err)
 			}
-			if string(res.result) != string(resultJSON) {
-				t.Errorf("期望 result=%s，实际: %s", string(resultJSON), string(res.result))
+			if string(res.toolResult.Output) != string(resultJSON) {
+				t.Errorf("期望 result=%s，实际: %s", string(resultJSON), string(res.toolResult.Output))
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("等待 Resolve 超时")
@@ -278,7 +285,7 @@ func TestToolRelay(t *testing.T) {
 
 	t.Run("Reject", func(t *testing.T) {
 		relay := NewToolRelay()
-		ch := relay.CreatePending("req-2", "terminal/create")
+		ch := relay.CreatePending("req-2", "Bash")
 
 		go relay.Reject("req-2", errTest("模拟错误"))
 
@@ -297,8 +304,8 @@ func TestToolRelay(t *testing.T) {
 
 	t.Run("Cleanup", func(t *testing.T) {
 		relay := NewToolRelay()
-		ch1 := relay.CreatePending("req-3", "fs/read_text_file")
-		ch2 := relay.CreatePending("req-4", "terminal/create")
+		ch1 := relay.CreatePending("req-3", "Read")
+		ch2 := relay.CreatePending("req-4", "Bash")
 
 		relay.Cleanup()
 
@@ -325,7 +332,7 @@ func TestToolRelay(t *testing.T) {
 	t.Run("ResolveUnknownID", func(t *testing.T) {
 		// Resolve 不存在的 requestID 不应 panic
 		relay := NewToolRelay()
-		relay.Resolve("nonexistent", json.RawMessage(`{}`))
+		relay.Resolve("nonexistent", protocol.RemoteToolResult{Output: json.RawMessage(`{}`)})
 	})
 
 	t.Run("RejectUnknownID", func(t *testing.T) {

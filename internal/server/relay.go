@@ -1,30 +1,34 @@
 package server
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/anthropics/axon/internal/protocol"
 )
 
 const defaultToolTimeout = 120 * time.Second
 
+var errToolCallTimeout = errors.New("等待工具结果超时")
+
 // callResult 保存工具调用结果
 type callResult struct {
-	result json.RawMessage
-	err    error
+	toolResult protocol.RemoteToolResult
+	err        error
 }
 
 // pendingCall 表示一个等待 Hand 回复的工具调用
 type pendingCall struct {
-	ch      chan callResult
-	done    chan struct{} // 通知超时 goroutine 已被 Resolve/Reject
-	method  string
-	created time.Time
+	ch       chan callResult
+	done     chan struct{} // 通知超时 goroutine 已被 Resolve/Reject
+	toolName string
+	created  time.Time
 }
 
 // ToolRelay 管理 pending 的工具调用：
-// ACP 回调 → CreatePending → 等 Hand WS 返回 → Resolve/Reject
+// Hook 回调 → CreatePending → 等 Hand WS 返回 → Resolve/Reject
 type ToolRelay struct {
 	pending map[string]*pendingCall
 	mu      sync.Mutex
@@ -38,15 +42,15 @@ func NewToolRelay() *ToolRelay {
 }
 
 // CreatePending 注册一个 pending 调用，返回接收结果的 channel
-func (r *ToolRelay) CreatePending(requestID, method string) chan callResult {
+func (r *ToolRelay) CreatePending(requestID, toolName string) chan callResult {
 	ch := make(chan callResult, 1)
 	done := make(chan struct{})
 	r.mu.Lock()
 	r.pending[requestID] = &pendingCall{
-		ch:      ch,
-		done:    done,
-		method:  method,
-		created: time.Now(),
+		ch:       ch,
+		done:     done,
+		toolName: toolName,
+		created:  time.Now(),
 	}
 	r.mu.Unlock()
 
@@ -56,7 +60,7 @@ func (r *ToolRelay) CreatePending(requestID, method string) chan callResult {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			r.Reject(requestID, fmt.Errorf("工具调用超时（%s, method=%s）", requestID, method))
+			r.Reject(requestID, fmt.Errorf("%w（requestID=%s, toolName=%s）", errToolCallTimeout, requestID, toolName))
 		case <-done:
 			// 已被 Resolve/Reject 处理
 		}
@@ -66,7 +70,7 @@ func (r *ToolRelay) CreatePending(requestID, method string) chan callResult {
 }
 
 // Resolve 用成功结果完成一个 pending 调用
-func (r *ToolRelay) Resolve(requestID string, result json.RawMessage) {
+func (r *ToolRelay) Resolve(requestID string, result protocol.RemoteToolResult) {
 	r.mu.Lock()
 	call, ok := r.pending[requestID]
 	if ok {
@@ -75,7 +79,7 @@ func (r *ToolRelay) Resolve(requestID string, result json.RawMessage) {
 	r.mu.Unlock()
 
 	if ok {
-		call.ch <- callResult{result: result}
+		call.ch <- callResult{toolResult: result}
 		close(call.done)
 	}
 }

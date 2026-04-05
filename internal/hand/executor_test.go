@@ -3,14 +3,12 @@ package hand
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/anthropics/axon/internal/acp"
 )
 
-// mustMarshal 将任意值序列化为 json.RawMessage，测试中 panic on error
+// mustMarshal 将任意值序列化为 json.RawMessage，测试中 panic on error。
 func mustMarshal(v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -19,210 +17,278 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-// TestFsReadTextFile 创建临时文件，通过 Execute 读取，验证内容正确
-func TestFsReadTextFile(t *testing.T) {
-	f, err := os.CreateTemp("", "axon-read-*.txt")
-	if err != nil {
-		t.Fatalf("创建临时文件失败: %v", err)
-	}
-	defer os.Remove(f.Name())
-
+func TestRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "read.txt")
 	content := "hello axon\n中文内容\n"
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("写入临时文件失败: %v", err)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
 	}
-	f.Close()
 
 	ex := NewExecutor()
-	raw := mustMarshal(acp.ReadTextFileParams{Path: f.Name()})
-	result, err := ex.Execute("fs/read_text_file", raw)
+	result, err := ex.Execute("Read", mustMarshal(map[string]any{
+		"file_path": path,
+	}))
 	if err != nil {
-		t.Fatalf("Execute 返回错误: %v", err)
+		t.Fatalf("Read 返回错误: %v", err)
 	}
 
-	got, ok := result.(*acp.ReadTextFileResult)
+	got, ok := result.(*readOutput)
 	if !ok {
 		t.Fatalf("返回类型不匹配，got %T", result)
 	}
 	if got.Content != content {
-		t.Errorf("内容不匹配\n期望: %q\n实际: %q", content, got.Content)
+		t.Fatalf("内容不匹配，期望 %q，实际 %q", content, got.Content)
 	}
 }
 
-// TestFsReadTextFile_NotFound 读取不存在的文件，验证返回错误
-func TestFsReadTextFile_NotFound(t *testing.T) {
+func TestReadNotFound(t *testing.T) {
 	ex := NewExecutor()
-	raw := mustMarshal(acp.ReadTextFileParams{Path: "/tmp/axon-nonexistent-file-xyz.txt"})
-	_, err := ex.Execute("fs/read_text_file", raw)
+	_, err := ex.Execute("Read", mustMarshal(map[string]any{
+		"file_path": filepath.Join(t.TempDir(), "missing.txt"),
+	}))
 	if err == nil {
-		t.Fatal("期望返回错误，实际 err == nil")
+		t.Fatal("期望 Read 返回错误，实际 err == nil")
 	}
 }
 
-// TestFsWriteTextFile 通过 Execute 写入临时文件，再读取验证内容
-func TestFsWriteTextFile(t *testing.T) {
-	f, err := os.CreateTemp("", "axon-write-*.txt")
-	if err != nil {
-		t.Fatalf("创建临时文件失败: %v", err)
+func TestReadWithOffsetLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slice.txt")
+	if err := os.WriteFile(path, []byte("abcdef"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
 	}
-	f.Close()
-	defer os.Remove(f.Name())
 
-	content := "written by executor\n写入测试\n"
 	ex := NewExecutor()
-	raw := mustMarshal(acp.WriteTextFileParams{Path: f.Name(), Content: content})
-	result, err := ex.Execute("fs/write_text_file", raw)
+	result, err := ex.Execute("Read", mustMarshal(map[string]any{
+		"file_path": path,
+		"offset":    2,
+		"limit":     3,
+	}))
 	if err != nil {
-		t.Fatalf("Execute 返回错误: %v", err)
+		t.Fatalf("Read 返回错误: %v", err)
 	}
 
-	got, ok := result.(*acp.WriteTextFileResult)
+	got := result.(*readOutput)
+	if got.Content != "cde" {
+		t.Fatalf("切片内容不匹配，期望 %q，实际 %q", "cde", got.Content)
+	}
+}
+
+func TestWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "write.txt")
+	content := "written by executor\n"
+
+	ex := NewExecutor()
+	result, err := ex.Execute("Write", mustMarshal(map[string]any{
+		"file_path": path,
+		"content":   content,
+	}))
+	if err != nil {
+		t.Fatalf("Write 返回错误: %v", err)
+	}
+
+	got, ok := result.(*pathOutput)
 	if !ok {
 		t.Fatalf("返回类型不匹配，got %T", result)
 	}
-	if !got.Success {
-		t.Error("WriteTextFileResult.Success 应为 true")
+	if got.Path != path {
+		t.Fatalf("返回路径不匹配，期望 %q，实际 %q", path, got.Path)
 	}
 
-	// 直接读文件验证内容
-	data, err := os.ReadFile(f.Name())
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("读取写入后的文件失败: %v", err)
+		t.Fatalf("读取写入结果失败: %v", err)
 	}
 	if string(data) != content {
-		t.Errorf("写入内容不匹配\n期望: %q\n实际: %q", content, string(data))
+		t.Fatalf("写入内容不匹配，期望 %q，实际 %q", content, string(data))
 	}
 }
 
-// TestTerminalCreateAndWait 启动 echo hello，等待退出，验证 exitCode=0 且输出包含 "hello"
-func TestTerminalCreateAndWait(t *testing.T) {
+func TestEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "edit.txt")
+	if err := os.WriteFile(path, []byte("hello axon"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
 	ex := NewExecutor()
-
-	// 创建 terminal
-	createRaw := mustMarshal(acp.CreateTerminalParams{
-		Command: "echo",
-		Args:    []string{"hello"},
-	})
-	createRes, err := ex.Execute("terminal/create", createRaw)
+	_, err := ex.Execute("Edit", mustMarshal(map[string]any{
+		"file_path":  path,
+		"old_string": "axon",
+		"new_string": "claude",
+	}))
 	if err != nil {
-		t.Fatalf("terminal/create 返回错误: %v", err)
-	}
-	created, ok := createRes.(*acp.CreateTerminalResult)
-	if !ok {
-		t.Fatalf("返回类型不匹配，got %T", createRes)
-	}
-	termID := created.TerminalID
-	if termID == "" {
-		t.Fatal("TerminalID 为空")
+		t.Fatalf("Edit 返回错误: %v", err)
 	}
 
-	// 等待退出
-	waitRaw := mustMarshal(acp.WaitForTerminalExitParams{TerminalID: termID})
-	waitRes, err := ex.Execute("terminal/wait_for_exit", waitRaw)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("terminal/wait_for_exit 返回错误: %v", err)
+		t.Fatalf("读取编辑结果失败: %v", err)
 	}
-	waited, ok := waitRes.(*acp.WaitForTerminalExitResult)
-	if !ok {
-		t.Fatalf("返回类型不匹配，got %T", waitRes)
-	}
-	if waited.ExitCode != 0 {
-		t.Errorf("exitCode 应为 0，实际 %d", waited.ExitCode)
-	}
-	if !strings.Contains(waited.Output, "hello") {
-		t.Errorf("输出应包含 \"hello\"，实际: %q", waited.Output)
+	if string(data) != "hello claude" {
+		t.Fatalf("编辑结果不匹配，期望 %q，实际 %q", "hello claude", string(data))
 	}
 }
 
-// TestTerminalOutput 启动稍慢命令，在执行期间轮询 terminal/output，
-// 最终通过 wait_for_exit 验证完整输出包含两行
-func TestTerminalOutput(t *testing.T) {
+func TestEditOldStringNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "edit-miss.txt")
+	if err := os.WriteFile(path, []byte("hello axon"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
 	ex := NewExecutor()
-
-	createRaw := mustMarshal(acp.CreateTerminalParams{
-		Command: "sh",
-		Args:    []string{"-c", "echo line1; sleep 0.1; echo line2"},
-	})
-	createRes, err := ex.Execute("terminal/create", createRaw)
-	if err != nil {
-		t.Fatalf("terminal/create 返回错误: %v", err)
-	}
-	created := createRes.(*acp.CreateTerminalResult)
-	termID := created.TerminalID
-
-	// 短暂等待第一行输出就绪
-	time.Sleep(30 * time.Millisecond)
-
-	// 获取当前输出（进程可能还在运行）
-	outRaw := mustMarshal(acp.TerminalOutputParams{TerminalID: termID})
-	outRes, err := ex.Execute("terminal/output", outRaw)
-	if err != nil {
-		t.Fatalf("terminal/output 返回错误: %v", err)
-	}
-	outResult, ok := outRes.(*acp.TerminalOutputResult)
-	if !ok {
-		t.Fatalf("返回类型不匹配，got %T", outRes)
-	}
-	// 不强断言 line1 已出现，避免时序抖动；只验证调用不出错
-	_ = outResult.Output
-
-	// 等待完成，获取完整输出
-	waitRaw := mustMarshal(acp.WaitForTerminalExitParams{TerminalID: termID})
-	waitRes, err := ex.Execute("terminal/wait_for_exit", waitRaw)
-	if err != nil {
-		t.Fatalf("terminal/wait_for_exit 返回错误: %v", err)
-	}
-	waited := waitRes.(*acp.WaitForTerminalExitResult)
-	if !strings.Contains(waited.Output, "line1") {
-		t.Errorf("完整输出应包含 \"line1\"，实际: %q", waited.Output)
-	}
-	if !strings.Contains(waited.Output, "line2") {
-		t.Errorf("完整输出应包含 \"line2\"，实际: %q", waited.Output)
-	}
-}
-
-// TestTerminalKillAndRelease 启动 sleep 60，kill 后 release，验证 terminal 不再存在
-func TestTerminalKillAndRelease(t *testing.T) {
-	ex := NewExecutor()
-
-	createRaw := mustMarshal(acp.CreateTerminalParams{
-		Command: "sleep",
-		Args:    []string{"60"},
-	})
-	createRes, err := ex.Execute("terminal/create", createRaw)
-	if err != nil {
-		t.Fatalf("terminal/create 返回错误: %v", err)
-	}
-	created := createRes.(*acp.CreateTerminalResult)
-	termID := created.TerminalID
-
-	// Kill
-	killRaw := mustMarshal(acp.KillTerminalParams{TerminalID: termID})
-	_, err = ex.Execute("terminal/kill", killRaw)
-	if err != nil {
-		t.Fatalf("terminal/kill 返回错误: %v", err)
-	}
-
-	// Release
-	releaseRaw := mustMarshal(acp.ReleaseTerminalParams{TerminalID: termID})
-	_, err = ex.Execute("terminal/release", releaseRaw)
-	if err != nil {
-		t.Fatalf("terminal/release 返回错误: %v", err)
-	}
-
-	// 验证 terminal 已被删除：再次调用 terminal/output 应返回错误
-	outRaw := mustMarshal(acp.TerminalOutputParams{TerminalID: termID})
-	_, err = ex.Execute("terminal/output", outRaw)
+	_, err := ex.Execute("Edit", mustMarshal(map[string]any{
+		"file_path":  path,
+		"old_string": "missing",
+		"new_string": "claude",
+	}))
 	if err == nil {
-		t.Fatal("release 后应无法获取 terminal，期望错误，实际 err == nil")
+		t.Fatal("期望 Edit 返回错误，实际 err == nil")
 	}
 }
 
-// TestUnknownMethod 调用未知方法，验证返回错误
-func TestUnknownMethod(t *testing.T) {
+func TestMultiEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "multi-edit.txt")
+	if err := os.WriteFile(path, []byte("alpha beta gamma"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
 	ex := NewExecutor()
-	_, err := ex.Execute("unknown/method", mustMarshal(struct{}{}))
+	_, err := ex.Execute("MultiEdit", mustMarshal(map[string]any{
+		"file_path": path,
+		"edits": []map[string]string{
+			{"old_string": "alpha", "new_string": "one"},
+			{"old_string": "gamma", "new_string": "three"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("MultiEdit 返回错误: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取编辑结果失败: %v", err)
+	}
+	if string(data) != "one beta three" {
+		t.Fatalf("MultiEdit 结果不匹配，期望 %q，实际 %q", "one beta three", string(data))
+	}
+}
+
+func TestBash(t *testing.T) {
+	ex := NewExecutor()
+	result, err := ex.Execute("Bash", mustMarshal(map[string]any{
+		"command": "printf 'hello'",
+	}))
+	if err != nil {
+		t.Fatalf("Bash 返回错误: %v", err)
+	}
+
+	got, ok := result.(*bashOutput)
+	if !ok {
+		t.Fatalf("返回类型不匹配，got %T", result)
+	}
+	if got.ExitCode != 0 {
+		t.Fatalf("exit_code 不匹配，期望 0，实际 %d", got.ExitCode)
+	}
+	if got.Stdout != "hello" {
+		t.Fatalf("stdout 不匹配，期望 %q，实际 %q", "hello", got.Stdout)
+	}
+}
+
+func TestBashNonZeroExitCode(t *testing.T) {
+	ex := NewExecutor()
+	result, err := ex.Execute("Bash", mustMarshal(map[string]any{
+		"command": "echo fail >&2; exit 7",
+	}))
+	if err != nil {
+		t.Fatalf("非零退出码不应作为错误返回，实际: %v", err)
+	}
+
+	got := result.(*bashOutput)
+	if got.ExitCode != 7 {
+		t.Fatalf("exit_code 不匹配，期望 7，实际 %d", got.ExitCode)
+	}
+	if !strings.Contains(got.Stderr, "fail") {
+		t.Fatalf("stderr 应包含 fail，实际 %q", got.Stderr)
+	}
+}
+
+func TestGrep(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grep.txt")
+	if err := os.WriteFile(path, []byte("first line\nneedle here\nlast line\n"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
+	ex := NewExecutor()
+	result, err := ex.Execute("Grep", mustMarshal(map[string]any{
+		"pattern": "needle",
+		"path":    dir,
+		"glob":    "*.txt",
+	}))
+	if err != nil {
+		t.Fatalf("Grep 返回错误: %v", err)
+	}
+
+	got, ok := result.(*grepOutput)
+	if !ok {
+		t.Fatalf("返回类型不匹配，got %T", result)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("匹配数量不正确，期望 1，实际 %d", len(got.Matches))
+	}
+	if got.Matches[0].File != path {
+		t.Fatalf("匹配文件不正确，期望 %q，实际 %q", path, got.Matches[0].File)
+	}
+	if got.Matches[0].Line != 2 {
+		t.Fatalf("匹配行号不正确，期望 2，实际 %d", got.Matches[0].Line)
+	}
+}
+
+func TestGlob(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "match.go")
+	if err := os.WriteFile(target, []byte("package test"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "skip.txt"), []byte("ignore"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
+	ex := NewExecutor()
+	result, err := ex.Execute("Glob", mustMarshal(map[string]any{
+		"pattern": "*.go",
+		"path":    dir,
+	}))
+	if err != nil {
+		t.Fatalf("Glob 返回错误: %v", err)
+	}
+
+	got, ok := result.(*globOutput)
+	if !ok {
+		t.Fatalf("返回类型不匹配，got %T", result)
+	}
+	if len(got.Files) != 1 || got.Files[0] != target {
+		t.Fatalf("Glob 结果不正确，实际 %#v", got.Files)
+	}
+}
+
+func TestUnknownTool(t *testing.T) {
+	ex := NewExecutor()
+	_, err := ex.Execute("UnknownTool", mustMarshal(map[string]any{}))
 	if err == nil {
-		t.Fatal("期望未知方法返回错误，实际 err == nil")
+		t.Fatal("期望未知工具返回错误，实际 err == nil")
+	}
+
+	toolErr, ok := err.(*ToolError)
+	if !ok {
+		t.Fatalf("错误类型不匹配，got %T", err)
+	}
+	if toolErr.Code != "unknown_tool" {
+		t.Fatalf("错误码不匹配，期望 %q，实际 %q", "unknown_tool", toolErr.Code)
 	}
 }

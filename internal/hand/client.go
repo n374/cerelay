@@ -146,7 +146,7 @@ func (c *Client) handleMessage(raw []byte) bool {
 			c.ui.PrintError(fmt.Sprintf("解析 tool_call 失败: %v", err))
 			return false
 		}
-		c.ui.PrintToolCall(msg.Method, nil)
+		c.ui.PrintToolCall(msg.ToolName, nil)
 		go c.executeToolCall(msg)
 
 	case "session_end":
@@ -167,46 +167,75 @@ func (c *Client) handleMessage(raw []byte) bool {
 
 // executeToolCall 在 goroutine 中执行工具调用并发回结果
 func (c *Client) executeToolCall(msg protocol.ToolCall) {
-	// 将 Params 转成 json.RawMessage
-	var rawParams json.RawMessage
-	if msg.Params != nil {
-		data, err := json.Marshal(msg.Params)
-		if err != nil {
-			c.sendToolError(msg, fmt.Sprintf("序列化 params 失败: %v", err))
-			return
-		}
-		rawParams = data
-	}
-
-	result, err := c.executor.Execute(msg.Method, rawParams)
+	result, err := c.executor.Execute(msg.ToolName, msg.Input)
 	if err != nil {
-		c.ui.PrintToolResult(msg.Method, false)
-		c.sendToolError(msg, err.Error())
+		c.ui.PrintToolResult(msg.ToolName, false)
+		c.sendToolError(msg, err)
 		return
 	}
 
-	c.ui.PrintToolResult(msg.Method, true)
+	output, err := json.Marshal(result)
+	if err != nil {
+		c.ui.PrintToolResult(msg.ToolName, false)
+		c.sendToolError(msg, fmt.Errorf("序列化 output 失败: %w", err))
+		return
+	}
+
+	c.ui.PrintToolResult(msg.ToolName, true)
 	resp := protocol.ToolResult{
 		Type:      "tool_result",
 		SessionID: msg.SessionID,
 		RequestID: msg.RequestID,
-		Result:    result,
+		Output:    output,
+		Summary:   summarizeToolResult(msg.ToolName, result),
 	}
 	if writeErr := c.writeJSON(resp); writeErr != nil {
 		c.ui.PrintError(fmt.Sprintf("发送 tool_result 失败: %v", writeErr))
 	}
 }
 
-func (c *Client) sendToolError(msg protocol.ToolCall, errMsg string) {
+func (c *Client) sendToolError(msg protocol.ToolCall, err error) {
 	resp := protocol.ToolResult{
 		Type:      "tool_result",
 		SessionID: msg.SessionID,
 		RequestID: msg.RequestID,
-		Error:     errMsg,
+		Error:     formatToolError(err),
 	}
 	if writeErr := c.writeJSON(resp); writeErr != nil {
 		c.ui.PrintError(fmt.Sprintf("发送 tool_result(error) 失败: %v", writeErr))
 	}
+}
+
+// summarizeToolResult 生成给 Hook additionalContext 使用的简短摘要。
+func summarizeToolResult(toolName string, result any) string {
+	switch v := result.(type) {
+	case *readOutput:
+		return fmt.Sprintf("Read 成功，返回 %d 字符", len([]rune(v.Content)))
+	case *pathOutput:
+		return fmt.Sprintf("%s 成功: %s", toolName, v.Path)
+	case *bashOutput:
+		return fmt.Sprintf("Bash 完成，exit_code=%d, stdout=%dB, stderr=%dB", v.ExitCode, len(v.Stdout), len(v.Stderr))
+	case *grepOutput:
+		return fmt.Sprintf("Grep 完成，匹配 %d 项", len(v.Matches))
+	case *globOutput:
+		return fmt.Sprintf("Glob 完成，匹配 %d 个路径", len(v.Files))
+	default:
+		return toolName + " 执行成功"
+	}
+}
+
+// formatToolError 将结构化错误压平成字符串，便于跨进程传输。
+func formatToolError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if toolErr, ok := err.(*ToolError); ok {
+		data, marshalErr := json.Marshal(toolErr)
+		if marshalErr == nil {
+			return string(data)
+		}
+	}
+	return err.Error()
 }
 
 // --- 底层 IO（线程安全） ---

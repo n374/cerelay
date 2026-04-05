@@ -261,3 +261,77 @@ proxy_audit_log() {
     "$timestamp" "$escaped_session" "$tool_name" "$action" "$escaped_detail" \
     >> "$AUDIT_LOG" 2>/dev/null
 }
+
+# ============================================================================
+# Axon Hook Relay
+# ============================================================================
+
+proxy_emit_deny() {
+  # 输出官方 hookSpecificOutput deny JSON / Emit official hookSpecificOutput deny JSON
+  # 用法 / Usage: proxy_emit_deny "reason" ["additionalContext"]
+  local reason="${1:-Access denied by Axon proxy}"
+  local additional_context="${2:-}"
+  local escaped_reason escaped_context
+
+  escaped_reason=$(_json_escape "$reason")
+  escaped_context=$(_json_escape "$additional_context")
+
+  if [[ -n "$additional_context" ]]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s","additionalContext":"%s"}}\n' \
+      "$escaped_reason" "$escaped_context"
+  else
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
+      "$escaped_reason"
+  fi
+}
+
+proxy_emit_allow() {
+  # 输出官方 hookSpecificOutput allow JSON；无参数时 passthrough / Emit official allow JSON; no output when omitted
+  # 用法 / Usage: proxy_emit_allow [updatedInput_json]
+  local updated_input="${1:-}"
+
+  if [[ -z "$updated_input" ]]; then
+    return 0
+  fi
+
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":%s}}\n' \
+    "$updated_input"
+}
+
+proxy_relay_to_server() {
+  # 中继 Hook 请求到 Axon Server；失败时返回 deny / Relay Hook request to Axon Server; deny on failure
+  # 用法 / Usage: proxy_relay_to_server
+  local request_body
+  local response_body
+  local http_code
+
+  if [[ -z "${AXON_CALLBACK_URL:-}" ]]; then
+    proxy_emit_deny "AXON_CALLBACK_URL 未设置 / AXON_CALLBACK_URL is not set"
+    return 0
+  fi
+
+  request_body=$(cat)
+  response_body=$(mktemp "${TMPDIR:-/tmp}/axon-hook-response.XXXXXX") || {
+    proxy_emit_deny "创建临时文件失败 / Failed to create temp file"
+    return 0
+  }
+
+  http_code=$(curl -s --max-time 120 -o "$response_body" -w '%{http_code}' \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary "$request_body" \
+    "$AXON_CALLBACK_URL" 2>/dev/null) || {
+      rm -f "$response_body"
+      proxy_emit_deny "Axon relay 网络错误或超时 / Axon relay network error or timeout"
+      return 0
+    }
+
+  if [[ "$http_code" == "200" ]]; then
+    cat "$response_body"
+    rm -f "$response_body"
+    return 0
+  fi
+
+  rm -f "$response_body"
+  proxy_emit_deny "Axon relay 返回非 200 状态 / Axon relay returned non-200 status"
+}
