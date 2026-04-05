@@ -30,8 +30,3 @@ __pycache__/
 *.pyc
 .venv/
 
-# Go
-*.exe
-/cmd/server/server
-/cmd/hand/hand
-/bin/

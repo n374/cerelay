@@ -71,7 +71,9 @@ export class UI {
       });
 
       // 仅读取一行后立即关闭，避免占用 stdin
+      // 先移除 close listener 再关闭，防止 close 事件误触发 EOFError
       rl.once("line", (line) => {
+        rl.removeAllListeners("close");
         rl.close();
         resolve(line);
       });

@@ -56,6 +56,19 @@ export interface CreateSessionResponse {
   sessionId: string;
 }
 
+export interface SessionInfo {
+  sessionId: string;
+  cwd: string;
+  model?: string;
+  status: "idle" | "active" | "ended";
+  createdAt: string;
+}
+
+export interface SessionList {
+  type: "session_list";
+  sessions: SessionInfo[];
+}
+
 // ============================================================
 // Hand -> Server 消息
 // ============================================================
@@ -81,6 +94,15 @@ export interface ToolResult {
   error?: string;
 }
 
+export interface CloseSession {
+  type: "close_session";
+  sessionId: string;
+}
+
+export interface ListSessions {
+  type: "list_sessions";
+}
+
 // ============================================================
 // Union 类型
 // ============================================================
@@ -90,12 +112,18 @@ export type ServerToHandMessage =
   | CreateSessionResponse
   | ServerError
   | SessionEnd
+  | SessionList
   | TextChunk
   | ThoughtChunk
   | ToolCall
   | ToolCallComplete;
 
-export type HandToServerMessage = CreateSession | Prompt | ToolResult;
+export type HandToServerMessage =
+  | CloseSession
+  | CreateSession
+  | ListSessions
+  | Prompt
+  | ToolResult;
 
 // ============================================================
 // 通用信封，用于初步解析 type 字段

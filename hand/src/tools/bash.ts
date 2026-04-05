@@ -37,58 +37,37 @@ export async function executeBash(
     throw new Error("Bash 的 timeout 必须大于 0");
   }
 
-  return new Promise<BashOutput>((resolve, reject) => {
-    const timeoutMs = timeoutSeconds * 1000;
-    let timedOut = false;
+  const timeoutMs = timeoutSeconds * 1000;
 
-    const child = exec(
+  return new Promise<BashOutput>((resolve) => {
+    exec(
       input.command,
       {
-        shell: "/bin/sh",
         cwd,
         timeout: timeoutMs,
-        // exec 的 timeout 会在超时后 kill 进程，killSignal 默认 SIGTERM
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+        shell: "/bin/bash",
+        killSignal: "SIGTERM",
+      },
+      (error, stdout, stderr) => {
+        // exec timeout 会设置 error.killed = true
+        if (error && (error as any).killed) {
+          // 超时：保留已采集的输出
+          resolve({
+            stdout: stdout + `\n[超时截断: ${timeoutSeconds}s]`,
+            stderr,
+            exit_code: 124, // 与 Go 的 timeout exit code 对齐
+          });
+          return;
+        }
+
+        // 正常完成（包括非零退出码）
+        resolve({
+          stdout,
+          stderr,
+          exit_code: error ? (error as any).code ?? 1 : 0,
+        });
       }
     );
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
-    });
-
-    // 设置手动超时检测标志
-    const timer = setTimeout(() => {
-      timedOut = true;
-    }, timeoutMs);
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-
-      // 超时后 exec 会 kill 进程，signal 为 SIGTERM 或 SIGKILL
-      if (timedOut || signal === "SIGTERM" || signal === "SIGKILL") {
-        reject(
-          new Error(`Bash 执行超时: ${timeoutSeconds} 秒`)
-        );
-        return;
-      }
-
-      resolve({
-        stdout,
-        stderr,
-        // 非零退出码不算错误，与 Go 实现保持一致
-        exit_code: code ?? 0,
-      });
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(new Error(`执行 Bash 命令失败: ${err.message}`));
-    });
   });
 }

@@ -7,7 +7,6 @@ import type {
   Prompt,
   ToolResult,
   ServerToHandMessage,
-  Envelope,
   ToolCall,
   SessionEnd,
   ServerError,
@@ -139,17 +138,16 @@ export class HandClient {
 
       const onMessage = (data: WebSocket.RawData) => {
         const raw = data.toString();
-        let env: Envelope;
+        let msg: ServerToHandMessage;
         try {
-          env = JSON.parse(raw) as Envelope;
+          msg = JSON.parse(raw) as ServerToHandMessage;
         } catch {
           return; // 跳过无法解析的消息
         }
 
-        switch (env.type) {
+        switch (msg.type) {
           case "session_created": {
-            const resp = JSON.parse(raw) as CreateSessionResponse;
-            this.sessionId = resp.sessionId;
+            this.sessionId = (msg as CreateSessionResponse).sessionId;
             ws.off("message", onMessage);
             ws.off("error", onError);
             console.log(`\x1b[36m[已连接] Session: ${this.sessionId}\x1b[0m`);
@@ -160,10 +158,9 @@ export class HandClient {
             // 忽略 connected 通知，继续等待
             break;
           case "error": {
-            const errMsg = JSON.parse(raw) as ServerError;
             ws.off("message", onMessage);
             ws.off("error", onError);
-            reject(new Error(`服务器错误: ${errMsg.message}`));
+            reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
             break;
           }
         }
@@ -181,17 +178,20 @@ export class HandClient {
 
   // 处理单条消息，返回 true 表示会话结束（session_end）
   private handleMessage(raw: string): boolean {
-    let env: Envelope;
+    let msg: ServerToHandMessage;
     try {
-      env = JSON.parse(raw) as Envelope;
+      msg = JSON.parse(raw) as ServerToHandMessage;
     } catch (err) {
       this.ui.printError(`解析消息失败: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
 
-    const msg = JSON.parse(raw) as ServerToHandMessage;
+    if (!msg || !msg.type) {
+      this.ui.printError("收到无效消息：缺少 type 字段");
+      return false;
+    }
 
-    switch (env.type) {
+    switch (msg.type) {
       case "text_chunk": {
         const chunk = msg as TextChunk;
         this.ui.printText(chunk.text);

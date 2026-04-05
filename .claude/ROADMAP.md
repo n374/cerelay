@@ -7,7 +7,7 @@
 │                         Hand 端                              │
 │                                                              │
 │  ┌────────────────────┐      ┌────────────────────────────┐ │
-│  │ Hand CLI (Go)      │      │ Hand Web / Editor (未来)   │ │
+│  │ Hand CLI (TS)      │      │ Hand Web / Editor (未来)   │ │
 │  │ 用户交互            │      │ 复用同一协议                │ │
 │  │ 本地工具执行        │      │                            │ │
 │  └──────────┬─────────┘      └──────────────┬─────────────┘ │
@@ -32,15 +32,14 @@
 └──────────────────────────────────────────────────────────────┘
 
 补充：
-- `internal/server/` 中的 Go Server 保留为 fallback
-- `proxy/` 的 Axon relay 模式已实现，但在选项 C 下不是主路径
-- `internal/acp/` 已删除
+- 整个项目为纯 TypeScript（Node.js），使用 npm workspaces 管理
+- `proxy/` 的 Axon relay 模式已实现，但不是主路径
 ```
 
 ## 交互时序
 
 ```text
-Hand CLI              Axon Server (TS)            Claude Agent SDK / claude CLI
+Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
   │                           │                                 │
   │ ── WS create_session ───→ │                                 │
   │ ←─ WS session_created ─── │                                 │
@@ -62,12 +61,11 @@ Hand CLI              Axon Server (TS)            Claude Agent SDK / claude CLI
 | 组件 | 当前方案 | 说明 |
 |------|----------|------|
 | Axon Server | TypeScript (Node.js) | 当前主实现，直接使用 `@anthropic-ai/claude-agent-sdk` |
-| Hand CLI | Go | 终端交互与本地工具执行 |
+| Hand CLI | TypeScript (Node.js) | 终端交互与本地工具执行 |
 | Hand Web | TypeScript (待定) | 后续浏览器端 |
 | 编辑器集成 | ACP Server（规划中） | 预计由 Hand 侧暴露 |
 | 工具拦截 | SDK `hooks.PreToolUse` | 进程内回调，不走 HTTP hookbridge |
 | Server ↔ Hand | WebSocket | 全双工文本流与工具回传 |
-| Fallback | Go Server | `internal/server/` 保留 |
 | Proxy | Bash Hook 系统 | `proxy/` 独立可用，但非主路径 |
 
 ## 分阶段执行
@@ -91,15 +89,16 @@ Hand CLI              Axon Server (TS)            Claude Agent SDK / claude CLI
 
 ### Phase 2: 选项 C 主链路 ✅ 已完成
 
-**目标**：以最短路径打通 Hand ↔ Server ↔ Claude 的闭环。
+**目标**：以最短路径打通 Hand ↔ Server ↔ Claude 的闭环，并完成 Hand 从 Go 到 TypeScript 的迁移。
 
 **完成内容**：
 - [x] 新建 `server/` TypeScript Server
 - [x] `server/src/session.ts` 使用 `query()` 驱动 Claude Code
 - [x] 在 `hooks.PreToolUse` 中将工具调用转发给 Hand
-- [x] Go Hand 执行 Claude 原生工具：`Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`
+- [x] 新建 `hand/` TypeScript Hand CLI，支持 `Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`
 - [x] WebSocket 文本流、思考流、工具调用、结果回传全部打通
-- [x] Go Server 保留为 fallback
+- [x] 使用 npm workspaces 统一管理 server/ 和 hand/
+- [x] 移除所有 Go 代码
 
 ### Phase 3: Brain 容器化
 
