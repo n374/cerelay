@@ -1,3 +1,4 @@
+import process from "node:process";
 import WebSocket from "ws";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { UI } from "./ui.js";
@@ -15,6 +16,21 @@ import type {
 } from "./protocol.js";
 
 // ============================================================
+// 回调接口：供 ACP Server 等非 UI 场景使用
+// ============================================================
+
+export interface HandClientCallbacks {
+  onTextChunk?: (text: string) => void;
+  onThoughtChunk?: (text: string) => void;
+  onToolCall?: (toolName: string, requestId: string, input: unknown) => void;
+  onToolCallComplete?: (toolName: string, requestId: string) => void;
+}
+
+export interface HandClientOptions {
+  interactiveOutput?: boolean;
+}
+
+// ============================================================
 // HandClient：连接 Axon Server 并处理消息
 // ============================================================
 
@@ -22,18 +38,23 @@ export class HandClient {
   private readonly serverURL: string;
   private ws: WebSocket | null = null;
   private readonly ui: UI;
+  private readonly interactiveOutput: boolean;
   // executor 在 session 创建后含有正确的 cwd，先用占位 cwd 初始化
   private executor: ToolExecutor;
 
   // 当前活跃的 session ID
   private sessionId = "";
 
+  // 最后一次 session_end 结果（供 ACP Server 查询）
+  private lastResult: { result?: string; error?: string } = {};
+
   // 写锁：用 Promise 链模拟互斥，确保并发写安全
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(serverURL: string, cwd: string) {
+  constructor(serverURL: string, cwd: string, options: HandClientOptions = {}) {
     this.serverURL = serverURL;
     this.ui = new UI();
+    this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
   }
 
@@ -73,6 +94,16 @@ export class HandClient {
     await this.waitForSessionCreated();
   }
 
+  // 获取当前 session ID（供 ACP Server 查询）
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  // 获取最后一次 session_end 的结果（供 ACP Server 查询）
+  getLastResult(): { result?: string; error?: string } {
+    return this.lastResult;
+  }
+
   // 发送用户 prompt
   async sendPrompt(text: string): Promise<void> {
     const msg: Prompt = {
@@ -85,6 +116,16 @@ export class HandClient {
 
   // 主消息循环（阻塞直到 session_end 或错误）
   run(): Promise<void> {
+    return this.runInternal(undefined);
+  }
+
+  // 带回调的消息循环（供 ACP Server 使用，不依赖 UI）
+  runWithCallbacks(callbacks: HandClientCallbacks): Promise<void> {
+    return this.runInternal(callbacks);
+  }
+
+  // 内部统一消息循环实现
+  private runInternal(callbacks?: HandClientCallbacks): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -95,7 +136,7 @@ export class HandClient {
 
       const onMessage = (data: WebSocket.RawData) => {
         const raw = data.toString();
-        const done = this.handleMessage(raw);
+        const done = this.handleMessage(raw, callbacks);
         if (done) {
           ws.off("message", onMessage);
           ws.off("error", onError);
@@ -150,7 +191,9 @@ export class HandClient {
             this.sessionId = (msg as CreateSessionResponse).sessionId;
             ws.off("message", onMessage);
             ws.off("error", onError);
-            console.log(`\x1b[36m[已连接] Session: ${this.sessionId}\x1b[0m`);
+            if (this.interactiveOutput) {
+              process.stdout.write(`\x1b[36m[已连接] Session: ${this.sessionId}\x1b[0m\n`);
+            }
             resolve();
             break;
           }
@@ -177,7 +220,8 @@ export class HandClient {
   }
 
   // 处理单条消息，返回 true 表示会话结束（session_end）
-  private handleMessage(raw: string): boolean {
+  // callbacks 为可选，有则通知回调方（ACP 场景），无则使用 UI 输出（CLI 场景）
+  private handleMessage(raw: string, callbacks?: HandClientCallbacks): boolean {
     let msg: ServerToHandMessage;
     try {
       msg = JSON.parse(raw) as ServerToHandMessage;
@@ -194,27 +238,51 @@ export class HandClient {
     switch (msg.type) {
       case "text_chunk": {
         const chunk = msg as TextChunk;
-        this.ui.printText(chunk.text);
+        if (callbacks?.onTextChunk) {
+          callbacks.onTextChunk(chunk.text);
+        } else if (this.interactiveOutput) {
+          this.ui.printText(chunk.text);
+        }
         break;
       }
 
       case "thought_chunk": {
         const chunk = msg as ThoughtChunk;
-        this.ui.printThought(chunk.text);
+        if (callbacks?.onThoughtChunk) {
+          callbacks.onThoughtChunk(chunk.text);
+        } else if (this.interactiveOutput) {
+          this.ui.printThought(chunk.text);
+        }
         break;
       }
 
       case "tool_call": {
         const toolCall = msg as ToolCall;
-        this.ui.printToolCall(toolCall.toolName);
+        if (callbacks?.onToolCall) {
+          callbacks.onToolCall(toolCall.toolName, toolCall.requestId, toolCall.input);
+        } else if (this.interactiveOutput) {
+          this.ui.printToolCall(toolCall.toolName);
+        }
         // 异步执行工具，不阻塞消息循环
         void this.executeToolCall(toolCall);
         break;
       }
 
+      case "tool_call_complete": {
+        const complete = msg as import("./protocol.js").ToolCallComplete;
+        if (callbacks?.onToolCallComplete) {
+          callbacks.onToolCallComplete(complete.toolName, complete.requestId);
+        }
+        break;
+      }
+
       case "session_end": {
         const end = msg as SessionEnd;
-        this.ui.printSessionEnd(end.result, end.error);
+        // 记录最后结果供 ACP Server 查询
+        this.lastResult = { result: end.result, error: end.error };
+        if (!callbacks && this.interactiveOutput) {
+          this.ui.printSessionEnd(end.result, end.error);
+        }
         return true; // 标记会话结束
       }
 
@@ -236,7 +304,9 @@ export class HandClient {
         msg.input
       );
 
-      this.ui.printToolResult(msg.toolName, true);
+      if (this.interactiveOutput) {
+        this.ui.printToolResult(msg.toolName, true);
+      }
 
       const resp: ToolResult = {
         type: "tool_result",
@@ -252,7 +322,9 @@ export class HandClient {
         );
       });
     } catch (err) {
-      this.ui.printToolResult(msg.toolName, false);
+      if (this.interactiveOutput) {
+        this.ui.printToolResult(msg.toolName, false);
+      }
 
       const resp: ToolResult = {
         type: "tool_result",
@@ -271,11 +343,13 @@ export class HandClient {
 
   // 线程安全的 JSON 写入（通过 Promise 链串行化）
   private writeJSON(data: unknown): Promise<void> {
-    // 将写操作追加到队列末尾，确保顺序执行
-    this.writeChain = this.writeChain.then(() =>
-      this.doWriteJSON(data)
-    );
-    return this.writeChain;
+    // 前一次写失败后仍允许后续写继续排队，避免整条链永久 rejected。
+    const nextWrite = this.writeChain
+      .catch(() => undefined)
+      .then(() => this.doWriteJSON(data));
+
+    this.writeChain = nextWrite.catch(() => undefined);
+    return nextWrite;
   }
 
   private doWriteJSON(data: unknown): Promise<void> {

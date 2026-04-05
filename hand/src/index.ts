@@ -2,6 +2,7 @@ import process from "node:process";
 import { Command } from "commander";
 import { HandClient } from "./client.js";
 import { UI, EOFError } from "./ui.js";
+import { runAcpServer } from "./acp/index.js";
 
 const program = new Command();
 
@@ -9,14 +10,36 @@ program
   .name("axon-hand")
   .description("Axon Hand CLI — 用户交互端")
   .option("--server <host:port>", "Axon Server 地址", "localhost:8765")
-  .option("--cwd <dir>", "工作目录（默认当前目录）")
-  .parse(process.argv);
+  .option("--cwd <dir>", "工作目录（默认当前目录）");
 
-const opts = program.opts<{ server: string; cwd?: string }>();
+// ---- 子命令：acp（stdio ACP Server，供编辑器集成）----
+program
+  .command("acp")
+  .description("以 ACP stdio 模式启动，供编辑器（Zed/VS Code）通过 ACP 协议连接")
+  .action(async () => {
+    const opts = program.opts<{ server: string; cwd?: string }>();
+    await runAcpServer({
+      server: opts.server,
+      cwd: opts.cwd ?? process.cwd(),
+    });
+  });
 
-async function main(): Promise<void> {
-  const cwd = opts.cwd ?? process.cwd();
-  const serverURL = `ws://${opts.server}/ws`;
+program.parse(process.argv);
+
+// 如果没有子命令，走默认 CLI 交互模式
+const subcommand = program.args[0];
+if (!subcommand) {
+  const opts = program.opts<{ server: string; cwd?: string }>();
+  void runCliMode(opts.server, opts.cwd);
+}
+
+// ============================================================
+// 默认 CLI 交互模式
+// ============================================================
+
+async function runCliMode(server: string, cwdOverride?: string): Promise<void> {
+  const cwd = cwdOverride ?? process.cwd();
+  const serverURL = `ws://${server}/ws`;
 
   // --- 建立连接 ---
   const client = new HandClient(serverURL, cwd);
@@ -97,8 +120,3 @@ async function main(): Promise<void> {
 
   client.close();
 }
-
-main().catch((err) => {
-  console.error(`[axon-hand] fatal: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});

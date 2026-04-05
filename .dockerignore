@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+server/node_modules
+hand/node_modules
+web/node_modules
+server/dist
+hand/dist
+web/dist
+npm-debug.log*
+docker-compose*.yml
+.DS_Store

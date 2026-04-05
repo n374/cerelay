@@ -1,0 +1,66 @@
+# ============================================================
+# Axon Brain — docker-compose 配置
+# 使用方式：
+#   1. 复制 .env.example 为 .env 并填入 ANTHROPIC_API_KEY
+#   2. docker compose up -d
+# ============================================================
+
+version: "3.9"
+
+services:
+  axon-brain:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: axon-brain:latest
+    container_name: axon-brain
+
+    # 环境变量（通过 .env 文件或 -e 参数传入）
+    environment:
+      # 必填：Anthropic API Key
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # 可选：覆盖端口（容器内端口，与 ports 映射对应）
+      - PORT=${BRAIN_PORT:-8765}
+      # 可选：覆盖模型
+      - MODEL=${MODEL:-claude-sonnet-4-20250514}
+      # 可选：传入 claude CLI 额外配置（JSON 字符串）
+      - CLAUDE_CONFIG=${CLAUDE_CONFIG:-}
+
+    # 端口映射：宿主机端口 → 容器内端口
+    ports:
+      - "${BRAIN_HOST_PORT:-8765}:${BRAIN_PORT:-8765}"
+
+    # 数据持久化：挂载 claude CLI 凭证目录（避免每次重启重新认证）
+    volumes:
+      - claude_config:/home/node/.claude
+      # 可选：挂载工作目录（Brain 执行工具时的默认 cwd）
+      # - ./workspace:/workspace
+
+    # 健康检查（覆盖 Dockerfile 中的定义，可按需调整）
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const http=require('node:http');const port=Number(process.env.PORT||8765);const req=http.get({host:'127.0.0.1',port,path:'/health',timeout:4000},res=>{res.resume();process.exit(res.statusCode===200?0:1);});req.on('error',()=>process.exit(1));req.on('timeout',()=>{req.destroy();process.exit(1);});"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    # 重启策略：除非手动停止，否则自动重启
+    restart: unless-stopped
+
+    # 日志配置：限制日志文件大小
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  # claude CLI 配置持久化卷
+  claude_config:
+    driver: local

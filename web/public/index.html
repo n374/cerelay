@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Axon — AI 编程助手</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部导航栏 -->
+    <header id="header">
+      <div id="header-left">
+        <span id="logo">⚡ Axon</span>
+        <span id="connection-status" class="status-disconnected">● 未连接</span>
+      </div>
+      <div id="header-right">
+        <span id="session-label" class="hidden">Session: </span>
+        <span id="session-id" class="hidden"></span>
+        <button id="btn-new-session" class="hidden">新建会话</button>
+        <button id="btn-settings">设置</button>
+      </div>
+    </header>
+
+    <!-- 主体区域 -->
+    <main id="main">
+      <!-- 左侧：消息流 -->
+      <section id="chat-panel">
+        <div id="messages"></div>
+        <div id="input-area">
+          <textarea
+            id="prompt-input"
+            placeholder="输入消息，Shift+Enter 换行，Enter 发送..."
+            rows="3"
+            disabled
+          ></textarea>
+          <button id="btn-send" disabled>发送</button>
+        </div>
+      </section>
+
+      <!-- 右侧：工具调用状态 -->
+      <aside id="tools-panel">
+        <h3>工具执行</h3>
+        <div id="tool-calls"></div>
+      </aside>
+    </main>
+
+    <!-- 设置弹层 -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>设置</h2>
+        <div class="form-group">
+          <label>Brain 地址</label>
+          <input type="text" id="brain-url" value="" placeholder="ws://localhost:8765/ws" />
+        </div>
+        <div class="form-group">
+          <label>工作目录 (CWD)</label>
+          <input type="text" id="brain-cwd" value="" placeholder="/your/project" />
+        </div>
+        <div class="form-group">
+          <label>模型</label>
+          <input type="text" id="brain-model" value="" placeholder="claude-sonnet-4-20250514" />
+        </div>
+        <div class="modal-actions">
+          <button id="btn-connect">连接</button>
+          <button id="btn-cancel-settings">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

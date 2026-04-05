@@ -1,5 +1,5 @@
 {
   "name": "axon",
   "private": true,
-  "workspaces": ["server", "hand"]
+  "workspaces": ["server", "hand", "web"]
 }
