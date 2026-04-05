@@ -40,20 +40,22 @@ async function runCliMode(server: string, cwdOverride?: string): Promise<void> {
 
   // --- 建立连接 ---
   const client = new HandClient(serverURL, cwd);
+  const ui = new UI();
 
-  try {
-    await client.connect();
-  } catch (err) {
-    console.error(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
+  const ensureSession = async (allowCreateOnRestoreFailure: boolean): Promise<boolean> => {
+    try {
+      await client.ensureSession({
+        cwd,
+        allowCreateOnRestoreFailure,
+      });
+      return true;
+    } catch (err) {
+      ui.printError(`连接或恢复 Session 失败: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  };
 
-  // --- 创建 Session ---
-  try {
-    await client.sendCreateSession(cwd);
-  } catch (err) {
-    console.error(`创建 Session 失败: ${err instanceof Error ? err.message : String(err)}`);
-    client.close();
+  if (!(await ensureSession(false))) {
     process.exit(1);
   }
 
@@ -69,8 +71,27 @@ async function runCliMode(server: string, cwdOverride?: string): Promise<void> {
     process.exit(0);
   });
 
-  const ui = new UI();
   console.log("\x1b[1m\x1b[36mAxon Hand CLI\x1b[0m — 输入 /quit 退出\n");
+
+  const executePrompt = async (text: string): Promise<boolean> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!(await ensureSession(true))) {
+        return false;
+      }
+
+      try {
+        await client.sendPrompt(text);
+        console.log();
+        await client.run();
+        console.log();
+        return true;
+      } catch (err) {
+        ui.printError(`消息发送或执行失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return false;
+  };
 
   // --- 交互循环 ---
   while (true) {
@@ -96,23 +117,9 @@ async function runCliMode(server: string, cwdOverride?: string): Promise<void> {
       break;
     }
 
-    // 发送 prompt
-    try {
-      await client.sendPrompt(input);
-    } catch (err) {
-      ui.printError(`发送 prompt 失败: ${err instanceof Error ? err.message : String(err)}`);
+    if (!(await executePrompt(input))) {
       break;
     }
-
-    // 运行消息循环直到 session_end（prompt 完成，session 仍存活可复用）
-    console.log();
-    try {
-      await client.run();
-    } catch (err) {
-      ui.printError(`消息循环错误: ${err instanceof Error ? err.message : String(err)}`);
-      break;
-    }
-    console.log();
   }
 
   client.close();

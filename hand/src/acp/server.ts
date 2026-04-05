@@ -213,7 +213,7 @@ export class AcpServer {
     }
 
     // 让 HandClient 创建 Brain session，获取 sessionId
-    await client.sendCreateSession(cwd);
+    await client.sendCreateSession(cwd, params?.model);
     const sessionId = client.getSessionId();
 
     if (!sessionId) {
@@ -271,6 +271,18 @@ export class AcpServer {
       return;
     }
 
+    try {
+      await this.ensureSessionConnected(session);
+    } catch (error) {
+      this.sessions.delete(params.sessionId);
+      this.sendError(
+        request.id ?? null,
+        ACP_ERROR_CODES.SESSION_NOT_FOUND,
+        error instanceof Error ? error.message : String(error)
+      );
+      return;
+    }
+
     session.busy = true;
     const promptState: AcpPromptState = {
       requestId: request.id ?? null,
@@ -279,39 +291,7 @@ export class AcpServer {
     session.promptState = promptState;
 
     try {
-      // 发送 prompt
-      await session.client.sendPrompt(params.prompt);
-
-      // 运行消息循环，将流式消息转换为 ACP 通知推送给编辑器
-      await session.client.runWithCallbacks({
-        onTextChunk: (text) => {
-          this.sendNotification("$/textChunk", {
-            sessionId: params.sessionId,
-            text,
-          });
-        },
-        onThoughtChunk: (text) => {
-          this.sendNotification("$/thoughtChunk", {
-            sessionId: params.sessionId,
-            text,
-          });
-        },
-        onToolCall: (toolName, requestId, input) => {
-          this.sendNotification("$/toolCall", {
-            sessionId: params.sessionId,
-            toolName,
-            requestId,
-            input,
-          });
-        },
-        onToolCallComplete: (toolName, requestId) => {
-          this.sendNotification("$/toolCallComplete", {
-            sessionId: params.sessionId,
-            toolName,
-            requestId,
-          });
-        },
-      });
+      await this.executePrompt(session, params.sessionId, params.prompt);
 
       // session_end 后返回最终结果
       const finalResult = session.client.getLastResult();
@@ -372,6 +352,15 @@ export class AcpServer {
       if (session.promptState) {
         session.promptState.cancelled = true;
       }
+
+      if (!session.busy) {
+        try {
+          await this.ensureSessionConnected(session);
+        } catch {
+          this.sessions.delete(params.sessionId);
+        }
+      }
+
       session.client.close();
       if (!session.busy) {
         this.sessions.delete(params.sessionId);
@@ -421,6 +410,15 @@ export class AcpServer {
     if (session.promptState) {
       session.promptState.cancelled = true;
     }
+
+    if (!session.busy) {
+      try {
+        await this.ensureSessionConnected(session);
+      } catch {
+        this.sessions.delete(params.sessionId);
+      }
+    }
+
     session.client.close();
     if (!session.busy) {
       this.sessions.delete(params.sessionId);
@@ -475,6 +473,70 @@ export class AcpServer {
   // 调试日志写入 stderr（不污染 stdout 的 JSON-RPC 流）
   private log(message: string): void {
     process.stderr.write(`[axon-acp] ${message}\n`);
+  }
+
+  private async ensureSessionConnected(session: AcpSession): Promise<void> {
+    if (session.client.isConnected()) {
+      return;
+    }
+
+    const result = await session.client.ensureSession({
+      cwd: session.cwd,
+      model: session.model,
+      allowCreateOnRestoreFailure: false,
+    });
+
+    if (result !== "restored" && session.client.getSessionId() !== session.id) {
+      throw new Error(`Session 恢复失败: ${session.id}`);
+    }
+  }
+
+  private async executePrompt(
+    session: AcpSession,
+    sessionId: string,
+    prompt: string
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.ensureSessionConnected(session);
+
+      try {
+        await session.client.sendPrompt(prompt);
+        await session.client.runWithCallbacks({
+          onTextChunk: (text) => {
+            this.sendNotification("$/textChunk", {
+              sessionId,
+              text,
+            });
+          },
+          onThoughtChunk: (text) => {
+            this.sendNotification("$/thoughtChunk", {
+              sessionId,
+              text,
+            });
+          },
+          onToolCall: (toolName, requestId, input) => {
+            this.sendNotification("$/toolCall", {
+              sessionId,
+              toolName,
+              requestId,
+              input,
+            });
+          },
+          onToolCallComplete: (toolName, requestId) => {
+            this.sendNotification("$/toolCallComplete", {
+              sessionId,
+              toolName,
+              requestId,
+            });
+          },
+        });
+        return;
+      } catch (error) {
+        if (attempt === 1) {
+          throw error;
+        }
+      }
+    }
   }
 }
 

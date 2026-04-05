@@ -6,6 +6,8 @@ import type {
   CreateSession,
   CreateSessionResponse,
   Prompt,
+  RestoreSession,
+  RestoreSessionResponse,
   ToolResult,
   ServerToHandMessage,
   ToolCall,
@@ -30,12 +32,19 @@ export interface HandClientOptions {
   interactiveOutput?: boolean;
 }
 
+export interface EnsureSessionOptions {
+  cwd: string;
+  model?: string;
+  allowCreateOnRestoreFailure?: boolean;
+}
+
 // ============================================================
 // HandClient：连接 Axon Server 并处理消息
 // ============================================================
 
 export class HandClient {
   private readonly serverURL: string;
+  private readonly initialCwd: string;
   private ws: WebSocket | null = null;
   private readonly ui: UI;
   private readonly interactiveOutput: boolean;
@@ -55,6 +64,7 @@ export class HandClient {
 
   constructor(serverURL: string, cwd: string, options: HandClientOptions = {}) {
     this.serverURL = serverURL;
+    this.initialCwd = cwd;
     this.ui = new UI();
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
@@ -63,6 +73,14 @@ export class HandClient {
   // 连接到 Server
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+        this.ws.removeAllListeners();
+        this.ws.close();
+      }
+
+      this.ws = null;
+      this.pendingMessages = [];
+      this.activeMessageConsumer = null;
       const ws = new WebSocket(this.serverURL);
 
       ws.on("open", () => {
@@ -93,15 +111,25 @@ export class HandClient {
   }
 
   // 发送 create_session 并等待 session_created 响应
-  async sendCreateSession(cwd: string): Promise<void> {
+  async sendCreateSession(cwd: string, model?: string): Promise<void> {
     const msg: CreateSession = {
       type: "create_session",
       cwd,
+      model,
     };
     await this.writeJSON(msg);
 
     // 等待 session_created（可能先收到 connected 通知）
-    await this.waitForSessionCreated();
+    await this.waitForSessionReady("session_created");
+  }
+
+  async sendRestoreSession(sessionId: string): Promise<void> {
+    const msg: RestoreSession = {
+      type: "restore_session",
+      sessionId,
+    };
+    await this.writeJSON(msg);
+    await this.waitForSessionReady("session_restored");
   }
 
   // 获取当前 session ID（供 ACP Server 查询）
@@ -112,6 +140,33 @@ export class HandClient {
   // 获取最后一次 session_end 的结果（供 ACP Server 查询）
   getLastResult(): { result?: string; error?: string } {
     return this.lastResult;
+  }
+
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  async ensureSession(options: EnsureSessionOptions): Promise<"restored" | "created" | "reused"> {
+    if (this.isConnected()) {
+      return "reused";
+    }
+
+    await this.connect();
+
+    if (this.sessionId) {
+      try {
+        await this.sendRestoreSession(this.sessionId);
+        return "restored";
+      } catch (error) {
+        if (!options.allowCreateOnRestoreFailure) {
+          throw error;
+        }
+        this.sessionId = "";
+      }
+    }
+
+    await this.sendCreateSession(options.cwd || this.initialCwd, options.model);
+    return "created";
   }
 
   // 发送用户 prompt
@@ -178,7 +233,7 @@ export class HandClient {
   // ============================================================
 
   // 等待 session_created，跳过 connected 消息
-  private waitForSessionCreated(): Promise<void> {
+  private waitForSessionReady(expectedType: "session_created" | "session_restored"): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -196,12 +251,19 @@ export class HandClient {
         }
 
         switch (msg.type) {
-          case "session_created": {
-            this.sessionId = (msg as CreateSessionResponse).sessionId;
+          case "session_created":
+          case "session_restored": {
+            if (msg.type !== expectedType) {
+              break;
+            }
+
+            const response = msg as CreateSessionResponse | RestoreSessionResponse;
+            this.sessionId = response.sessionId;
             releaseMessageConsumer();
             ws.off("error", onError);
             if (this.interactiveOutput) {
-              process.stdout.write(`\x1b[36m[已连接] Session: ${this.sessionId}\x1b[0m\n`);
+              const prefix = expectedType === "session_restored" ? "[已恢复]" : "[已连接]";
+              process.stdout.write(`\x1b[36m${prefix} Session: ${this.sessionId}\x1b[0m\n`);
             }
             resolve();
             break;
