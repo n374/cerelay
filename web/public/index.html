@@ -61,6 +61,19 @@
           <label>模型</label>
           <input type="text" id="brain-model" value="" placeholder="claude-sonnet-4-20250514" />
         </div>
+        <div class="form-group">
+          <label>管理 Token</label>
+          <input type="password" id="admin-token" value="" placeholder="用于写入 /admin/tool-routing" />
+        </div>
+        <div class="form-group">
+          <label>额外 Hand 工具名</label>
+          <textarea id="hand-tool-names" rows="4" placeholder="每行一个，例如&#10;WebFetch&#10;WebSearch"></textarea>
+        </div>
+        <div class="form-group">
+          <label>额外 Hand 工具前缀</label>
+          <textarea id="hand-tool-prefixes" rows="3" placeholder="每行一个，例如&#10;mcp__&#10;connector__"></textarea>
+        </div>
+        <p class="form-help">Read / Write / Edit / Bash / Grep / Glob 等内建工具始终由 Hand 执行；这里仅配置额外工具名和前缀。</p>
         <div class="modal-actions">
           <button id="btn-connect">连接</button>
           <button id="btn-cancel-settings">取消</button>

@@ -10,17 +10,19 @@ const SESSION_STORAGE_KEY = "axon-web-session";
 
 test("web app restores a saved session and falls back to create_session on restore failure", async () => {
   const runtime = await createAppRuntime({
-    [STORAGE_KEY]: JSON.stringify({
-      brainUrl: "ws://app.test/ws",
-      cwd: "/workspace",
-      model: "claude-test",
-    }),
-    [SESSION_STORAGE_KEY]: JSON.stringify({
-      sessionId: "sess-old",
-      brainUrl: "ws://app.test/ws",
-      cwd: "/workspace",
-      model: "claude-test",
-    }),
+    storage: {
+      [STORAGE_KEY]: JSON.stringify({
+        brainUrl: "ws://app.test/ws",
+        cwd: "/workspace",
+        model: "claude-test",
+      }),
+      [SESSION_STORAGE_KEY]: JSON.stringify({
+        sessionId: "sess-old",
+        brainUrl: "ws://app.test/ws",
+        cwd: "/workspace",
+        model: "claude-test",
+      }),
+    },
   });
   runtime.document.fireDOMContentLoaded();
   const hooks = runtime.hooks();
@@ -105,10 +107,67 @@ test("web app sends prompt once per turn and re-enables input after session_end"
   assert.equal(runtime.dom.btnSend.disabled, false);
 });
 
-async function createAppRuntime(storage: Record<string, string> = {}) {
+test("web app saves and pushes configurable Hand tool routing from settings", async () => {
+  const fetchCalls: Array<{
+    url: string;
+    init?: RequestInit;
+  }> = [];
+  const runtime = await createAppRuntime({
+    fetchImpl: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          builtinToolNames: ["Read", "Bash"],
+          handToolNames: ["WebFetch", "WebSearch"],
+          handToolPrefixes: ["mcp__", "connector__"],
+        }),
+      };
+    },
+  });
+  runtime.document.fireDOMContentLoaded();
+  const hooks = runtime.hooks();
+
+  runtime.dom.brainUrlInput.value = "ws://app.test/ws";
+  runtime.dom.cwdInput.value = "/workspace";
+  runtime.dom.modelInput.value = "claude-test";
+  runtime.dom.adminTokenInput.value = "axon_admin";
+  runtime.dom.handToolNamesInput.value = "WebFetch\nWebSearch";
+  runtime.dom.handToolPrefixesInput.value = "mcp__\nconnector__";
+
+  await hooks.onConnectClick();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0]?.url, "/admin/tool-routing");
+  assert.equal(fetchCalls[0]?.init?.method, "PUT");
+  assert.equal((fetchCalls[0]?.init?.headers ?? {})["Authorization"], "Bearer axon_admin");
+  assert.deepEqual(JSON.parse(String(fetchCalls[0]?.init?.body)), {
+    handToolNames: ["WebFetch", "WebSearch"],
+    handToolPrefixes: ["mcp__", "connector__"],
+  });
+
+  const savedConfig = JSON.parse(runtime.localStorage.getItem(STORAGE_KEY) ?? "{}");
+  assert.deepEqual(savedConfig.handToolNames, ["WebFetch", "WebSearch"]);
+  assert.deepEqual(savedConfig.handToolPrefixes, ["mcp__", "connector__"]);
+
+  const ws = runtime.lastSocket();
+  assert.equal(ws?.url, "ws://app.test/ws");
+});
+
+async function createAppRuntime(
+  options: {
+    storage?: Record<string, string>;
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<{
+      ok: boolean;
+      status: number;
+      json(): Promise<unknown>;
+    }>;
+  } = {}
+) {
   const script = await fs.readFile(APP_PATH, "utf8");
   const document = new FakeDocument();
-  const localStorage = new FakeStorage(storage);
+  const localStorage = new FakeStorage(options.storage ?? {});
   const timers = new Map<number, () => void>();
   let timerId = 0;
 
@@ -174,6 +233,9 @@ async function createAppRuntime(storage: Record<string, string> = {}) {
     location: { host: "app.test" },
     console,
     WebSocket: FakeWebSocket,
+    fetch: options.fetchImpl ?? (async () => {
+      throw new Error("unexpected fetch");
+    }),
   });
 
   vm.runInContext(script, context, { filename: path.basename(APP_PATH) });
@@ -196,6 +258,9 @@ async function createAppRuntime(storage: Record<string, string> = {}) {
       brainUrlInput: dom["brain-url"],
       cwdInput: dom["brain-cwd"],
       modelInput: dom["brain-model"],
+      adminTokenInput: dom["admin-token"],
+      handToolNamesInput: dom["hand-tool-names"],
+      handToolPrefixesInput: dom["hand-tool-prefixes"],
       btnConnect: dom["btn-connect"],
       btnCancelSettings: dom["btn-cancel-settings"],
     },
@@ -349,6 +414,9 @@ class FakeDocument {
       "brain-url",
       "brain-cwd",
       "brain-model",
+      "admin-token",
+      "hand-tool-names",
+      "hand-tool-prefixes",
       "btn-connect",
       "btn-cancel-settings",
     ]) {

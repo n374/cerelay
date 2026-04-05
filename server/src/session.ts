@@ -7,9 +7,9 @@ import type {
   ToolCallComplete,
 } from "./protocol.js";
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
+import { isBuiltinHandToolName, isMcpToolName } from "./tool-routing.js";
 
 type SessionStatus = "idle" | "active" | "ended";
-type SupportedToolName = "Read" | "Write" | "Edit" | "MultiEdit" | "Bash" | "Grep" | "Glob";
 type CanUseToolHandler = (
   toolName: string,
   input: Record<string, unknown>,
@@ -28,16 +28,6 @@ type CanUseToolHandler = (
   | { behavior: "allow" }
   | { behavior: "deny"; message: string }
 >;
-
-const SUPPORTED_REMOTE_TOOLS = new Set<SupportedToolName>([
-  "Read",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "Bash",
-  "Grep",
-  "Glob",
-]);
 
 interface HookInput {
   tool_name: string;
@@ -77,6 +67,7 @@ export interface BrainSessionOptions {
   id: string;
   model: string;
   transport: SessionTransport;
+  shouldRouteToolToHand?: (toolName: string) => boolean;
 }
 
 export class BrainSession {
@@ -88,6 +79,7 @@ export class BrainSession {
   private readonly relay = new ToolRelay();
   private readonly transport: SessionTransport;
   private readonly canUseTool: CanUseToolHandler;
+  private readonly shouldRouteToolToHand: (toolName: string) => boolean;
   private status: SessionStatus = "idle";
   private closed = false;
   private promptChain: Promise<void> = Promise.resolve();
@@ -98,6 +90,7 @@ export class BrainSession {
     this.model = options.model;
     this.transport = options.transport;
     this.createdAt = new Date();
+    this.shouldRouteToolToHand = options.shouldRouteToolToHand ?? ((toolName) => isHandRoutedToolName(toolName));
     this.canUseTool = async (toolName: string) => this.handleCanUseTool(toolName);
   }
 
@@ -226,7 +219,7 @@ export class BrainSession {
       throw new Error("会话已关闭");
     }
 
-    if (!isSupportedRemoteTool(input.tool_name)) {
+    if (!this.shouldRouteToolToHand(input.tool_name)) {
       return {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
@@ -287,13 +280,13 @@ export class BrainSession {
     behavior: "deny";
     message: string;
   }> {
-    if (isSupportedRemoteTool(toolName)) {
+    if (this.shouldRouteToolToHand(toolName)) {
       return { behavior: "allow" };
     }
 
     return {
       behavior: "deny",
-      message: `Axon 当前仅允许远程执行以下工具: ${Array.from(SUPPORTED_REMOTE_TOOLS).join(", ")}`,
+      message: `Axon 当前未配置通过 Hand 执行工具 ${toolName}`,
     };
   }
 }
@@ -326,6 +319,6 @@ function asError(error: unknown): Error {
   return new Error(typeof error === "string" ? error : JSON.stringify(error));
 }
 
-function isSupportedRemoteTool(toolName: string): toolName is SupportedToolName {
-  return SUPPORTED_REMOTE_TOOLS.has(toolName as SupportedToolName);
+export function isHandRoutedToolName(toolName: string): boolean {
+  return isBuiltinHandToolName(toolName) || isMcpToolName(toolName);
 }

@@ -82,3 +82,76 @@ test("ToolExecutor dispatches tools and formats results", async () => {
   assert.match(formatToolError(toolError), /"code":"bad"/);
   assert.equal(formatToolError(new Error("plain")), "plain");
 });
+
+test("ToolExecutor dispatches MCP tools through local proxy scripts", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-"));
+  const proxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-proxy-"));
+  const scriptPath = path.join(proxyDir, "mcp__demo.sh");
+
+  await fs.writeFile(
+    scriptPath,
+    "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"tool\":\"%s\"}' \"$AXON_TOOL_NAME\"\n",
+    "utf8"
+  );
+  await fs.chmod(scriptPath, 0o755);
+
+  const previousProxyDir = process.env.AXON_MCP_PROXY_DIR;
+  process.env.AXON_MCP_PROXY_DIR = proxyDir;
+
+  try {
+    const executor = new ToolExecutor(cwd);
+    const result = await executor.dispatch("mcp__demo__ping", { value: 1 });
+    assert.deepEqual(result, { ok: true, tool: "mcp__demo__ping" });
+    assert.equal(summarizeToolResult("mcp__demo__ping", result), "mcp__demo__ping 完成");
+
+    await assert.rejects(
+      () => executor.dispatch("mcp__missing__tool", {}),
+      /未找到 Hand 代理脚本/
+    );
+  } finally {
+    if (previousProxyDir === undefined) {
+      delete process.env.AXON_MCP_PROXY_DIR;
+    } else {
+      process.env.AXON_MCP_PROXY_DIR = previousProxyDir;
+    }
+  }
+});
+
+test("ToolExecutor executes WebFetch locally", async (t) => {
+  const responses: Array<string> = [];
+  const server = (await import("node:http")).createServer((_req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Axon-Test": "ok",
+    });
+    res.end("hello from hand");
+  });
+
+  t.after(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("测试服务器未监听");
+  }
+
+  const executor = new ToolExecutor(process.cwd());
+  const result = await executor.dispatch("WebFetch", {
+    url: `http://127.0.0.1:${address.port}/demo`,
+  });
+
+  assert.equal(typeof result, "object");
+  assert.equal("status" in result, true);
+  assert.equal((result as { status: number }).status, 200);
+  assert.equal((result as { body: string }).body, "hello from hand");
+  assert.equal((result as { headers: Record<string, string> }).headers["x-axon-test"], "ok");
+  responses.push(summarizeToolResult("WebFetch", result));
+  assert.match(responses[0] ?? "", /status=200/);
+});

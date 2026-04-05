@@ -23,6 +23,9 @@ const state = {
   brainUrl: DEFAULT_BRAIN_URL,
   cwd: DEFAULT_CWD,
   model: DEFAULT_MODEL,
+  adminToken: "",
+  handToolNames: [],
+  handToolPrefixes: [],
   isWaiting: false, // 等待 session_end
   shouldReconnect: false,
   reconnectAttempts: 0,
@@ -53,6 +56,9 @@ const dom = {
   brainUrlInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-url")),
   cwdInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-cwd")),
   modelInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-model")),
+  adminTokenInput: /** @type {HTMLInputElement} */ (document.getElementById("admin-token")),
+  handToolNamesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("hand-tool-names")),
+  handToolPrefixesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("hand-tool-prefixes")),
   btnConnect: /** @type {HTMLButtonElement} */ (document.getElementById("btn-connect")),
   btnCancelSettings: /** @type {HTMLButtonElement} */ (document.getElementById("btn-cancel-settings")),
 };
@@ -76,6 +82,8 @@ function loadConfig() {
       state.brainUrl = cfg.brainUrl ?? DEFAULT_BRAIN_URL;
       state.cwd = cfg.cwd ?? DEFAULT_CWD;
       state.model = cfg.model ?? DEFAULT_MODEL;
+      state.handToolNames = Array.isArray(cfg.handToolNames) ? cfg.handToolNames : [];
+      state.handToolPrefixes = Array.isArray(cfg.handToolPrefixes) ? cfg.handToolPrefixes : [];
     }
   } catch {
     // 忽略 localStorage 错误
@@ -84,18 +92,26 @@ function loadConfig() {
   dom.brainUrlInput.value = state.brainUrl;
   dom.cwdInput.value = state.cwd;
   dom.modelInput.value = state.model;
+  dom.adminTokenInput.value = "";
+  dom.handToolNamesInput.value = formatListForTextarea(state.handToolNames);
+  dom.handToolPrefixesInput.value = formatListForTextarea(state.handToolPrefixes);
 }
 
 function saveConfig() {
   state.brainUrl = dom.brainUrlInput.value.trim() || DEFAULT_BRAIN_URL;
   state.cwd = dom.cwdInput.value.trim() || DEFAULT_CWD;
   state.model = dom.modelInput.value.trim() || DEFAULT_MODEL;
+  state.adminToken = dom.adminTokenInput.value.trim();
+  state.handToolNames = parseTextareaList(dom.handToolNamesInput.value);
+  state.handToolPrefixes = parseTextareaList(dom.handToolPrefixesInput.value);
 
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       brainUrl: state.brainUrl,
       cwd: state.cwd,
       model: state.model,
+      handToolNames: state.handToolNames,
+      handToolPrefixes: state.handToolPrefixes,
     }));
   } catch {
     // 忽略
@@ -194,9 +210,52 @@ function closeSettingsModal() {
 
 async function onConnectClick() {
   saveConfig();
+  const synced = await syncToolRoutingConfig();
+  if (!synced) {
+    return;
+  }
   clearSessionSnapshot();
   closeSettingsModal();
   await connectWebSocket();
+}
+
+async function syncToolRoutingConfig() {
+  if (!state.adminToken) {
+    if (state.handToolNames.length > 0 || state.handToolPrefixes.length > 0) {
+      appendErrorMessage("要写入 Hand 工具路由，请先填写管理 Token");
+      return false;
+    }
+    return true;
+  }
+
+  try {
+    const response = await fetch("/admin/tool-routing", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${state.adminToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        handToolNames: state.handToolNames,
+        handToolPrefixes: state.handToolPrefixes,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`写入失败（HTTP ${response.status}）`);
+    }
+
+    const updated = await response.json();
+    state.handToolNames = Array.isArray(updated.handToolNames) ? updated.handToolNames : [];
+    state.handToolPrefixes = Array.isArray(updated.handToolPrefixes) ? updated.handToolPrefixes : [];
+    dom.handToolNamesInput.value = formatListForTextarea(state.handToolNames);
+    dom.handToolPrefixesInput.value = formatListForTextarea(state.handToolPrefixes);
+    appendSystemMessage("Hand 工具路由已更新");
+    return true;
+  } catch (error) {
+    appendErrorMessage(error instanceof Error ? error.message : String(error));
+    return false;
+  }
 }
 
 // ============================================================
@@ -556,6 +615,17 @@ function statusLabel(status) {
   return { running: "执行中...", done: "完成", error: "失败" }[status] ?? status;
 }
 
+function parseTextareaList(raw) {
+  return raw
+    .split(/\r?\n|,/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function formatListForTextarea(items) {
+  return items.join("\n");
+}
+
 function registerTestHooks() {
   if (typeof window === "undefined" || window.__AXON_WEB_ENABLE_TEST_HOOKS__ !== true) {
     return;
@@ -567,6 +637,7 @@ function registerTestHooks() {
     init,
     loadConfig,
     saveConfig,
+    syncToolRoutingConfig,
     loadSessionSnapshot,
     saveSessionSnapshot,
     clearSessionSnapshot,
@@ -584,8 +655,11 @@ function registerTestHooks() {
     updateToolCall,
     clearToolCalls,
     statusLabel,
+    parseTextareaList,
+    formatListForTextarea,
     scheduleReconnect,
     clearReconnectTimer,
+    onConnectClick,
   };
 }
 

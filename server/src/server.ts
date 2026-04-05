@@ -30,6 +30,7 @@ import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { HandRegistry } from "./hand-registry.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
+import { ToolRoutingStore } from "./tool-routing.js";
 
 const log = createLogger("server");
 const SESSION_RESUME_GRACE_MS = 60_000;
@@ -65,6 +66,7 @@ export class AxonServer {
   private readonly hands = new HandRegistry();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly stats = new StatsCollector();
+  private readonly toolRouting = new ToolRoutingStore();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
   private readonly sessionCleanupTimer: NodeJS.Timeout;
 
@@ -235,8 +237,18 @@ export class AxonServer {
       return;
     }
 
+    if (url === "/admin/tool-routing" && req.method === "GET") {
+      this.sendJson(res, 200, this.toolRouting.snapshot());
+      return;
+    }
+
     if (url === "/admin/tokens" && req.method === "POST") {
       this.handleCreateToken(req, res);
+      return;
+    }
+
+    if (url === "/admin/tool-routing" && req.method === "PUT") {
+      this.handleUpdateToolRouting(req, res);
       return;
     }
 
@@ -263,6 +275,24 @@ export class AxonServer {
         const result = this.auth.create(label, ttl);
         this.sendJson(res, 201, result);
       } catch (err) {
+        this.sendJson(res, 400, { error: "invalid_body" });
+      }
+    });
+  }
+
+  private handleUpdateToolRouting(req: IncomingMessage, res: ServerResponse): void {
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on("end", () => {
+      try {
+        const params = body
+          ? (JSON.parse(body) as { handToolNames?: string[]; handToolPrefixes?: string[] })
+          : {};
+        const updated = this.toolRouting.update(params);
+        this.sendJson(res, 200, updated);
+      } catch {
         this.sendJson(res, 400, { error: "invalid_body" });
       }
     });
@@ -412,6 +442,7 @@ export class AxonServer {
       id: sessionId,
       cwd: message.cwd || ".",
       model: message.model || this.defaultModel,
+      shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
       transport: {
         send: async (payload) => {
           const currentEntry = this.sessions.get(sessionId);

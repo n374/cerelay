@@ -37,6 +37,40 @@ test("admin APIs require a valid token and expose token management", async (t) =
   assert.equal(stats.status, 200);
   assert.equal(typeof (await stats.json()).handsOnline, "number");
 
+  const routing = await fetch(`${baseUrl}/admin/tool-routing`, {
+    headers: {
+      Authorization: `Bearer ${ADMIN_TOKEN}`,
+    },
+  });
+  assert.equal(routing.status, 200);
+  const initialRouting = await routing.json() as {
+    builtinToolNames: string[];
+    handToolNames: string[];
+    handToolPrefixes: string[];
+  };
+  assert.equal(initialRouting.builtinToolNames.includes("Read"), true);
+  assert.deepEqual(initialRouting.handToolNames, ["WebFetch"]);
+  assert.deepEqual(initialRouting.handToolPrefixes, ["mcp__"]);
+
+  const updateRouting = await fetch(`${baseUrl}/admin/tool-routing`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${ADMIN_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      handToolNames: ["WebFetch", "WebSearch"],
+      handToolPrefixes: ["mcp__", "connector__"],
+    }),
+  });
+  assert.equal(updateRouting.status, 200);
+  const updatedRouting = await updateRouting.json() as {
+    handToolNames: string[];
+    handToolPrefixes: string[];
+  };
+  assert.deepEqual(updatedRouting.handToolNames, ["WebFetch", "WebSearch"]);
+  assert.deepEqual(updatedRouting.handToolPrefixes, ["mcp__", "connector__"]);
+
   const createToken = await fetch(`${baseUrl}/admin/tokens`, {
     method: "POST",
     headers: {

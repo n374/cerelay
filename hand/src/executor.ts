@@ -1,6 +1,9 @@
 import { readFile, writeFile, editFile, multiEdit } from "./tools/fs.js";
 import { executeBash } from "./tools/bash.js";
 import { grep, globFiles } from "./tools/search.js";
+import { executeExternalTool, type ExternalToolOutput } from "./tools/external.js";
+import { webFetch, type WebFetchInput, type WebFetchOutput } from "./tools/web.js";
+import { ToolError } from "./tool-error.js";
 import type {
   ReadInput,
   ReadOutput,
@@ -17,30 +20,7 @@ import type {
   GlobOutput,
 } from "./tools/search.js";
 
-// ============================================================
-// 工具错误类型（与 Go ToolError 对齐）
-// ============================================================
-
-export class ToolError extends Error {
-  code: string;
-  tool: string;
-
-  constructor(code: string, tool: string, message: string) {
-    super(`${code}(${tool}): ${message}`);
-    this.name = "ToolError";
-    this.code = code;
-    this.tool = tool;
-  }
-
-  // 序列化为 JSON 字符串（跨进程传输用）
-  toJSON(): object {
-    return {
-      code: this.code,
-      tool: this.tool,
-      message: this.message,
-    };
-  }
-}
+export { ToolError } from "./tool-error.js";
 
 // 工具执行结果联合类型
 export type ToolOutput =
@@ -48,7 +28,9 @@ export type ToolOutput =
   | PathOutput
   | BashOutput
   | GrepOutput
-  | GlobOutput;
+  | GlobOutput
+  | WebFetchOutput
+  | ExternalToolOutput;
 
 // ============================================================
 // ToolExecutor：根据工具名分发到对应实现
@@ -79,12 +61,10 @@ export class ToolExecutor {
         return grep(input as GrepInput, this.cwd);
       case "Glob":
         return globFiles(input as GlobInput, this.cwd);
+      case "WebFetch":
+        return webFetch(input as WebFetchInput);
       default:
-        throw new ToolError(
-          "unknown_tool",
-          toolName,
-          `未知工具: ${toolName}`
-        );
+        return executeExternalTool(toolName, input, this.cwd);
     }
   }
 }
@@ -124,6 +104,15 @@ export function summarizeToolResult(
     return `Glob 完成，匹配 ${r.files.length} 个路径`;
   }
 
+  if (toolName === "WebFetch") {
+    const r = result as WebFetchOutput;
+    return `WebFetch 完成，status=${r.status}, body=${r.body.length}B`;
+  }
+
+  if (!BUILTIN_TOOL_NAMES.has(toolName as BuiltinToolName)) {
+    return `${toolName} 完成`;
+  }
+
   return `${toolName} 执行成功`;
 }
 
@@ -141,3 +130,16 @@ export function formatToolError(err: unknown): string {
   }
   return String(err);
 }
+
+type BuiltinToolName = "Read" | "Write" | "Edit" | "MultiEdit" | "Bash" | "Grep" | "Glob" | "WebFetch";
+
+const BUILTIN_TOOL_NAMES = new Set<BuiltinToolName>([
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Bash",
+  "Grep",
+  "Glob",
+  "WebFetch",
+]);
