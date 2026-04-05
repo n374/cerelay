@@ -13,10 +13,11 @@ Thumbs.db
 *.swo
 *~
 
-# Node (future relay server)
+# Node
 node_modules/
 dist/
 packages/*/dist/
+*.js.map
 .env
 .env.*
 
