@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import process from "node:process";
 import { once } from "node:events";
@@ -38,7 +38,7 @@ test("UI prints formatted output to stdout and stderr", (t) => {
   assert.match(stderr.join(""), /错误: boom/);
 });
 
-test("UI.readInput resolves a line from stdin", async () => {
+test("UI.readInput resolves a line from stdin", async (t) => {
   const child = spawn(
     process.execPath,
     [
@@ -52,6 +52,7 @@ test("UI.readInput resolves a line from stdin", async () => {
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
+  registerChildCleanup(t, child);
 
   let stdout = "";
   let stderr = "";
@@ -71,7 +72,7 @@ test("UI.readInput resolves a line from stdin", async () => {
   assert.equal(stderr, "");
 });
 
-test("UI.readInput rejects with EOF when stdin closes", async () => {
+test("UI.readInput rejects with EOF when stdin closes", async (t) => {
   const child = spawn(
     process.execPath,
     [
@@ -85,6 +86,7 @@ test("UI.readInput rejects with EOF when stdin closes", async () => {
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
+  registerChildCleanup(t, child);
 
   let stdout = "";
   let stderr = "";
@@ -102,3 +104,31 @@ test("UI.readInput rejects with EOF when stdin closes", async () => {
   assert.match(stdout, /EOF:true/);
   assert.equal(stderr, "");
 });
+
+function registerChildCleanup(t: TestContext, child: ReturnType<typeof spawn>): void {
+  t.after(async () => {
+    child.stdin.destroy();
+    if (child.exitCode !== null || child.killed) {
+      return;
+    }
+
+    child.kill("SIGTERM");
+    await waitForExit(child, 1000).catch(async () => {
+      child.kill("SIGKILL");
+      await waitForExit(child, 1000).catch(() => undefined);
+    });
+  });
+}
+
+function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("等待子进程退出超时"));
+    }, timeoutMs);
+
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+}

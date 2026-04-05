@@ -1,40 +1,38 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import { WebServer } from "../src/server.js";
 
-test("WebServer serves health, static files, and security headers", async () => {
+test("WebServer serves health, static files, and security headers", async (t) => {
   const server = new WebServer({ port: 0, brainAddress: "127.0.0.1:65534" });
+  registerWebServerCleanup(t, server);
   await server.start();
 
-  try {
-    const port = server.getListenPort();
+  const port = server.getListenPort();
 
-    const health = await fetch(`http://127.0.0.1:${port}/health`);
-    assert.equal(health.status, 200);
-    assert.equal(health.headers.get("x-content-type-options"), "nosniff");
+  const health = await fetch(`http://127.0.0.1:${port}/health`);
+  assert.equal(health.status, 200);
+  assert.equal(health.headers.get("x-content-type-options"), "nosniff");
 
-    const home = await fetch(`http://127.0.0.1:${port}/`);
-    assert.equal(home.status, 200);
-    assert.match(await home.text(), /Axon/);
-    assert.match(home.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+  const home = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(home.status, 200);
+  assert.match(await home.text(), /Axon/);
+  assert.match(home.headers.get("content-security-policy") ?? "", /default-src 'self'/);
 
-    const fallback = await fetch(`http://127.0.0.1:${port}/missing-route`);
-    assert.equal(fallback.status, 200);
-    assert.match(await fallback.text(), /<html/);
+  const fallback = await fetch(`http://127.0.0.1:${port}/missing-route`);
+  assert.equal(fallback.status, 200);
+  assert.match(await fallback.text(), /<html/);
 
-    const forbidden = await fetch(`http://127.0.0.1:${port}/..%2F..%2Fetc%2Fpasswd`);
-    assert.equal(forbidden.status, 403);
-  } finally {
-    await server.shutdown();
-  }
+  const forbidden = await fetch(`http://127.0.0.1:${port}/..%2F..%2Fetc%2Fpasswd`);
+  assert.equal(forbidden.status, 403);
 });
 
-test("WebServer proxies websocket traffic to brain", async () => {
+test("WebServer proxies websocket traffic to brain", async (t) => {
   const brainHttp = createServer();
   const brainWs = new WebSocketServer({ server: brainHttp });
+  registerBrainCleanup(t, brainHttp, brainWs);
 
   brainWs.on("connection", (socket) => {
     socket.on("message", (data) => {
@@ -47,22 +45,15 @@ test("WebServer proxies websocket traffic to brain", async () => {
   const brainPort = (brainHttp.address() as import("node:net").AddressInfo).port;
 
   const server = new WebServer({ port: 0, brainAddress: `127.0.0.1:${brainPort}` });
+  registerWebServerCleanup(t, server);
   await server.start();
 
-  try {
-    const ws = await connectWebSocket(`ws://127.0.0.1:${server.getListenPort()}/ws`);
-    ws.send("hello");
-    const [message] = await waitForWebSocketMessage(ws);
-    assert.equal(message.toString(), "HELLO");
-    await closeWebSocket(ws);
-  } finally {
-    await server.shutdown();
-    for (const client of brainWs.clients) {
-      client.close();
-    }
-    await new Promise<void>((resolve) => brainWs.close(() => resolve()));
-    await new Promise<void>((resolve, reject) => brainHttp.close((error) => error ? reject(error) : resolve()));
-  }
+  const ws = await connectWebSocket(`ws://127.0.0.1:${server.getListenPort()}/ws`);
+  registerSocketCleanup(t, ws);
+  ws.send("hello");
+  const [message] = await waitForWebSocketMessage(ws);
+  assert.equal(message.toString(), "HELLO");
+  await closeWebSocket(ws);
 });
 
 function connectWebSocket(url: string): Promise<WebSocket> {
@@ -112,5 +103,31 @@ function waitForWebSocketMessage(ws: WebSocket): Promise<[WebSocket.RawData, boo
 
     ws.on("message", onMessage);
     ws.on("error", onError);
+  });
+}
+
+function registerWebServerCleanup(t: TestContext, server: WebServer): void {
+  t.after(async () => {
+    await server.shutdown();
+  });
+}
+
+function registerBrainCleanup(
+  t: TestContext,
+  brainHttp: ReturnType<typeof createServer>,
+  brainWs: WebSocketServer
+): void {
+  t.after(async () => {
+    for (const client of brainWs.clients) {
+      client.close();
+    }
+    await new Promise<void>((resolve) => brainWs.close(() => resolve()));
+    await new Promise<void>((resolve, reject) => brainHttp.close((error) => error ? reject(error) : resolve()));
+  });
+}
+
+function registerSocketCleanup(t: TestContext, ws: WebSocket): void {
+  t.after(async () => {
+    await closeWebSocket(ws);
   });
 }

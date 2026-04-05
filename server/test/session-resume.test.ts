@@ -1,6 +1,5 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { once } from "node:events";
 import WebSocket from "ws";
 import { AxonServer } from "../src/server.js";
 
@@ -11,93 +10,87 @@ interface JsonMessage {
   [key: string]: unknown;
 }
 
-test("idle session can be restored after reconnect", async () => {
+test("idle session can be restored after reconnect", async (t) => {
   const server = new AxonServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
     sessionResumeGraceMs: 500,
   });
+  registerServerCleanup(t, server);
 
   await server.start();
 
-  try {
-    const ws1 = await connect(server.getListenPort());
+  const ws1 = await connect(server.getListenPort());
+  registerSocketCleanup(t, ws1);
 
-    ws1.send(JSON.stringify({
-      type: "create_session",
-      cwd: "/tmp",
-    }));
+  ws1.send(JSON.stringify({
+    type: "create_session",
+    cwd: "/tmp",
+  }));
 
-    const created = await waitForType(ws1, "session_created");
-    assert.equal(typeof created.sessionId, "string");
-    const sessionId = created.sessionId;
+  const created = await waitForType(ws1, "session_created");
+  assert.equal(typeof created.sessionId, "string");
+  const sessionId = created.sessionId;
 
-    ws1.close();
-    await once(ws1, "close");
+  await closeSocket(ws1);
 
-    const ws2 = await connect(server.getListenPort());
+  const ws2 = await connect(server.getListenPort());
+  registerSocketCleanup(t, ws2);
 
-    ws2.send(JSON.stringify({
-      type: "restore_session",
-      sessionId,
-    }));
+  ws2.send(JSON.stringify({
+    type: "restore_session",
+    sessionId,
+  }));
 
-    const restored = await waitForType(ws2, "session_restored");
-    assert.equal(restored.sessionId, sessionId);
+  const restored = await waitForType(ws2, "session_restored");
+  assert.equal(restored.sessionId, sessionId);
 
-    ws2.send(JSON.stringify({
-      type: "close_session",
-      sessionId,
-    }));
-    ws2.close();
-    await once(ws2, "close");
-  } finally {
-    await server.shutdown();
-  }
+  ws2.send(JSON.stringify({
+    type: "close_session",
+    sessionId,
+  }));
+  await closeSocket(ws2);
 });
 
-test("detached idle session expires after resume window", async () => {
+test("detached idle session expires after resume window", async (t) => {
   const server = new AxonServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 10,
     sessionResumeGraceMs: 30,
   });
+  registerServerCleanup(t, server);
 
   await server.start();
 
-  try {
-    const ws1 = await connect(server.getListenPort());
+  const ws1 = await connect(server.getListenPort());
+  registerSocketCleanup(t, ws1);
 
-    ws1.send(JSON.stringify({
-      type: "create_session",
-      cwd: "/tmp",
-    }));
+  ws1.send(JSON.stringify({
+    type: "create_session",
+    cwd: "/tmp",
+  }));
 
-    const created = await waitForType(ws1, "session_created");
-    assert.equal(typeof created.sessionId, "string");
-    const sessionId = created.sessionId;
+  const created = await waitForType(ws1, "session_created");
+  assert.equal(typeof created.sessionId, "string");
+  const sessionId = created.sessionId;
 
-    ws1.close();
-    await once(ws1, "close");
-    await delay(80);
+  await closeSocket(ws1);
+  await delay(80);
 
-    const ws2 = await connect(server.getListenPort());
+  const ws2 = await connect(server.getListenPort());
+  registerSocketCleanup(t, ws2);
 
-    ws2.send(JSON.stringify({
-      type: "restore_session",
-      sessionId,
-    }));
+  ws2.send(JSON.stringify({
+    type: "restore_session",
+    sessionId,
+  }));
 
-    const error = await waitForType(ws2, "error");
-    assert.match(String(error.message), /会话不存在|已过期|无法恢复/);
+  const error = await waitForType(ws2, "error");
+  assert.match(String(error.message), /会话不存在|已过期|无法恢复/);
 
-    ws2.close();
-    await once(ws2, "close");
-  } finally {
-    await server.shutdown();
-  }
+  await closeSocket(ws2);
 });
 
 function connect(port: number): Promise<WebSocket> {
@@ -154,5 +147,42 @@ function waitForType(ws: WebSocket, type: string): Promise<JsonMessage> {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+function registerServerCleanup(t: TestContext, server: AxonServer): void {
+  t.after(async () => {
+    await server.shutdown();
+  });
+}
+
+function registerSocketCleanup(t: TestContext, ws: WebSocket): void {
+  t.after(async () => {
+    await closeSocket(ws);
+  });
+}
+
+function closeSocket(ws: WebSocket): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ws.terminate();
+      resolve();
+    }, 1000);
+
+    ws.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.once("open", () => ws.close());
+      return;
+    }
+
+    ws.close();
   });
 }
