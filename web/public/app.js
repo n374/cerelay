@@ -9,6 +9,7 @@ const DEFAULT_BRAIN_URL = `ws://${location.host}/ws`;
 const DEFAULT_CWD = "/";
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const STORAGE_KEY = "axon-web-config";
+const SESSION_STORAGE_KEY = "axon-web-session";
 
 // ============================================================
 // 状态
@@ -17,6 +18,8 @@ const STORAGE_KEY = "axon-web-config";
 const state = {
   ws: /** @type {WebSocket|null} */ (null),
   sessionId: /** @type {string|null} */ (null),
+  resumableSessionId: /** @type {string|null} */ (null),
+  restorePending: false,
   brainUrl: DEFAULT_BRAIN_URL,
   cwd: DEFAULT_CWD,
   model: DEFAULT_MODEL,
@@ -60,6 +63,7 @@ const dom = {
 
 function init() {
   loadConfig();
+  loadSessionSnapshot();
   bindEvents();
   openSettingsModal();
 }
@@ -93,6 +97,56 @@ function saveConfig() {
       cwd: state.cwd,
       model: state.model,
     }));
+  } catch {
+    // 忽略
+  }
+}
+
+function loadSessionSnapshot() {
+  try {
+    const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!saved) {
+      return;
+    }
+
+    const snapshot = JSON.parse(saved);
+    if (
+      snapshot &&
+      snapshot.brainUrl === state.brainUrl &&
+      snapshot.cwd === state.cwd &&
+      snapshot.model === state.model &&
+      typeof snapshot.sessionId === "string"
+    ) {
+      state.resumableSessionId = snapshot.sessionId;
+    }
+  } catch {
+    // 忽略 localStorage 错误
+  }
+}
+
+function saveSessionSnapshot() {
+  if (!state.resumableSessionId) {
+    clearSessionSnapshot();
+    return;
+  }
+
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      sessionId: state.resumableSessionId,
+      brainUrl: state.brainUrl,
+      cwd: state.cwd,
+      model: state.model,
+    }));
+  } catch {
+    // 忽略
+  }
+}
+
+function clearSessionSnapshot() {
+  state.resumableSessionId = null;
+  state.restorePending = false;
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
   } catch {
     // 忽略
   }
@@ -140,6 +194,7 @@ function closeSettingsModal() {
 
 async function onConnectClick() {
   saveConfig();
+  clearSessionSnapshot();
   closeSettingsModal();
   await connectWebSocket();
 }
@@ -177,6 +232,15 @@ async function connectWebSocket(options = {}) {
     setStatus("connected");
     appendSystemMessage(autoReconnect ? "已重新连接" : "已连接");
     dom.btnNewSession.classList.remove("hidden");
+    if (state.resumableSessionId) {
+      state.restorePending = true;
+      appendSystemMessage(`正在恢复会话 ${state.resumableSessionId.substring(0, 12)}...`);
+      ws.send(JSON.stringify({
+        type: "restore_session",
+        sessionId: state.resumableSessionId,
+      }));
+      return;
+    }
     // 自动创建 session
     void createNewSession();
   };
@@ -198,6 +262,7 @@ async function connectWebSocket(options = {}) {
     setStatus("disconnected");
     state.sessionId = null;
     state.isWaiting = false;
+    state.restorePending = false;
     setInputEnabled(false);
     dom.btnNewSession.classList.add("hidden");
     dom.sessionLabel.classList.add("hidden");
@@ -249,6 +314,7 @@ async function createNewSession() {
   }
 
   state.sessionId = null;
+  clearSessionSnapshot();
   state.currentAssistantEl = null;
   state.currentThoughtEl = null;
   setInputEnabled(false);
@@ -275,13 +341,17 @@ function handleServerMessage(msg) {
       break;
 
     case "session_created":
+    case "session_restored":
       state.sessionId = msg.sessionId;
+      state.resumableSessionId = msg.sessionId;
+      state.restorePending = false;
+      saveSessionSnapshot();
       dom.sessionLabel.classList.remove("hidden");
       dom.sessionIdEl.classList.remove("hidden");
       dom.sessionIdEl.textContent = msg.sessionId.substring(0, 20) + "...";
       dom.sessionIdEl.title = msg.sessionId;
       setInputEnabled(true);
-      appendSystemMessage(`Session 已就绪`);
+      appendSystemMessage(msg.type === "session_restored" ? "Session 已恢复" : "Session 已就绪");
       break;
 
     case "text_chunk":
@@ -326,6 +396,13 @@ function handleServerMessage(msg) {
       break;
 
     case "error":
+      if (state.restorePending) {
+        state.restorePending = false;
+        clearSessionSnapshot();
+        appendSystemMessage("恢复旧会话失败，正在创建新会话...");
+        void createNewSession();
+        return;
+      }
       appendErrorMessage(msg.message ?? "未知错误");
       state.isWaiting = false;
       setInputEnabled(true);
@@ -479,8 +556,42 @@ function statusLabel(status) {
   return { running: "执行中...", done: "完成", error: "失败" }[status] ?? status;
 }
 
+function registerTestHooks() {
+  if (typeof window === "undefined" || window.__AXON_WEB_ENABLE_TEST_HOOKS__ !== true) {
+    return;
+  }
+
+  window.__AXON_WEB_TEST_HOOKS__ = {
+    state,
+    dom,
+    init,
+    loadConfig,
+    saveConfig,
+    loadSessionSnapshot,
+    saveSessionSnapshot,
+    clearSessionSnapshot,
+    connectWebSocket,
+    createNewSession,
+    handleServerMessage,
+    sendPrompt,
+    setStatus,
+    setInputEnabled,
+    appendTextChunk,
+    appendThoughtChunk,
+    appendErrorMessage,
+    appendSystemMessage,
+    showToolCall,
+    updateToolCall,
+    clearToolCalls,
+    statusLabel,
+    scheduleReconnect,
+    clearReconnectTimer,
+  };
+}
+
 // ============================================================
 // 启动
 // ============================================================
 
+registerTestHooks();
 document.addEventListener("DOMContentLoaded", init);

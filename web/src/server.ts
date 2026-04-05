@@ -78,6 +78,14 @@ export class WebServer {
     });
   }
 
+  getListenPort(): number {
+    const address = this.httpServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("服务器尚未监听端口");
+    }
+    return address.port;
+  }
+
   async shutdown(): Promise<void> {
     if (this.shuttingDown) {
       return;
@@ -182,9 +190,22 @@ export class WebServer {
 
   private async handleBrowserConnection(browserSocket: WebSocket, _req: IncomingMessage): Promise<void> {
     const brainURL = `ws://${this.brainAddress}/ws`;
+    const pendingBrowserMessages: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
 
     // 建立到 Brain 的连接
     const brainSocket = new WebSocket(brainURL);
+
+    // 双向代理：浏览器 → Brain
+    browserSocket.on("message", (data, isBinary) => {
+      if (brainSocket.readyState === WebSocket.OPEN) {
+        brainSocket.send(data, { binary: isBinary });
+        return;
+      }
+
+      if (brainSocket.readyState === WebSocket.CONNECTING) {
+        pendingBrowserMessages.push({ data, isBinary });
+      }
+    });
 
     await new Promise<void>((resolve, reject) => {
       brainSocket.once("open", resolve);
@@ -198,12 +219,10 @@ export class WebServer {
       return;
     }
 
-    // 双向代理：浏览器 → Brain
-    browserSocket.on("message", (data, isBinary) => {
-      if (brainSocket.readyState === WebSocket.OPEN) {
-        brainSocket.send(data, { binary: isBinary });
-      }
-    });
+    for (const pending of pendingBrowserMessages) {
+      brainSocket.send(pending.data, { binary: pending.isBinary });
+    }
+    pendingBrowserMessages.length = 0;
 
     // 双向代理：Brain → 浏览器
     brainSocket.on("message", (data, isBinary) => {

@@ -56,6 +56,11 @@ export interface CreateSessionResponse {
   sessionId: string;
 }
 
+export interface RestoreSessionResponse {
+  type: "session_restored";
+  sessionId: string;
+}
+
 export interface SessionInfo {
   sessionId: string;
   cwd: string;
@@ -85,6 +90,11 @@ export interface Prompt {
   text: string;
 }
 
+export interface RestoreSession {
+  type: "restore_session";
+  sessionId: string;
+}
+
 export interface ToolResult {
   type: "tool_result";
   sessionId: string;
@@ -110,6 +120,7 @@ export interface ListSessions {
 export type ServerToHandMessage =
   | Connected
   | CreateSessionResponse
+  | RestoreSessionResponse
   | ServerError
   | SessionEnd
   | SessionList
@@ -123,6 +134,7 @@ export type HandToServerMessage =
   | CreateSession
   | ListSessions
   | Prompt
+  | RestoreSession
   | ToolResult;
 
 // ============================================================

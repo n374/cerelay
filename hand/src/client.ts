@@ -39,6 +39,8 @@ export class HandClient {
   private ws: WebSocket | null = null;
   private readonly ui: UI;
   private readonly interactiveOutput: boolean;
+  private pendingMessages: string[] = [];
+  private activeMessageConsumer: ((raw: string) => void) | null = null;
   // executor 在 session 创建后含有正确的 cwd，先用占位 cwd 初始化
   private executor: ToolExecutor;
 
@@ -65,6 +67,14 @@ export class HandClient {
 
       ws.on("open", () => {
         this.ws = ws;
+        ws.on("message", (data) => {
+          const raw = data.toString();
+          if (this.activeMessageConsumer) {
+            this.activeMessageConsumer(raw);
+            return;
+          }
+          this.pendingMessages.push(raw);
+        });
         resolve();
       });
 
@@ -134,11 +144,10 @@ export class HandClient {
 
       const ws = this.ws;
 
-      const onMessage = (data: WebSocket.RawData) => {
-        const raw = data.toString();
+      const onMessage = (raw: string) => {
         const done = this.handleMessage(raw, callbacks);
         if (done) {
-          ws.off("message", onMessage);
+          releaseMessageConsumer();
           ws.off("error", onError);
           ws.off("close", onClose);
           resolve();
@@ -146,18 +155,19 @@ export class HandClient {
       };
 
       const onError = (err: Error) => {
-        ws.off("message", onMessage);
+        releaseMessageConsumer();
         ws.off("close", onClose);
         reject(err);
       };
 
       const onClose = () => {
-        ws.off("message", onMessage);
+        releaseMessageConsumer();
         ws.off("error", onError);
         reject(new Error("WebSocket 连接已关闭"));
       };
 
-      ws.on("message", onMessage);
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
       ws.on("error", onError);
       ws.on("close", onClose);
     });
@@ -177,8 +187,7 @@ export class HandClient {
 
       const ws = this.ws;
 
-      const onMessage = (data: WebSocket.RawData) => {
-        const raw = data.toString();
+      const onMessage = (raw: string) => {
         let msg: ServerToHandMessage;
         try {
           msg = JSON.parse(raw) as ServerToHandMessage;
@@ -189,7 +198,7 @@ export class HandClient {
         switch (msg.type) {
           case "session_created": {
             this.sessionId = (msg as CreateSessionResponse).sessionId;
-            ws.off("message", onMessage);
+            releaseMessageConsumer();
             ws.off("error", onError);
             if (this.interactiveOutput) {
               process.stdout.write(`\x1b[36m[已连接] Session: ${this.sessionId}\x1b[0m\n`);
@@ -201,7 +210,7 @@ export class HandClient {
             // 忽略 connected 通知，继续等待
             break;
           case "error": {
-            ws.off("message", onMessage);
+            releaseMessageConsumer();
             ws.off("error", onError);
             reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
             break;
@@ -210,11 +219,12 @@ export class HandClient {
       };
 
       const onError = (err: Error) => {
-        ws.off("message", onMessage);
+        releaseMessageConsumer();
         reject(new Error(`等待 session_created 失败: ${err.message}`));
       };
 
-      ws.on("message", onMessage);
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
       ws.on("error", onError);
     });
   }
@@ -367,5 +377,24 @@ export class HandClient {
         resolve();
       });
     });
+  }
+
+  private attachMessageConsumer(consumer: (raw: string) => void): () => void {
+    this.activeMessageConsumer = consumer;
+    return () => {
+      if (this.activeMessageConsumer === consumer) {
+        this.activeMessageConsumer = null;
+      }
+    };
+  }
+
+  private flushPendingMessages(): void {
+    while (this.activeMessageConsumer && this.pendingMessages.length > 0) {
+      const raw = this.pendingMessages.shift();
+      if (raw === undefined) {
+        break;
+      }
+      this.activeMessageConsumer(raw);
+    }
   }
 }

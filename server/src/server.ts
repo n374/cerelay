@@ -20,6 +20,7 @@ import type {
   Envelope,
   ListSessions,
   Prompt,
+  RestoreSession,
   ServerError,
   ServerToHandMessage,
   ToolResult,
@@ -31,6 +32,7 @@ import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("server");
+const SESSION_RESUME_GRACE_MS = 60_000;
 
 // ============================================================
 // ServerOptions
@@ -43,6 +45,10 @@ export interface ServerOptions {
   authEnabled?: boolean;
   /** 初始 Token（启动时自动创建，打印到日志）*/
   initialToken?: string;
+  /** session 恢复窗口，默认 60 秒 */
+  sessionResumeGraceMs?: number;
+  /** detached session 清理轮询间隔，默认 15 秒 */
+  sessionCleanupIntervalMs?: number;
 }
 
 // ============================================================
@@ -52,13 +58,15 @@ export interface ServerOptions {
 export class AxonServer {
   private readonly defaultModel: string;
   private readonly port: number;
+  private readonly sessionResumeGraceMs: number;
 
   // 组件
   private readonly auth: TokenStore;
   private readonly hands = new HandRegistry();
-  private readonly sessions = new Map<string, { session: BrainSession; handId: string }>();
+  private readonly sessions = new Map<string, SessionEntry>();
   private readonly stats = new StatsCollector();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
+  private readonly sessionCleanupTimer: NodeJS.Timeout;
 
   // HTTP/WS 基础设施
   private readonly httpServer = createServer(this.handleHttpRequest.bind(this));
@@ -69,6 +77,7 @@ export class AxonServer {
   constructor(options: ServerOptions) {
     this.defaultModel = options.model;
     this.port = options.port;
+    this.sessionResumeGraceMs = options.sessionResumeGraceMs ?? SESSION_RESUME_GRACE_MS;
     this.auth = new TokenStore(options.authEnabled ?? false);
 
     const initialToken = options.initialToken?.trim();
@@ -87,6 +96,10 @@ export class AxonServer {
       }
     }, 60_000);
 
+    this.sessionCleanupTimer = setInterval(() => {
+      this.cleanupDetachedSessions();
+    }, options.sessionCleanupIntervalMs ?? 15_000);
+
     this.httpServer.on("upgrade", this.handleUpgrade.bind(this));
     this.wsServer.on("connection", (socket, req) => {
       void this.handleConnection(socket, req);
@@ -103,6 +116,14 @@ export class AxonServer {
     });
   }
 
+  getListenPort(): number {
+    const address = this.httpServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("服务器尚未监听端口");
+    }
+    return address.port;
+  }
+
   async shutdown(): Promise<void> {
     if (this.shuttingDown) {
       return;
@@ -111,6 +132,7 @@ export class AxonServer {
     this.shuttingDown = true;
     log.info("开始优雅关闭...");
     clearInterval(this.tokenCleanupTimer);
+    clearInterval(this.sessionCleanupTimer);
 
     // 关闭所有 session
     for (const { session } of this.sessions.values()) {
@@ -315,13 +337,21 @@ export class AxonServer {
       this.stats.onHandDisconnected();
       log.info("Hand 已断开", { handId });
 
-      // 清理该 hand 的所有 session（发送 session_end 通知已无意义，因为 WS 已关闭）
+      // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
       for (const sessionId of handInfo.sessionIds) {
         const entry = this.sessions.get(sessionId);
         if (entry) {
-          entry.session.close();
-          this.sessions.delete(sessionId);
-          this.stats.onSessionEnded();
+          if (entry.session.info().status === "active") {
+            this.destroySession(sessionId, entry, "Hand 断开时 session 仍在运行");
+            continue;
+          }
+
+          entry.handId = null;
+          entry.resumableUntil = Date.now() + this.sessionResumeGraceMs;
+          log.info("Session 进入可恢复窗口", {
+            sessionId,
+            resumableUntil: new Date(entry.resumableUntil).toISOString(),
+          });
         }
       }
     });
@@ -354,6 +384,9 @@ export class AxonServer {
         case "prompt":
           await this.handlePrompt(handId, JSON.parse(raw) as Prompt);
           return;
+        case "restore_session":
+          await this.handleRestoreSession(handId, JSON.parse(raw) as RestoreSession);
+          return;
         case "tool_result":
           await this.handleToolResult(handId, JSON.parse(raw) as ToolResult);
           return;
@@ -381,17 +414,25 @@ export class AxonServer {
       model: message.model || this.defaultModel,
       transport: {
         send: async (payload) => {
+          const currentEntry = this.sessions.get(sessionId);
+          if (!currentEntry?.handId) {
+            throw new Error(`Session ${sessionId} 当前未绑定可用 Hand`);
+          }
           // tool_call 时记录工具调用统计
           if (payload.type === "tool_call") {
             const tc = payload as import("./protocol.js").ToolCall;
             this.stats.onToolCall(tc.toolName);
           }
-          await this.sendToHand(handId, payload);
+          await this.sendToHand(currentEntry.handId, payload);
         },
       },
     });
 
-    this.sessions.set(sessionId, { session, handId });
+    this.sessions.set(sessionId, {
+      session,
+      handId,
+      resumableUntil: null,
+    });
     this.hands.bindSession(handId, sessionId);
     this.stats.onSessionCreated();
 
@@ -400,6 +441,30 @@ export class AxonServer {
     await this.sendToHand(handId, {
       type: "session_created",
       sessionId,
+    });
+  }
+
+  private async handleRestoreSession(handId: string, message: RestoreSession): Promise<void> {
+    const entry = this.getSessionEntry(message.sessionId);
+
+    if (entry.handId) {
+      throw new Error(`Session ${message.sessionId} 当前已绑定到其他 Hand`);
+    }
+
+    if (entry.resumableUntil !== null && entry.resumableUntil < Date.now()) {
+      this.destroySession(message.sessionId, entry, "恢复窗口已过期");
+      throw new Error(`Session ${message.sessionId} 已过期，无法恢复`);
+    }
+
+    entry.handId = handId;
+    entry.resumableUntil = null;
+    this.hands.bindSession(handId, message.sessionId);
+
+    log.info("Session 已恢复", { sessionId: message.sessionId, handId });
+
+    await this.sendToHand(handId, {
+      type: "session_restored",
+      sessionId: message.sessionId,
     });
   }
 
@@ -452,9 +517,7 @@ export class AxonServer {
     }
 
     entry.session.close();
-    this.sessions.delete(message.sessionId);
-    this.hands.unbindSession(handId, message.sessionId);
-    this.stats.onSessionEnded();
+    this.destroySession(message.sessionId, entry, "客户端主动关闭");
 
     log.info("Session 已关闭", { sessionId: message.sessionId, handId });
   }
@@ -463,7 +526,7 @@ export class AxonServer {
   // 辅助方法
   // ============================================================
 
-  private getSessionEntry(sessionId: string): { session: BrainSession; handId: string } {
+  private getSessionEntry(sessionId: string): SessionEntry {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
       throw new Error(`会话不存在: ${sessionId}`);
@@ -508,6 +571,35 @@ export class AxonServer {
       return "/";
     }
   }
+
+  private cleanupDetachedSessions(): void {
+    const now = Date.now();
+
+    for (const [sessionId, entry] of this.sessions.entries()) {
+      if (entry.handId !== null || entry.resumableUntil === null || entry.resumableUntil > now) {
+        continue;
+      }
+
+      this.destroySession(sessionId, entry, "恢复窗口超时");
+    }
+  }
+
+  private destroySession(sessionId: string, entry: SessionEntry, reason: string): void {
+    const boundHandId = entry.handId;
+    entry.session.close();
+    this.sessions.delete(sessionId);
+    if (boundHandId) {
+      this.hands.unbindSession(boundHandId, sessionId);
+    }
+    this.stats.onSessionEnded();
+    log.info("Session 已销毁", { sessionId, handId: boundHandId, reason });
+  }
+}
+
+interface SessionEntry {
+  session: BrainSession;
+  handId: string | null;
+  resumableUntil: number | null;
 }
 
 function asError(error: unknown): Error {

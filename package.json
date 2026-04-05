@@ -1,5 +1,8 @@
 {
   "name": "axon",
   "private": true,
+  "scripts": {
+    "test": "npm run test --workspaces --if-present"
+  },
   "workspaces": ["server", "hand", "web"]
 }
