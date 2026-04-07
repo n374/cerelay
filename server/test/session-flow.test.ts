@@ -1,3 +1,4 @@
+import os from "node:os";
 import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +21,7 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
   });
 
   const sent: ServerToHandMessage[] = [];
-  let queryInput: { prompt: string; options: { cwd: string; model: string; pathToClaudeCodeExecutable: string } } | null = null;
+  let queryInput: { prompt: string; options: { cwd: unknown; model: string; pathToClaudeCodeExecutable: string } } | null = null;
 
   const session = BrainSession.createSession({
     id: "sess-flow-1",
@@ -35,7 +36,8 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
       queryInput = {
         prompt: input.prompt,
         options: {
-          cwd: input.options.cwd,
+          // 捕获 cwd 字段以便断言 SDK 收到的是系统临时目录,而不是 Hand 的宿主机 cwd
+          cwd: (input.options as { cwd?: unknown }).cwd,
           model: input.options.model,
           pathToClaudeCodeExecutable: input.options.pathToClaudeCodeExecutable,
         },
@@ -60,7 +62,8 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
   assert.deepEqual(queryInput, {
     prompt: "测试 prompt",
     options: {
-      cwd: "/workspace/demo",
+      // SDK 应收到系统临时目录,而非 Hand 的宿主机 cwd:避免 spawn ENOENT,且不污染项目配置
+      cwd: os.tmpdir(),
       model: "claude-test",
       pathToClaudeCodeExecutable: fake.executablePath,
     },
@@ -70,6 +73,50 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
     { type: "text_chunk", sessionId: "sess-flow-1", text: "你好" },
     { type: "session_end", sessionId: "sess-flow-1", result: "完成", error: undefined },
   ]);
+});
+
+test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {
+  const fake = await writeFakeClaude({ command: "pwd" });
+  const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
+  process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
+
+  t.after(async () => {
+    if (originalExecutable === undefined) {
+      delete process.env.CLAUDE_CODE_EXECUTABLE;
+    } else {
+      process.env.CLAUDE_CODE_EXECUTABLE = originalExecutable;
+    }
+    await fake.cleanup();
+  });
+
+  // 故意构造一个明显不存在的宿主机风格路径:如果 BrainSession 把它直接透传给 SDK,
+  // child_process.spawn 会因 cwd ENOENT 立刻失败 —— 这正是 fix 之前的 bug。
+  const hostCwd = "/Users/nobody/does-not-exist-xxx-regression";
+  let capturedCwd: unknown = "<unset>";
+
+  const session = BrainSession.createSession({
+    id: "sess-flow-cwd-regression",
+    cwd: hostCwd,
+    model: "claude-test",
+    transport: {
+      send: async () => {},
+    },
+    queryRunner: (input) => {
+      capturedCwd = (input.options as { cwd?: unknown }).cwd;
+      return (async function* () {
+        yield { type: "result", result: "ok" };
+      })();
+    },
+  });
+
+  await session.prompt("regression");
+
+  // 1. 宿主机路径必须没有泄漏到 SDK
+  assert.notEqual(capturedCwd, hostCwd);
+  // 2. SDK 收到的是系统临时目录(方案 3 的承诺)
+  assert.equal(capturedCwd, os.tmpdir());
+  // 3. BrainSession 仍把宿主机路径作为元信息保留(供 Hand / 日志使用)
+  assert.equal(session.info().cwd, hostCwd);
 });
 
 test("BrainSession relays tool calls through Hand and completes once tool_result arrives", async () => {

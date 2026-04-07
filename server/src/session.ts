@@ -211,7 +211,11 @@ export class BrainSession {
       const stream = this.queryRunner({
         prompt: text,
         options: {
-          cwd: this.cwd,
+          // Brain 内的 SDK 子进程不做真正的文件操作:builtin 工具被 PreToolUse hook 拦截后路由到
+          // Hand,Hand 侧 ToolExecutor 用自身 cwd 执行。这里显式使用系统临时目录,而不是透传
+          // Hand 传来的宿主机路径 —— 否则在容器里(或本地 dev 跨机环境)该路径很可能不存在,
+          // 导致 child_process.spawn 因 cwd ENOENT 而失败;tmpdir 总是存在且不会沾染项目配置。
+          cwd: os.tmpdir(),
           model: this.model,
           pathToClaudeCodeExecutable: resolveClaudeCodeExecutable(),
           permissionMode: "default",
