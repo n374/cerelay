@@ -109,19 +109,92 @@ Notes:
 npm install
 ```
 
-### 2. 启动 Server / Start the Server
+### 2. 启动 Brain Server（Docker） / Start the Brain Server (Docker)
+
+默认不需要 `.env`。容器会：
+
+By default, no `.env` file is required. The container will:
+
+- 复用当前 shell / Claude Code 注入的环境变量
+- 默认挂载宿主机 `~/.claude` 到容器 `/home/node/.claude`
+
+然后直接启动：
+
+Then start directly:
 
 ```bash
-cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
+npm run brain:up
 ```
 
-可选参数 / Optional flags：`--port`（默认 8765）、`--model`（默认使用 SDK 配置）
+临时打开 debug 日志：
+
+```bash
+LOG_LEVEL=debug npm run brain:up
+```
+
+默认会把宿主机的 `~/.claude` 挂载到容器内 `/home/node/.claude`。
+
+By default, the container bind-mounts the host `~/.claude` directory to `/home/node/.claude`.
+
+如果你想覆盖默认挂载路径或端口，可以再创建 `.env`：
+
+If you want to override the default mount path or ports, you can still create a `.env` file:
+
+```bash
+cp .env.example .env
+```
+
+例如在 `.env` 中加入：
+
+For example, add this to `.env`:
+
+```bash
+CLAUDE_CONFIG_DIR=/absolute/path/to/.claude
+BRAIN_HOST_PORT=8765
+LOG_LEVEL=debug
+LOG_JSON=false
+CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+```
+
+例如：
+
+For example:
+
+```bash
+CLAUDE_CONFIG_DIR=/Users/yourname/.claude
+```
+
+查看日志 / View logs:
+
+```bash
+npm run brain:logs
+```
+
+停止 / Stop:
+
+```bash
+npm run brain:down
+```
 
 前置条件 / Prerequisites：
 
-- 已安装 Node.js 与 npm
-- 已安装并认证 `claude` CLI
-- 当前环境可使用 `@anthropic-ai/claude-agent-sdk`
+- 已安装 Docker / Docker Compose
+- 已配置 `ANTHROPIC_API_KEY`
+
+默认情况下，Brain Server 会监听宿主机 `localhost:8765`，容器内已包含 `claude-code`。
+
+By default, the Brain Server listens on host `localhost:8765`, and the container already includes `claude-code`.
+
+挂载示例 / Mount examples:
+
+```yaml
+services:
+  axon-brain:
+    volumes:
+      - ${HOME}/.claude:/home/node/.claude
+      # 或者 / Or:
+      # - /absolute/path/to/.claude:/home/node/.claude
+```
 
 ### 3. 启动 Hand / Start the Hand
 
@@ -133,11 +206,47 @@ Run in a new terminal:
 cd hand && npm start -- --server localhost:8765 --cwd /path/to/project
 ```
 
-### 4. 交互 / Interact
+这一步仍然在本机运行，因为 Hand 负责执行本地工具。
+
+Hand still runs on the local machine because it executes local tools.
+
+### 4. 启动 Web（可选） / Start the Web UI (Optional)
+
+如果你要用浏览器手动测试，再开一个终端：
+
+If you want to test from the browser, start the Web server in another terminal:
+
+```bash
+cd web && npm start -- --port 8766 --brain localhost:8765
+```
+
+打开 [http://localhost:8766](http://localhost:8766)，在设置里填：
+
+Open [http://localhost:8766](http://localhost:8766), then fill in:
+
+- Brain 地址 / Brain URL: `ws://localhost:8766/ws`
+- 工作目录 / CWD: 你的本地项目目录
+- 模型 / Model: `claude-sonnet-4-20250514`
+
+### 5. 交互 / Interact
 
 Hand CLI 连接成功后会自动创建 session。输入 prompt，Server 会通过 SDK 发起一次 `query()`；当 Claude 调用工具时，Hand 在本地执行并把结果回传。
 
 After Hand connects, it creates a session automatically. Each prompt triggers one SDK `query()` call; when Claude requests a tool, Hand executes it locally and returns the result.
+
+## 本地直跑 Server（可选） / Running Server Locally (Optional)
+
+如果你不想用 Docker，也可以直接本地启动 Server：
+
+If you do not want Docker, you can still start the Server locally:
+
+```bash
+cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
+```
+
+这种方式要求本机已安装并认证 `claude` CLI，且当前环境能使用 `@anthropic-ai/claude-agent-sdk`。
+
+This mode requires a locally installed and authenticated `claude` CLI, and a working `@anthropic-ai/claude-agent-sdk` environment.
 
 ## 组件说明 / Components
 

@@ -1,11 +1,10 @@
 # ============================================================
 # Axon Brain — docker-compose 配置
 # 使用方式：
-#   1. 复制 .env.example 为 .env 并填入 ANTHROPIC_API_KEY
-#   2. docker compose up -d
+#   1. 默认复用当前 shell / Claude Code 注入的环境变量
+#   2. 默认挂载宿主机 ~/.claude
+#   3. docker compose up -d
 # ============================================================
-
-version: "3.9"
 
 services:
   axon-brain:
@@ -17,14 +16,20 @@ services:
 
     # 环境变量（通过 .env 文件或 -e 参数传入）
     environment:
-      # 必填：Anthropic API Key
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # 优先复用当前 shell / Claude Code 注入的环境变量
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
       # 可选：覆盖端口（容器内端口，与 ports 映射对应）
       - PORT=${BRAIN_PORT:-8765}
       # 可选：覆盖模型
       - MODEL=${MODEL:-claude-sonnet-4-20250514}
+      # 可选：覆盖日志级别（debug/info/warn/error）
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # 可选：是否输出 JSON Lines 日志
+      - LOG_JSON=${LOG_JSON:-false}
+      # 可选：显式指定 Claude Code 可执行文件路径
+      - CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE:-/usr/local/bin/claude}
       # 可选：传入 claude CLI 额外配置（JSON 字符串）
-      - CLAUDE_CONFIG=${CLAUDE_CONFIG:-}
+      - CLAUDE_CONFIG=${CLAUDE_CONFIG-}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
@@ -32,7 +37,9 @@ services:
 
     # 数据持久化：挂载 claude CLI 凭证目录（避免每次重启重新认证）
     volumes:
-      - claude_config:/home/node/.claude
+      - type: bind
+        source: ${CLAUDE_CONFIG_DIR:-${HOME}/.claude}
+        target: /home/node/.claude
       # 可选：挂载工作目录（Brain 执行工具时的默认 cwd）
       # - ./workspace:/workspace
 
@@ -59,8 +66,3 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-volumes:
-  # claude CLI 配置持久化卷
-  claude_config:
-    driver: local

@@ -30,3 +30,6 @@ __pycache__/
 *.pyc
 .venv/
 
+# 测试运行临时产物
+.tmp-tests/
+

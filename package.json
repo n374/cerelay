@@ -2,7 +2,12 @@
   "name": "axon",
   "private": true,
   "scripts": {
-    "test": "npm run test --workspaces --if-present"
+    "test:smoke": "node --test test/**/*.test.mjs",
+    "test:workspaces": "npm run test --workspaces --if-present",
+    "brain:up": "docker compose up --build --force-recreate --remove-orphans -d",
+    "brain:down": "docker compose down",
+    "brain:logs": "docker compose logs -f axon-brain",
+    "test": "npm run test:smoke && npm run test:workspaces"
   },
   "workspaces": ["server", "hand", "web"]
 }
