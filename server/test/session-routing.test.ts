@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isHandRoutedToolName } from "../src/session.js";
+import { isHandRoutedToolName, resolveClaudeCodeExecutable } from "../src/session.js";
 import { ToolRoutingStore } from "../src/tool-routing.js";
 
 test("hand routing includes built-in tools and MCP tools", () => {
@@ -29,4 +29,9 @@ test("tool routing store keeps built-ins fixed and allows extra configurable too
   assert.equal(routing.shouldRouteToHand("WebFetch"), false);
   assert.equal(routing.shouldRouteToHand("WebSearch"), true);
   assert.equal(routing.shouldRouteToHand("connector__demo__call"), true);
+});
+
+test("resolveClaudeCodeExecutable prefers env override and falls back to claude", () => {
+  assert.equal(resolveClaudeCodeExecutable({ CLAUDE_CODE_EXECUTABLE: "/usr/local/bin/claude " }), "/usr/local/bin/claude");
+  assert.equal(resolveClaudeCodeExecutable({}), "/usr/local/bin/claude");
 });

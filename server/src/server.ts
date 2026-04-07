@@ -172,9 +172,18 @@ export class AxonServer {
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     const pathname = this.getPathname(req.url);
+    const requestLog = log.child({
+      method: req.method ?? "UNKNOWN",
+      path: pathname,
+      remoteAddress: req.socket.remoteAddress ?? "unknown",
+    });
+    requestLog.debug("收到 HTTP 请求");
 
     // 健康检查（无需认证）
     if (pathname === "/health") {
+      requestLog.debug("返回健康检查结果", {
+        handsOnline: this.hands.count(),
+      });
       this.sendJson(res, 200, {
         status: "ok",
         time: new Date().toISOString(),
@@ -185,10 +194,12 @@ export class AxonServer {
 
     // 管理后台路由（需要认证）
     if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+      requestLog.debug("转交管理后台路由");
       this.handleAdminRequest(req, res, pathname);
       return;
     }
 
+    requestLog.debug("HTTP 路由未命中");
     this.sendJson(res, 404, { error: "not_found" });
   }
 
@@ -197,32 +208,47 @@ export class AxonServer {
   // ============================================================
 
   private handleAdminRequest(req: IncomingMessage, res: ServerResponse, url: string): void {
+    const requestLog = log.child({
+      method: req.method ?? "UNKNOWN",
+      path: url,
+      remoteAddress: req.socket.remoteAddress ?? "unknown",
+    });
+    requestLog.debug("收到管理后台请求");
+
     // 管理后台认证（始终要求 token，即使认证未全局启用）
     const authHeader = req.headers.authorization;
     const token = extractBearerToken(authHeader);
 
     if (!token) {
+      requestLog.debug("管理后台请求缺少 Bearer Token");
       this.sendJson(res, 401, { error: "unauthorized" });
       return;
     }
 
-    if (!this.auth.verify(token)) {
+    const tokenId = this.auth.verify(token);
+    if (!tokenId) {
+      requestLog.warn("管理后台请求认证失败");
       this.sendJson(res, 403, { error: "forbidden" });
       return;
     }
 
+    requestLog.debug("管理后台请求认证通过", { tokenId });
+
     // 路由
     if (url === "/admin/stats" && req.method === "GET") {
+      requestLog.debug("返回统计信息");
       this.sendJson(res, 200, this.stats.snapshot(this.hands.count()));
       return;
     }
 
     if (url === "/admin/hands" && req.method === "GET") {
+      requestLog.debug("返回 Hand 列表");
       this.sendJson(res, 200, { hands: this.hands.stats() });
       return;
     }
 
     if (url === "/admin/sessions" && req.method === "GET") {
+      requestLog.debug("返回 Session 列表", { sessionCount: this.sessions.size });
       this.sendJson(res, 200, {
         sessions: Array.from(this.sessions.entries()).map(([id, { session, handId }]) => ({
           ...session.info(),
@@ -233,21 +259,25 @@ export class AxonServer {
     }
 
     if (url === "/admin/tokens" && req.method === "GET") {
+      requestLog.debug("返回 Token 列表", { tokenCount: this.auth.list().length });
       this.sendJson(res, 200, { tokens: this.auth.list() });
       return;
     }
 
     if (url === "/admin/tool-routing" && req.method === "GET") {
+      requestLog.debug("返回工具路由配置");
       this.sendJson(res, 200, this.toolRouting.snapshot());
       return;
     }
 
     if (url === "/admin/tokens" && req.method === "POST") {
+      requestLog.debug("进入创建 Token 流程");
       this.handleCreateToken(req, res);
       return;
     }
 
     if (url === "/admin/tool-routing" && req.method === "PUT") {
+      requestLog.debug("进入更新工具路由流程");
       this.handleUpdateToolRouting(req, res);
       return;
     }
@@ -255,14 +285,21 @@ export class AxonServer {
     if (url.startsWith("/admin/tokens/") && req.method === "DELETE") {
       const tokenId = url.replace("/admin/tokens/", "");
       const ok = this.auth.revoke(tokenId);
+      requestLog.debug("处理 Token 吊销请求", { tokenId, ok });
       this.sendJson(res, ok ? 200 : 404, { ok, tokenId });
       return;
     }
 
+    requestLog.debug("管理后台路由未命中");
     this.sendJson(res, 404, { error: "not_found" });
   }
 
   private handleCreateToken(req: IncomingMessage, res: ServerResponse): void {
+    const requestLog = log.child({
+      method: req.method ?? "UNKNOWN",
+      path: this.getPathname(req.url),
+      remoteAddress: req.socket.remoteAddress ?? "unknown",
+    });
     let body = "";
     req.on("data", (chunk: Buffer) => {
       body += chunk.toString();
@@ -273,14 +310,28 @@ export class AxonServer {
         const label = params.label ?? "手动创建";
         const ttl = params.ttl;
         const result = this.auth.create(label, ttl);
+        requestLog.debug("已创建管理 Token", {
+          tokenId: result.tokenId,
+          label,
+          ttl,
+        });
         this.sendJson(res, 201, result);
       } catch (err) {
+        requestLog.warn("创建 Token 请求体无效", {
+          bodyLength: body.length,
+          error: asError(err).message,
+        });
         this.sendJson(res, 400, { error: "invalid_body" });
       }
     });
   }
 
   private handleUpdateToolRouting(req: IncomingMessage, res: ServerResponse): void {
+    const requestLog = log.child({
+      method: req.method ?? "UNKNOWN",
+      path: this.getPathname(req.url),
+      remoteAddress: req.socket.remoteAddress ?? "unknown",
+    });
     let body = "";
     req.on("data", (chunk: Buffer) => {
       body += chunk.toString();
@@ -291,8 +342,16 @@ export class AxonServer {
           ? (JSON.parse(body) as { handToolNames?: string[]; handToolPrefixes?: string[] })
           : {};
         const updated = this.toolRouting.update(params);
+        requestLog.debug("已更新工具路由配置", {
+          handToolNames: updated.handToolNames,
+          handToolPrefixes: updated.handToolPrefixes,
+        });
         this.sendJson(res, 200, updated);
-      } catch {
+      } catch (error) {
+        requestLog.warn("更新工具路由请求体无效", {
+          bodyLength: body.length,
+          error: asError(error).message,
+        });
         this.sendJson(res, 400, { error: "invalid_body" });
       }
     });
@@ -303,7 +362,17 @@ export class AxonServer {
   // ============================================================
 
   private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    const upgradeLog = log.child({
+      path: this.getPathname(request.url),
+      remoteAddress: request.socket.remoteAddress ?? "unknown",
+      hasAuthHeader: Boolean(request.headers.authorization),
+      hasQueryToken: Boolean(extractQueryToken(request.url)),
+      authEnabled: this.auth.isEnabled(),
+    });
+    upgradeLog.debug("收到 WebSocket 升级请求");
+
     if (request.url !== "/ws" && !request.url?.startsWith("/ws?")) {
+      upgradeLog.debug("WebSocket 升级路径不受支持", { url: request.url });
       socket.destroy();
       return;
     }
@@ -313,17 +382,26 @@ export class AxonServer {
       const headerToken = extractBearerToken(request.headers.authorization);
       const queryToken = extractQueryToken(request.url);
       const rawToken = headerToken ?? queryToken ?? "";
+      const tokenSource = headerToken ? "header" : queryToken ? "query" : "missing";
       const tokenId = this.auth.verify(rawToken);
 
       if (!tokenId) {
-        log.warn("WebSocket 升级被拒绝：Token 无效");
+        upgradeLog.warn("WebSocket 升级被拒绝：Token 无效", {
+          tokenSource,
+        });
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
+
+      upgradeLog.debug("WebSocket 升级认证通过", {
+        tokenId,
+        tokenSource,
+      });
     }
 
     this.wsServer.handleUpgrade(request, socket, head, (ws) => {
+      upgradeLog.debug("WebSocket 升级完成");
       this.wsServer.emit("connection", ws, request);
     });
   }
@@ -338,17 +416,24 @@ export class AxonServer {
     const queryToken = extractQueryToken(req.url);
     const rawToken = headerToken ?? queryToken ?? "";
     const tokenId = this.auth.isEnabled() ? (this.auth.verify(rawToken) ?? "unknown") : "noauth";
+    const tokenSource = headerToken ? "header" : queryToken ? "query" : "none";
 
     const handId = `hand-${Date.now()}-${randomUUID().substring(0, 8)}`;
     const remoteAddress =
       req.socket.remoteAddress ?? req.headers["x-forwarded-for"]?.toString() ?? "unknown";
+    const handLog = log.child({ handId, remoteAddress, tokenId });
 
     const handInfo = this.hands.register(handId, socket, tokenId, remoteAddress);
     this.stats.onHandConnected();
     log.info("Hand 已连接", { handId, remoteAddress, tokenId });
+    handLog.debug("Hand 连接上下文已建立", {
+      tokenSource,
+      authEnabled: this.auth.isEnabled(),
+    });
 
     // 发送 connected 通知
     try {
+      handLog.debug("发送 connected 通知");
       await this.sendToHand(handId, { type: "connected" });
     } catch (err) {
       log.error("发送 connected 通知失败", { handId, error: String(err) });
@@ -356,9 +441,13 @@ export class AxonServer {
 
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
+        handLog.debug("忽略二进制消息");
         return;
       }
       this.stats.onMessageReceived();
+      handLog.debug("收到 Hand 文本消息", {
+        bytes: data.toString().length,
+      });
       void this.handleMessage(handId, data.toString());
     });
 
@@ -366,12 +455,16 @@ export class AxonServer {
       this.hands.unregister(handId);
       this.stats.onHandDisconnected();
       log.info("Hand 已断开", { handId });
+      handLog.debug("开始处理 Hand 断开后的 session 状态", {
+        sessionCount: handInfo.sessionIds.size,
+      });
 
       // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
       for (const sessionId of handInfo.sessionIds) {
         const entry = this.sessions.get(sessionId);
         if (entry) {
           if (entry.session.info().status === "active") {
+            handLog.debug("Hand 断开时销毁活跃 session", { sessionId });
             this.destroySession(sessionId, entry, "Hand 断开时 session 仍在运行");
             continue;
           }
@@ -381,6 +474,10 @@ export class AxonServer {
           log.info("Session 进入可恢复窗口", {
             sessionId,
             resumableUntil: new Date(entry.resumableUntil).toISOString(),
+          });
+          handLog.debug("Session 已标记为可恢复", {
+            sessionId,
+            resumableUntil: entry.resumableUntil,
           });
         }
       }
@@ -398,13 +495,21 @@ export class AxonServer {
 
   private async handleMessage(handId: string, raw: string): Promise<void> {
     let envelope: Envelope;
+    const messageLog = log.child({
+      handId,
+      bytes: raw.length,
+    });
 
     try {
       envelope = JSON.parse(raw) as Envelope;
     } catch (error) {
+      messageLog.warn("Hand 消息 JSON 解析失败", { error: asError(error).message });
       await this.sendErrorToHand(handId, asError(error).message);
       return;
     }
+
+    const parsedMessageLog = messageLog.child(messageDebugFields(envelope));
+    parsedMessageLog.debug("Hand 消息解析完成");
 
     try {
       switch (envelope.type) {
@@ -430,12 +535,18 @@ export class AxonServer {
           throw new Error(`未知消息类型: ${envelope.type}`);
       }
     } catch (error) {
+      parsedMessageLog.error("处理 Hand 消息失败", { error: asError(error).message });
       this.stats.onError();
       await this.sendErrorToHand(handId, asError(error).message);
     }
   }
 
   private async handleCreateSession(handId: string, message: CreateSession): Promise<void> {
+    log.debug("收到创建 Session 请求", {
+      handId,
+      cwd: message.cwd || ".",
+      model: message.model || this.defaultModel,
+    });
     const sessionId = `sess-${Date.now()}-${randomUUID()}`;
 
     const session = BrainSession.createSession({
@@ -449,6 +560,11 @@ export class AxonServer {
           if (!currentEntry?.handId) {
             throw new Error(`Session ${sessionId} 当前未绑定可用 Hand`);
           }
+          log.debug("转发 Session 消息到 Hand", {
+            sessionId,
+            handId: currentEntry.handId,
+            ...messageDebugFields(payload),
+          });
           // tool_call 时记录工具调用统计
           if (payload.type === "tool_call") {
             const tc = payload as import("./protocol.js").ToolCall;
@@ -477,6 +593,13 @@ export class AxonServer {
 
   private async handleRestoreSession(handId: string, message: RestoreSession): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
+    log.debug("收到恢复 Session 请求", {
+      sessionId: message.sessionId,
+      handId,
+      currentHandId: entry.handId,
+      resumableUntil: entry.resumableUntil,
+      status: entry.session.info().status,
+    });
 
     if (entry.handId) {
       throw new Error(`Session ${message.sessionId} 当前已绑定到其他 Hand`);
@@ -507,6 +630,12 @@ export class AxonServer {
     }
 
     log.debug("收到 prompt", { sessionId: message.sessionId, handId });
+    log.debug("开始派发 prompt 到 BrainSession", {
+      sessionId: message.sessionId,
+      handId,
+      textLength: message.text.length,
+      preview: previewText(message.text),
+    });
 
     void entry.session.prompt(message.text).catch((error) => {
       log.error("prompt 执行失败", { sessionId: message.sessionId, error: String(error) });
@@ -517,6 +646,14 @@ export class AxonServer {
 
   private async handleToolResult(handId: string, message: ToolResult): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
+    log.debug("收到工具结果", {
+      handId,
+      sessionId: message.sessionId,
+      requestId: message.requestId,
+      hasError: Boolean(message.error),
+      hasSummary: Boolean(message.summary),
+      outputType: message.output === undefined ? "undefined" : typeof message.output,
+    });
     entry.session.resolveToolResult(message.requestId, {
       output: message.output,
       summary: message.summary,
@@ -534,6 +671,11 @@ export class AxonServer {
       .filter(Boolean)
       .map((entry) => entry!.session.info());
 
+    log.debug("返回 Hand 的 Session 列表", {
+      handId,
+      sessionCount: sessionList.length,
+    });
+
     await this.sendToHand(handId, {
       type: "session_list",
       sessions: sessionList,
@@ -547,6 +689,11 @@ export class AxonServer {
       throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
     }
 
+    log.debug("收到关闭 Session 请求", {
+      handId,
+      sessionId: message.sessionId,
+      status: entry.session.info().status,
+    });
     entry.session.close();
     this.destroySession(message.sessionId, entry, "客户端主动关闭");
 
@@ -566,6 +713,10 @@ export class AxonServer {
   }
 
   private async sendToHand(handId: string, message: ServerToHandMessage | Connected): Promise<void> {
+    log.debug("发送消息到 Hand", {
+      handId,
+      ...messageDebugFields(message),
+    });
     await this.hands.sendTo(handId, message);
   }
 
@@ -577,6 +728,11 @@ export class AxonServer {
     };
 
     try {
+      log.debug("发送错误消息到 Hand", {
+        handId,
+        sessionId,
+        message,
+      });
       await this.hands.sendTo(handId, payload);
     } catch (err) {
       log.error("发送错误消息失败", { handId, error: String(err), originalMessage: message });
@@ -605,13 +761,19 @@ export class AxonServer {
 
   private cleanupDetachedSessions(): void {
     const now = Date.now();
+    let expiredCount = 0;
 
     for (const [sessionId, entry] of this.sessions.entries()) {
       if (entry.handId !== null || entry.resumableUntil === null || entry.resumableUntil > now) {
         continue;
       }
 
+      expiredCount += 1;
       this.destroySession(sessionId, entry, "恢复窗口超时");
+    }
+
+    if (expiredCount > 0) {
+      log.debug("已清理超时未恢复的 Session", { expiredCount });
     }
   }
 
@@ -639,4 +801,37 @@ function asError(error: unknown): Error {
   }
 
   return new Error(typeof error === "string" ? error : JSON.stringify(error));
+}
+
+function messageDebugFields(message: {
+  type: string;
+  sessionId?: unknown;
+  requestId?: unknown;
+  toolName?: unknown;
+}): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    type: message.type,
+  };
+
+  if (typeof message.sessionId === "string") {
+    fields.sessionId = message.sessionId;
+  }
+
+  if (typeof message.requestId === "string") {
+    fields.requestId = message.requestId;
+  }
+
+  if (typeof message.toolName === "string") {
+    fields.toolName = message.toolName;
+  }
+
+  return fields;
+}
+
+function previewText(text: string, maxLength = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
 }
