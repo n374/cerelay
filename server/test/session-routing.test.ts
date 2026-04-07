@@ -32,6 +32,14 @@ test("tool routing store keeps built-ins fixed and allows extra configurable too
 });
 
 test("resolveClaudeCodeExecutable prefers env override and falls back to claude", () => {
-  assert.equal(resolveClaudeCodeExecutable({ CLAUDE_CODE_EXECUTABLE: "/usr/local/bin/claude " }), "/usr/local/bin/claude");
-  assert.equal(resolveClaudeCodeExecutable({}), "/usr/local/bin/claude");
+  // 环境变量覆盖:trim 后返回该值
+  assert.equal(
+    resolveClaudeCodeExecutable(undefined, { CLAUDE_CODE_EXECUTABLE: "/usr/local/bin/claude " }),
+    "/usr/local/bin/claude"
+  );
+  // 无环境变量、无候选命中时抛 Error
+  assert.throws(
+    () => resolveClaudeCodeExecutable(["/no/such/path"], {}),
+    (err: unknown) => err instanceof Error && err.message.includes("/no/such/path")
+  );
 });

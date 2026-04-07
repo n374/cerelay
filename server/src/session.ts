@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type {
@@ -11,7 +14,11 @@ import { createLogger, type Logger } from "./logger.js";
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
 import { isBuiltinHandToolName, isMcpToolName } from "./tool-routing.js";
 
-const DEFAULT_CLAUDE_CODE_EXECUTABLE = "/usr/local/bin/claude";
+export const CLAUDE_EXECUTABLE_CANDIDATES = [
+  "/opt/homebrew/bin/claude",
+  "/usr/local/bin/claude",
+  path.join(os.homedir(), ".claude/local/claude"),
+];
 
 type SessionStatus = "idle" | "active" | "ended";
 type CanUseToolHandler = (
@@ -461,9 +468,19 @@ export function isHandRoutedToolName(toolName: string): boolean {
   return isBuiltinHandToolName(toolName) || isMcpToolName(toolName);
 }
 
-export function resolveClaudeCodeExecutable(env = process.env): string {
+export function resolveClaudeCodeExecutable(candidates = CLAUDE_EXECUTABLE_CANDIDATES, env = process.env): string {
   const configured = env.CLAUDE_CODE_EXECUTABLE?.trim();
-  return configured || DEFAULT_CLAUDE_CODE_EXECUTABLE;
+  if (configured) {
+    return configured;
+  }
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Could not find Claude Code executable. Tried: ${candidates.join(", ")}. Set CLAUDE_CODE_EXECUTABLE env var or install via \`brew install --cask claude-code\`.`
+  );
 }
 
 function runSdkQuery(input: QueryRunnerInput): AsyncIterable<QueryMessage> {
