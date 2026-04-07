@@ -1,9 +1,24 @@
+import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BrainSession } from "../src/session.js";
 import type { ServerToHandMessage } from "../src/protocol.js";
+import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
-test("BrainSession streams thought/text chunks and passes Claude executable options to query runner", async () => {
+test("BrainSession streams thought/text chunks and passes Claude executable options to query runner", async (t) => {
+  const fake = await writeFakeClaude({ command: "pwd" });
+  const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
+  process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
+
+  t.after(async () => {
+    if (originalExecutable === undefined) {
+      delete process.env.CLAUDE_CODE_EXECUTABLE;
+    } else {
+      process.env.CLAUDE_CODE_EXECUTABLE = originalExecutable;
+    }
+    await fake.cleanup();
+  });
+
   const sent: ServerToHandMessage[] = [];
   let queryInput: { prompt: string; options: { cwd: string; model: string; pathToClaudeCodeExecutable: string } } | null = null;
 
@@ -47,7 +62,7 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
     options: {
       cwd: "/workspace/demo",
       model: "claude-test",
-      pathToClaudeCodeExecutable: "/usr/local/bin/claude",
+      pathToClaudeCodeExecutable: fake.executablePath,
     },
   });
   assert.deepEqual(sent, [
