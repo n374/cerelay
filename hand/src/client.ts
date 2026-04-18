@@ -110,14 +110,17 @@ export class HandClient {
       this.ws.close();
       this.ws = null;
     }
+    void this.executor.close().catch(() => undefined);
   }
 
   // 发送 create_session 并等待 session_created 响应
   async sendCreateSession(cwd: string, model?: string): Promise<void> {
+    await this.resetExecutor(cwd);
     const msg: CreateSession = {
       type: "create_session",
       cwd,
       model,
+      mcpToolCatalog: await this.executor.describeMcpServers(),
     };
     await this.writeJSON(msg);
 
@@ -449,6 +452,11 @@ export class HandClient {
         resolve();
       });
     });
+  }
+
+  private async resetExecutor(cwd: string): Promise<void> {
+    await this.executor.close().catch(() => undefined);
+    this.executor = new ToolExecutor(cwd);
   }
 
   private attachMessageConsumer(consumer: (raw: string) => void): () => void {

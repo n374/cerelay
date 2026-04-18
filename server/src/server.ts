@@ -32,6 +32,7 @@ import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
 import { createClaudeHookInjectionWorkspace } from "./claude-hook-injection.js";
+import { createMcpProxyServers } from "./mcp-proxy.js";
 
 const log = createLogger("server");
 const SESSION_RESUME_GRACE_MS = 60_000;
@@ -562,10 +563,15 @@ export class AxonServer {
       token: hookToken,
     });
 
-    const session = BrainSession.createSession({
+    let session!: BrainSession;
+    session = BrainSession.createSession({
       id: sessionId,
       cwd: message.cwd || ".",
       model: message.model || this.defaultModel,
+      mcpServers: createMcpProxyServers(
+        message.mcpToolCatalog,
+        (toolName, input) => session.executeToolViaHand(toolName, input)
+      ),
       sdkCwd: workspace.cwd,
       onClose: workspace.cleanup,
       shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),

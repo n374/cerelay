@@ -48,10 +48,41 @@ export interface Connected {
   sessionId?: string;
 }
 
+export interface McpToolDescriptor {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchema: {
+    type: "object";
+    properties?: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+  outputSchema?: {
+    type: "object";
+    properties?: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+  _meta?: Record<string, unknown>;
+}
+
+export interface McpServerCatalogEntry {
+  tools: McpToolDescriptor[];
+}
+
 export interface CreateSession {
   type: "create_session";
   cwd: string;
   model?: string;
+  mcpToolCatalog?: Record<string, McpServerCatalogEntry>;
 }
 
 export interface CreateSessionResponse {

@@ -3,7 +3,10 @@ import { executeBash } from "./tools/bash.js";
 import { grep, globFiles } from "./tools/search.js";
 import { executeExternalTool, type ExternalToolOutput } from "./tools/external.js";
 import { webFetch, type WebFetchInput, type WebFetchOutput } from "./tools/web.js";
+import { McpRuntime } from "./mcp/runtime.js";
 import { ToolError } from "./tool-error.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { McpServerCatalogEntry } from "./protocol.js";
 import type {
   ReadInput,
   ReadOutput,
@@ -30,6 +33,7 @@ export type ToolOutput =
   | GrepOutput
   | GlobOutput
   | WebFetchOutput
+  | CallToolResult
   | ExternalToolOutput;
 
 // ============================================================
@@ -39,9 +43,11 @@ export type ToolOutput =
 export class ToolExecutor {
   // 会话工作目录，影响相对路径解析和 Bash 的 CWD
   private readonly cwd: string;
+  private readonly mcpRuntime: McpRuntime;
 
   constructor(cwd: string) {
     this.cwd = cwd;
+    this.mcpRuntime = new McpRuntime(cwd);
   }
 
   // 根据工具名分发，与 Go Executor.Execute 完全对齐
@@ -64,8 +70,25 @@ export class ToolExecutor {
       case "WebFetch":
         return webFetch(input as WebFetchInput);
       default:
+        if (isMcpToolName(toolName)) {
+          try {
+            return await this.mcpRuntime.callTool(toolName, input);
+          } catch (error) {
+            if (!(error instanceof ToolError) || error.code !== "tool_unconfigured") {
+              throw error;
+            }
+          }
+        }
         return executeExternalTool(toolName, input, this.cwd);
     }
+  }
+
+  async describeMcpServers(): Promise<Record<string, McpServerCatalogEntry>> {
+    return this.mcpRuntime.describeServers();
+  }
+
+  async close(): Promise<void> {
+    await this.mcpRuntime.close();
   }
 }
 
@@ -143,3 +166,7 @@ const BUILTIN_TOOL_NAMES = new Set<BuiltinToolName>([
   "Glob",
   "WebFetch",
 ]);
+
+function isMcpToolName(toolName: string): boolean {
+  return /^mcp__[A-Za-z0-9_-]+__.+$/.test(toolName);
+}

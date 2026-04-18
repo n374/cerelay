@@ -4,8 +4,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BrainSession } from "../src/session.js";
 import type { ServerToHandMessage } from "../src/protocol.js";
+import type { SdkMcpServerConfig } from "../src/mcp-types.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
 test("BrainSession streams thought/text chunks and passes Claude executable options to query runner", async (t) => {
@@ -77,6 +79,39 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
     { type: "text_chunk", sessionId: "sess-flow-1", text: "你好" },
     { type: "session_end", sessionId: "sess-flow-1", result: "完成", error: undefined },
   ]);
+});
+
+test("BrainSession passes Hand-discovered MCP proxy servers into query()", async () => {
+  let capturedMcpServers: Record<string, SdkMcpServerConfig> | undefined;
+  const proxyServer = new McpServer({ name: "demo", version: "1.0.0" });
+
+  const session = BrainSession.createSession({
+    id: "sess-flow-mcp",
+    cwd: "/workspace/demo",
+    model: "claude-test",
+    mcpServers: {
+      demo: {
+        type: "sdk",
+        name: "demo",
+        instance: proxyServer,
+      },
+    },
+    transport: {
+      send: async () => {},
+    },
+    queryRunner: (input) => {
+      capturedMcpServers = input.options.mcpServers;
+      return (async function* () {
+        yield { type: "result", result: "ok" };
+      })();
+    },
+  });
+
+  await session.prompt("mcp");
+
+  assert.ok(capturedMcpServers);
+  assert.equal(capturedMcpServers?.demo?.type, "sdk");
+  assert.equal(capturedMcpServers?.demo?.name, "demo");
 });
 
 test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {

@@ -13,6 +13,7 @@ import type {
 import { createLogger, type Logger } from "./logger.js";
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
 import { isBuiltinHandToolName, isMcpToolName } from "./tool-routing.js";
+import type { SdkMcpServerConfig } from "./mcp-types.js";
 
 export const CLAUDE_EXECUTABLE_CANDIDATES = [
   "/opt/homebrew/bin/claude",
@@ -83,6 +84,7 @@ type SyncHookJsonOutput = {
 interface SessionQueryOptions {
   cwd: string;
   model: string;
+  mcpServers?: Record<string, SdkMcpServerConfig>;
   pathToClaudeCodeExecutable: string;
   permissionMode: "default";
   canUseTool: CanUseToolHandler;
@@ -104,6 +106,7 @@ export interface BrainSessionOptions {
   cwd: string;
   id: string;
   model: string;
+  mcpServers?: Record<string, SdkMcpServerConfig>;
   sdkCwd?: string;
   onClose?: () => void | Promise<void>;
   transport: SessionTransport;
@@ -118,6 +121,7 @@ export class BrainSession {
   readonly createdAt: Date;
 
   private readonly relay = new ToolRelay();
+  private readonly mcpServers?: Record<string, SdkMcpServerConfig>;
   private readonly sdkCwd: string;
   private readonly transport: SessionTransport;
   private readonly canUseTool: CanUseToolHandler;
@@ -133,6 +137,7 @@ export class BrainSession {
     this.id = options.id;
     this.cwd = options.cwd;
     this.model = options.model;
+    this.mcpServers = options.mcpServers;
     this.transport = options.transport;
     this.sdkCwd = options.sdkCwd ?? os.tmpdir();
     this.onClose = options.onClose;
@@ -227,6 +232,7 @@ export class BrainSession {
           // .claude/settings.local.json。Hand 仍使用 this.cwd 作为真实宿主机 cwd 执行工具。
           cwd: this.sdkCwd,
           model: this.model,
+          mcpServers: this.mcpServers,
           pathToClaudeCodeExecutable: resolveClaudeCodeExecutable(),
           permissionMode: "default",
           canUseTool: this.canUseTool,
@@ -326,7 +332,7 @@ export class BrainSession {
       };
     }
 
-    const result = await this.relayToolCallToHand(input);
+    const result = await this.executeToolViaHand(input.tool_name, input.tool_input, input.tool_use_id);
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -337,7 +343,7 @@ export class BrainSession {
     };
   }
 
-  private async relayToolCallToHand(input: HookInput): Promise<RemoteToolResult> {
+  async executeToolViaHand(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
     if (this.closed) {
       this.log.warn("会话已关闭，无法继续工具调用");
       throw new Error("会话已关闭");
@@ -346,31 +352,31 @@ export class BrainSession {
     const requestId = `hook-${this.id}-${randomUUID()}`;
     this.log.debug("准备转发工具调用到 Hand", {
       requestId,
-      toolName: input.tool_name,
-      toolUseId: input.tool_use_id,
-      inputSummary: summarizeUnknown(input.tool_input),
+      toolName,
+      toolUseId,
+      inputSummary: summarizeUnknown(toolInput),
     });
-    const pending = this.relay.createPending(requestId, input.tool_name);
+    const pending = this.relay.createPending(requestId, toolName);
 
     const toolCall: ToolCall = {
       type: "tool_call",
       sessionId: this.id,
       requestId,
-      toolName: input.tool_name,
-      toolUseId: input.tool_use_id,
-      input: input.tool_input,
+      toolName,
+      toolUseId,
+      input: toolInput,
     };
 
     try {
       await this.transport.send(toolCall);
       this.log.debug("工具调用已发送到 Hand", {
         requestId,
-        toolName: input.tool_name,
+        toolName,
       });
     } catch (error) {
       this.log.error("发送工具调用到 Hand 失败", {
         requestId,
-        toolName: input.tool_name,
+        toolName,
         error: asError(error).message,
       });
       this.relay.reject(requestId, asError(error));
@@ -380,7 +386,7 @@ export class BrainSession {
     const result = await pending;
     this.log.debug("收到 Hand 返回的工具结果", {
       requestId,
-      toolName: input.tool_name,
+      toolName,
       hasError: Boolean(result.error),
       summaryLength: result.summary?.length ?? 0,
       outputSummary: summarizeUnknown(result.output),
@@ -390,12 +396,12 @@ export class BrainSession {
       type: "tool_call_complete",
       sessionId: this.id,
       requestId,
-      toolName: input.tool_name,
+      toolName,
     };
     await this.transport.send(toolCallComplete);
     this.log.debug("工具调用完成通知已发送", {
       requestId,
-      toolName: input.tool_name,
+      toolName,
     });
 
     return result;

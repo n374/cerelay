@@ -83,38 +83,79 @@ test("ToolExecutor dispatches tools and formats results", async () => {
   assert.equal(formatToolError(new Error("plain")), "plain");
 });
 
-test("ToolExecutor dispatches MCP tools through local proxy scripts", async () => {
+test("ToolExecutor discovers MCP tools from .mcp.json and executes them through a generic MCP client", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-"));
-  const proxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-proxy-"));
-  const scriptPath = path.join(proxyDir, "mcp__demo.sh");
+  const scriptDir = await fs.mkdtemp(path.join(process.cwd(), ".axon-hand-mcp-script-"));
+  const scriptPath = path.join(scriptDir, "demo-mcp.mjs");
+  const configPath = path.join(cwd, ".mcp.json");
+
+  t.after(async () => {
+    await fs.rm(scriptDir, { recursive: true, force: true });
+  });
 
   await fs.writeFile(
     scriptPath,
-    "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"tool\":\"%s\"}' \"$AXON_TOOL_NAME\"\n",
+    `
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+
+const server = new McpServer({ name: "demo", version: "1.0.0" });
+server.registerTool(
+  "echo",
+  {
+    description: "Echo the provided text",
+    inputSchema: { text: z.string() },
+  },
+  async ({ text }) => ({
+    content: [{ type: "text", text: \`echo:\${text}\` }],
+    structuredContent: { echoed: text },
+  })
+);
+
+await server.connect(new StdioServerTransport());
+`,
     "utf8"
   );
-  await fs.chmod(scriptPath, 0o755);
 
-  const previousProxyDir = process.env.AXON_MCP_PROXY_DIR;
-  process.env.AXON_MCP_PROXY_DIR = proxyDir;
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      mcpServers: {
+        demo: {
+          command: process.execPath,
+          args: [scriptPath],
+        },
+      },
+    }),
+    "utf8"
+  );
 
-  try {
-    const executor = new ToolExecutor(cwd);
-    const result = await executor.dispatch("mcp__demo__ping", { value: 1 });
-    assert.deepEqual(result, { ok: true, tool: "mcp__demo__ping" });
-    assert.equal(summarizeToolResult("mcp__demo__ping", result), "mcp__demo__ping 完成");
+  const executor = new ToolExecutor(cwd);
+  t.after(async () => {
+    await executor.close();
+  });
 
-    await assert.rejects(
-      () => executor.dispatch("mcp__missing__tool", {}),
-      /未找到 Hand 代理脚本/
-    );
-  } finally {
-    if (previousProxyDir === undefined) {
-      delete process.env.AXON_MCP_PROXY_DIR;
-    } else {
-      process.env.AXON_MCP_PROXY_DIR = previousProxyDir;
-    }
-  }
+  const catalog = await executor.describeMcpServers();
+  assert.equal(Object.keys(catalog).length, 1);
+  assert.equal(catalog.demo?.tools[0]?.name, "echo");
+  assert.equal(catalog.demo?.tools[0]?.description, "Echo the provided text");
+
+  const result = await executor.dispatch("mcp__demo__echo", { text: "hello" });
+  assert.equal(
+    ((result as { content?: Array<{ type?: string; text?: string }> }).content?.[0]?.text),
+    "echo:hello"
+  );
+  assert.deepEqual(
+    (result as { structuredContent?: Record<string, unknown> }).structuredContent,
+    { echoed: "hello" }
+  );
+  assert.equal(summarizeToolResult("mcp__demo__echo", result), "mcp__demo__echo 完成");
+
+  await assert.rejects(
+    () => executor.dispatch("mcp__missing__tool", {}),
+    /未找到 MCP server 配置|未找到 Hand 代理脚本/
+  );
 });
 
 test("ToolExecutor executes WebFetch locally", async (t) => {
