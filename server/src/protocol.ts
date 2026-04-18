@@ -78,15 +78,51 @@ export interface McpServerCatalogEntry {
   tools: McpToolDescriptor[];
 }
 
+export type StdioMcpServerConfig = {
+  type?: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
+
+export type SseMcpServerConfig = {
+  type: "sse";
+  url: string;
+  headers?: Record<string, string>;
+};
+
+export type HttpMcpServerConfig = {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+};
+
+export type McpServerConfig =
+  | StdioMcpServerConfig
+  | SseMcpServerConfig
+  | HttpMcpServerConfig;
+
 export interface CreateSession {
   type: "create_session";
   cwd: string;
+  homeDir?: string;
   model?: string;
-  mcpToolCatalog?: Record<string, McpServerCatalogEntry>;
 }
 
 export interface CreateSessionResponse {
   type: "session_created";
+  sessionId: string;
+  mcpServerConfigs?: Record<string, McpServerConfig>;
+}
+
+export interface SessionMcpCatalog {
+  type: "session_mcp_catalog";
+  sessionId: string;
+  mcpToolCatalog: Record<string, McpServerCatalogEntry>;
+}
+
+export interface SessionMcpCatalogApplied {
+  type: "session_mcp_catalog_applied";
   sessionId: string;
 }
 
@@ -142,6 +178,7 @@ export type ServerToHandMessage =
   | CreateSessionResponse
   | RestoreSessionResponse
   | ServerError
+  | SessionMcpCatalogApplied
   | SessionEnd
   | SessionList
   | TextChunk
@@ -155,4 +192,5 @@ export type HandToServerMessage =
   | ListSessions
   | Prompt
   | RestoreSession
+  | SessionMcpCatalog
   | ToolResult;

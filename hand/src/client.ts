@@ -1,13 +1,19 @@
+import os from "node:os";
 import process from "node:process";
 import WebSocket from "ws";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { UI } from "./ui.js";
+import { createLogger } from "./logger.js";
 import type {
   CreateSession,
   CreateSessionResponse,
+  McpServerConfig,
+  McpServerCatalogEntry,
   Prompt,
   RestoreSession,
   RestoreSessionResponse,
+  SessionMcpCatalog,
+  SessionMcpCatalogApplied,
   ToolResult,
   ServerToHandMessage,
   ToolCall,
@@ -16,6 +22,8 @@ import type {
   TextChunk,
   ThoughtChunk,
 } from "./protocol.js";
+
+const log = createLogger("hand-client");
 
 // ============================================================
 // 回调接口：供 ACP Server 等非 UI 场景使用
@@ -53,6 +61,7 @@ export class HandClient {
   private activeMessageConsumer: ((raw: string) => void) | null = null;
   // executor 在 session 创建后含有正确的 cwd，先用占位 cwd 初始化
   private executor: ToolExecutor;
+  private currentCwd: string;
 
   // 当前活跃的 session ID
   private sessionId = "";
@@ -67,6 +76,7 @@ export class HandClient {
   constructor(serverURL: string, cwd: string, options: HandClientOptions = {}) {
     this.serverURL = serverURL;
     this.initialCwd = cwd;
+    this.currentCwd = cwd;
     this.ui = new UI();
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
@@ -106,6 +116,10 @@ export class HandClient {
 
   // 关闭连接
   close(): void {
+    log.debug("关闭 HandClient", {
+      sessionId: this.sessionId,
+      connected: Boolean(this.ws),
+    });
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -115,17 +129,19 @@ export class HandClient {
 
   // 发送 create_session 并等待 session_created 响应
   async sendCreateSession(cwd: string, model?: string): Promise<void> {
+    this.currentCwd = cwd;
     await this.resetExecutor(cwd);
+
     const msg: CreateSession = {
       type: "create_session",
       cwd,
+      homeDir: os.homedir(),
       model,
-      mcpToolCatalog: await this.executor.describeMcpServers(),
     };
     await this.writeJSON(msg);
 
-    // 等待 session_created（可能先收到 connected 通知）
-    await this.waitForSessionReady("session_created");
+    const response = await this.waitForSessionReady("session_created") as CreateSessionResponse;
+    await this.applySessionMcpConfig(response.sessionId, response.mcpServerConfigs);
   }
 
   async sendRestoreSession(sessionId: string): Promise<void> {
@@ -242,7 +258,7 @@ export class HandClient {
   // ============================================================
 
   // 等待 session_created，跳过 connected 消息
-  private waitForSessionReady(expectedType: "session_created" | "session_restored"): Promise<void> {
+  private waitForSessionReady(expectedType: "session_created" | "session_restored"): Promise<CreateSessionResponse | RestoreSessionResponse> {
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -274,7 +290,7 @@ export class HandClient {
               const prefix = expectedType === "session_restored" ? "[已恢复]" : "[已连接]";
               process.stdout.write(`\x1b[36m${prefix} Session: ${this.sessionId}\x1b[0m\n`);
             }
-            resolve();
+            resolve(response);
             break;
           }
           case "connected":
@@ -379,6 +395,12 @@ export class HandClient {
 
   // 在后台执行工具调用并将结果发回 Server
   private async executeToolCall(msg: ToolCall): Promise<void> {
+    log.debug("开始执行工具调用", {
+      sessionId: msg.sessionId,
+      requestId: msg.requestId,
+      toolName: msg.toolName,
+      inputSummary: summarizeUnknown(msg.input),
+    });
     try {
       const result = await this.executor.dispatch(
         msg.toolName,
@@ -397,6 +419,14 @@ export class HandClient {
         summary: summarizeToolResult(msg.toolName, result),
       };
 
+      log.debug("工具调用执行成功", {
+        sessionId: msg.sessionId,
+        requestId: msg.requestId,
+        toolName: msg.toolName,
+        summary: resp.summary,
+        outputSummary: summarizeUnknown(result),
+      });
+
       this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, result);
 
       await this.writeJSON(resp).catch((writeErr: unknown) => {
@@ -407,6 +437,7 @@ export class HandClient {
     } catch (err) {
       if (this.interactiveOutput) {
         this.ui.printToolResult(msg.toolName, false);
+        this.ui.printError(`[${msg.toolName}] ${formatToolError(err)}`);
       }
 
       const resp: ToolResult = {
@@ -415,6 +446,15 @@ export class HandClient {
         requestId: msg.requestId,
         error: formatToolError(err),
       };
+
+      log.warn("工具调用执行失败", {
+        sessionId: msg.sessionId,
+        requestId: msg.requestId,
+        toolName: msg.toolName,
+        inputSummary: summarizeUnknown(msg.input),
+        error: resp.error,
+        rawError: formatErrorForLog(err),
+      });
 
       this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, undefined, resp.error);
 
@@ -455,8 +495,101 @@ export class HandClient {
   }
 
   private async resetExecutor(cwd: string): Promise<void> {
+    await this.resetExecutorWithConfig(cwd, undefined);
+  }
+
+  private async resetExecutorWithConfig(
+    cwd: string,
+    mcpServerConfigs: Record<string, McpServerConfig> | undefined
+  ): Promise<void> {
     await this.executor.close().catch(() => undefined);
-    this.executor = new ToolExecutor(cwd);
+    this.executor = new ToolExecutor(cwd, mcpServerConfigs);
+    log.debug("重建 ToolExecutor", {
+      cwd,
+      mcpServerCount: Object.keys(mcpServerConfigs ?? {}).length,
+      mcpServers: Object.keys(mcpServerConfigs ?? {}),
+    });
+  }
+
+  private async applySessionMcpConfig(
+    sessionId: string,
+    mcpServerConfigs: Record<string, McpServerConfig> | undefined
+  ): Promise<void> {
+    await this.resetExecutorWithConfig(this.currentCwd, mcpServerConfigs);
+
+    let mcpToolCatalog: Record<string, McpServerCatalogEntry>;
+    try {
+      mcpToolCatalog = await this.executor.describeMcpServers();
+      log.debug("收集 Brain 下发 MCP tool catalog 完成", {
+        cwd: this.currentCwd,
+        sessionId,
+        serverCount: Object.keys(mcpToolCatalog).length,
+        servers: Object.keys(mcpToolCatalog),
+      });
+    } catch (error) {
+      log.error("收集 Brain 下发 MCP tool catalog 失败", {
+        cwd: this.currentCwd,
+        sessionId,
+        error: formatErrorForLog(error),
+      });
+      throw error;
+    }
+
+    const update: SessionMcpCatalog = {
+      type: "session_mcp_catalog",
+      sessionId,
+      mcpToolCatalog,
+    };
+    await this.writeJSON(update);
+    await this.waitForMcpCatalogApplied(sessionId);
+  }
+
+  private waitForMcpCatalogApplied(sessionId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error("WebSocket 未连接"));
+        return;
+      }
+
+      const ws = this.ws;
+
+      const onMessage = (raw: string) => {
+        let msg: ServerToHandMessage;
+        try {
+          msg = JSON.parse(raw) as ServerToHandMessage;
+        } catch {
+          return;
+        }
+
+        switch (msg.type) {
+          case "session_mcp_catalog_applied": {
+            const applied = msg as SessionMcpCatalogApplied;
+            if (applied.sessionId !== sessionId) {
+              break;
+            }
+            releaseMessageConsumer();
+            ws.off("error", onError);
+            resolve();
+            break;
+          }
+          case "error": {
+            releaseMessageConsumer();
+            ws.off("error", onError);
+            reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
+            break;
+          }
+        }
+      };
+
+      const onError = (err: Error) => {
+        releaseMessageConsumer();
+        reject(new Error(`等待 MCP catalog 应用失败: ${err.message}`));
+      };
+
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
+      ws.on("error", onError);
+    });
   }
 
   private attachMessageConsumer(consumer: (raw: string) => void): () => void {
@@ -477,4 +610,35 @@ export class HandClient {
       this.activeMessageConsumer(raw);
     }
   }
+}
+
+function summarizeUnknown(value: unknown): string {
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  if (typeof value === "string") {
+    return previewText(value, 120);
+  }
+
+  try {
+    return previewText(JSON.stringify(value), 120);
+  } catch {
+    return String(value);
+  }
+}
+
+function previewText(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function formatErrorForLog(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+  return String(error);
 }

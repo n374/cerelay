@@ -27,6 +27,11 @@ test("CLI mode can create session, execute remote Write tool, and exit cleanly",
         return;
       }
 
+      if (msg.type === "session_mcp_catalog") {
+        socket.send(JSON.stringify({ type: "session_mcp_catalog_applied", sessionId: "sess-cli" }));
+        return;
+      }
+
       if (msg.type === "prompt") {
         socket.send(JSON.stringify({
           type: "tool_call",
@@ -119,6 +124,11 @@ test("ACP mode returns clean JSON-RPC responses and notifications", async (t) =>
 
       if (msg.type === "create_session") {
         socket.send(JSON.stringify({ type: "session_created", sessionId: "sess-acp" }));
+        return;
+      }
+
+      if (msg.type === "session_mcp_catalog") {
+        socket.send(JSON.stringify({ type: "session_mcp_catalog_applied", sessionId: "sess-acp" }));
         return;
       }
 
@@ -229,6 +239,11 @@ test("CLI mode restores the existing session after an idle reconnect", async (t)
         return;
       }
 
+      if (ordinal === 1 && msg.type === "session_mcp_catalog") {
+        socket.send(JSON.stringify({ type: "session_mcp_catalog_applied", sessionId: "sess-cli-restore" }));
+        return;
+      }
+
       if (ordinal === 2 && msg.type === "restore_session") {
         sawRestore = true;
         socket.send(JSON.stringify({ type: "session_restored", sessionId: "sess-cli-restore" }));
@@ -302,6 +317,11 @@ test("ACP mode restores the existing session before the next prompt", async (t) 
       if (ordinal === 1 && msg.type === "create_session") {
         socket.send(JSON.stringify({ type: "session_created", sessionId: "sess-acp-restore" }));
         setTimeout(() => socket.close(), 50);
+        return;
+      }
+
+      if (ordinal === 1 && msg.type === "session_mcp_catalog") {
+        socket.send(JSON.stringify({ type: "session_mcp_catalog_applied", sessionId: "sess-acp-restore" }));
         return;
       }
 

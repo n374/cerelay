@@ -32,6 +32,9 @@ services:
       - CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE:-/usr/local/bin/claude}
       # 可选：传入 claude CLI 额外配置（JSON 字符串）
       - CLAUDE_CONFIG=${CLAUDE_CONFIG-}
+      # Claude session 运行在独立 mount namespace 中
+      - AXON_ENABLE_MOUNT_NAMESPACE=${AXON_ENABLE_MOUNT_NAMESPACE:-true}
+      - AXON_NAMESPACE_RUNTIME_ROOT=${AXON_NAMESPACE_RUNTIME_ROOT:-/opt/axon-runtime}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
@@ -47,6 +50,9 @@ services:
         target: /home/node/.claude.json
       # 可选：挂载工作目录（Brain 执行工具时的默认 cwd）
       # - ./workspace:/workspace
+
+    cap_add:
+      - SYS_ADMIN
 
     # 健康检查（覆盖 Dockerfile 中的定义，可按需调整）
     healthcheck:

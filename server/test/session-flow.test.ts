@@ -11,7 +11,7 @@ import type { SdkMcpServerConfig } from "../src/mcp-types.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
 test("BrainSession streams thought/text chunks and passes Claude executable options to query runner", async (t) => {
-  const fake = await writeFakeClaude({ command: "pwd" });
+  const fake = await writeFakeClaude();
   const sdkCwd = await mkdtemp(path.join(os.tmpdir(), "axon-session-flow-sdk-cwd-"));
   const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
   process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
@@ -114,8 +114,36 @@ test("BrainSession passes Hand-discovered MCP proxy servers into query()", async
   assert.equal(capturedMcpServers?.demo?.name, "demo");
 });
 
+test("BrainSession resumes the real Claude session across prompts", async () => {
+  const resumes: Array<string | undefined> = [];
+
+  const session = BrainSession.createSession({
+    id: "sess-flow-resume",
+    cwd: "/workspace/demo",
+    model: "claude-test",
+    transport: {
+      send: async () => {},
+    },
+    queryRunner: (input) => {
+      resumes.push(input.options.resume);
+      return (async function* () {
+        yield {
+          type: "result",
+          result: input.options.resume ? "第二轮完成" : "第一轮完成",
+          session_id: "11111111-1111-4111-8111-111111111111",
+        };
+      })();
+    },
+  });
+
+  await session.prompt("第一问");
+  await session.prompt("第二问");
+
+  assert.deepEqual(resumes, [undefined, "11111111-1111-4111-8111-111111111111"]);
+});
+
 test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {
-  const fake = await writeFakeClaude({ command: "pwd" });
+  const fake = await writeFakeClaude();
   const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
   process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
 
@@ -186,7 +214,7 @@ test("BrainSession relays tool calls through Hand and completes once tool_result
         tool_input: { command: "pwd" },
       });
 
-      assert.equal(decision.hookSpecificOutput?.permissionDecisionReason, "Tool executed remotely via Axon Hand");
+      assert.equal(decision.hookSpecificOutput?.permissionDecisionReason, "Tool response ready");
       assert.equal(decision.hookSpecificOutput?.additionalContext, "stdout:\n/workspace/demo\n\nexit_code: 0");
 
       yield {
@@ -213,6 +241,56 @@ test("BrainSession relays tool calls through Hand and completes once tool_result
     sessionId: "sess-flow-2",
     result: "done",
     error: undefined,
+  });
+});
+
+test("BrainSession rewrites Claude-local file paths and injected cwd before handing tools to Hand", async () => {
+  const sent: ServerToHandMessage[] = [];
+  let session!: BrainSession;
+  const sdkCwd = "/tmp/axon-claude-sess-123";
+  const handCwd = "/Users/n374/Documents/Code/axon";
+  const handHomeDir = "/Users/n374";
+
+  session = BrainSession.createSession({
+    id: "sess-flow-path-rewrite",
+    claudeHomeDir: "/home/node",
+    cwd: handCwd,
+    handHomeDir,
+    model: "claude-test",
+    sdkCwd,
+    transport: {
+      send: async (message) => {
+        sent.push(message);
+        if (message.type === "tool_call") {
+          session.resolveToolResult(message.requestId, {
+            output: { stdout: "ok\n", stderr: "", exit_code: 0 },
+            summary: "ok",
+          });
+        }
+      },
+    },
+    queryRunner: () => (async function* () {
+      await session.handleInjectedPreToolUse({
+        tool_name: "Read",
+        tool_use_id: "toolu_read",
+        tool_input: { file_path: "/home/node/.claude/settings.json" },
+      });
+      await session.handleInjectedPreToolUse({
+        tool_name: "Bash",
+        tool_use_id: "toolu_bash",
+        tool_input: { command: `cd ${sdkCwd} && cat /home/node/.claude.json && pwd` },
+      });
+      yield { type: "result", result: "done" };
+    })(),
+  });
+
+  await session.prompt("path rewrite");
+
+  const toolCalls = sent.filter((message): message is Extract<ServerToHandMessage, { type: "tool_call" }> => message.type === "tool_call");
+  assert.equal(toolCalls.length, 2);
+  assert.deepEqual(toolCalls[0]?.input, { file_path: "/Users/n374/.claude/settings.json" });
+  assert.deepEqual(toolCalls[1]?.input, {
+    command: "cd /Users/n374/Documents/Code/axon && cat /Users/n374/.claude.json && pwd",
   });
 });
 

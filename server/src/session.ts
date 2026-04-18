@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -55,6 +56,7 @@ interface AssistantBlock {
 
 interface AssistantMessage {
   type: "assistant";
+  session_id?: string;
   message: {
     content: AssistantBlock[];
   };
@@ -62,6 +64,7 @@ interface AssistantMessage {
 
 interface ResultMessage {
   type: "result";
+  session_id?: string;
   subtype?: string;
   result?: string;
   error?: string;
@@ -81,11 +84,31 @@ type SyncHookJsonOutput = {
   };
 };
 
+interface HookCallbackMatcher {
+  matcher?: string;
+  hooks: Array<(input: HookInput, toolUseId: string | undefined, options: { signal: AbortSignal }) => Promise<SyncHookJsonOutput>>;
+  timeout?: number;
+}
+
+interface SpawnOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env: Record<string, string | undefined>;
+  signal: AbortSignal;
+}
+
+type SpawnedProcess = ChildProcess;
+
 interface SessionQueryOptions {
   cwd: string;
   model: string;
   mcpServers?: Record<string, SdkMcpServerConfig>;
+  resume?: string;
+  env?: Record<string, string | undefined>;
+  hooks?: Partial<Record<"PreToolUse", HookCallbackMatcher[]>>;
   pathToClaudeCodeExecutable: string;
+  spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
   permissionMode: "default";
   canUseTool: CanUseToolHandler;
   maxTurns: number;
@@ -103,11 +126,15 @@ export interface SessionTransport {
 }
 
 export interface BrainSessionOptions {
+  claudeHomeDir?: string;
+  claudeEnv?: Record<string, string | undefined>;
   cwd: string;
+  handHomeDir?: string;
   id: string;
   model: string;
   mcpServers?: Record<string, SdkMcpServerConfig>;
   sdkCwd?: string;
+  spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
   onClose?: () => void | Promise<void>;
   transport: SessionTransport;
   shouldRouteToolToHand?: (toolName: string) => boolean;
@@ -120,27 +147,36 @@ export class BrainSession {
   readonly model: string;
   readonly createdAt: Date;
 
+  private readonly claudeHomeDir: string;
+  private readonly claudeEnv?: Record<string, string | undefined>;
+  private readonly handHomeDir?: string;
   private readonly relay = new ToolRelay();
-  private readonly mcpServers?: Record<string, SdkMcpServerConfig>;
+  private mcpServers?: Record<string, SdkMcpServerConfig>;
   private readonly sdkCwd: string;
   private readonly transport: SessionTransport;
   private readonly canUseTool: CanUseToolHandler;
   private readonly onClose?: () => void | Promise<void>;
   private readonly shouldRouteToolToHand: (toolName: string) => boolean;
   private readonly queryRunner: QueryRunner;
+  private readonly spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
   private readonly log: Logger;
   private status: SessionStatus = "idle";
   private closed = false;
+  private claudeSessionId?: string;
   private promptChain: Promise<void> = Promise.resolve();
 
   private constructor(options: BrainSessionOptions) {
     this.id = options.id;
+    this.claudeHomeDir = options.claudeHomeDir?.trim() || os.homedir();
+    this.claudeEnv = options.claudeEnv;
     this.cwd = options.cwd;
+    this.handHomeDir = options.handHomeDir?.trim() || undefined;
     this.model = options.model;
     this.mcpServers = options.mcpServers;
     this.transport = options.transport;
     this.sdkCwd = options.sdkCwd ?? os.tmpdir();
     this.onClose = options.onClose;
+    this.spawnClaudeCodeProcess = options.spawnClaudeCodeProcess;
     this.createdAt = new Date();
     this.shouldRouteToolToHand = options.shouldRouteToolToHand ?? ((toolName) => isHandRoutedToolName(toolName));
     this.canUseTool = async (toolName: string) => this.handleCanUseTool(toolName);
@@ -164,6 +200,14 @@ export class BrainSession {
       status: this.status,
       createdAt: this.createdAt.toISOString(),
     };
+  }
+
+  setMcpServers(mcpServers: Record<string, SdkMcpServerConfig> | undefined): void {
+    this.mcpServers = mcpServers;
+    this.log.debug("更新 session MCP proxy servers", {
+      serverCount: Object.keys(mcpServers ?? {}).length,
+      servers: Object.keys(mcpServers ?? {}),
+    });
   }
 
   prompt(text: string): Promise<void> {
@@ -222,18 +266,36 @@ export class BrainSession {
       textLength: text.length,
       preview: previewText(text),
       claudeCodeExecutable: resolveClaudeCodeExecutable(),
+      claudeSessionId: this.claudeSessionId,
     });
 
     try {
       const stream = this.queryRunner({
         prompt: text,
         options: {
-          // Claude CLI 必须在注入工作区启动,这样它会加载我们为当前 session 生成的
-          // .claude/settings.local.json。Hand 仍使用 this.cwd 作为真实宿主机 cwd 执行工具。
+          // Claude CLI 在 session runtime 的 cwd 中启动。runtime 可能是普通目录，
+          // 也可能是挂好 HOME/cwd 视图的 mount namespace。
           cwd: this.sdkCwd,
           model: this.model,
           mcpServers: this.mcpServers,
+          resume: this.claudeSessionId,
+          env: this.claudeEnv,
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: ".*",
+                hooks: [
+                  async (input: HookInput) => this.handleInjectedPreToolUse({
+                    tool_name: input.tool_name,
+                    tool_input: input.tool_input,
+                    tool_use_id: input.tool_use_id,
+                  }),
+                ],
+              },
+            ],
+          },
           pathToClaudeCodeExecutable: resolveClaudeCodeExecutable(),
+          spawnClaudeCodeProcess: this.spawnClaudeCodeProcess,
           permissionMode: "default",
           canUseTool: this.canUseTool,
           maxTurns: 100,
@@ -241,6 +303,7 @@ export class BrainSession {
       });
 
       for await (const message of stream) {
+        this.captureClaudeSessionId(message);
         this.log.debug("收到 query 流消息", { type: message.type });
         if (message.type === "assistant") {
           await this.handleAssistantMessage(message as AssistantMessage);
@@ -295,6 +358,7 @@ export class BrainSession {
   private async handleResultMessage(message: ResultMessage): Promise<void> {
     this.log.debug("处理 result 消息", {
       subtype: message.subtype ?? "success",
+      claudeSessionId: message.session_id,
       stopReason: message.stopReason,
       hasError: Boolean(message.error),
       resultLength: (message.result ?? "").length,
@@ -327,7 +391,7 @@ export class BrainSession {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "allow",
-          permissionDecisionReason: `Axon 不接管工具 ${input.tool_name}`,
+          permissionDecisionReason: `Tool ${input.tool_name} approved`,
         },
       };
     }
@@ -337,7 +401,7 @@ export class BrainSession {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "Tool executed remotely via Axon Hand",
+        permissionDecisionReason: "Tool response ready",
         additionalContext: renderToolResultForClaude(input.tool_name, result),
       },
     };
@@ -349,12 +413,18 @@ export class BrainSession {
       throw new Error("会话已关闭");
     }
 
+    const rewrittenInput = rewriteToolInputForHand(toolName, toolInput, {
+      brainHomeDir: this.claudeHomeDir,
+      handHomeDir: this.handHomeDir,
+      brainCwd: this.sdkCwd,
+      handCwd: this.cwd,
+    });
     const requestId = `hook-${this.id}-${randomUUID()}`;
     this.log.debug("准备转发工具调用到 Hand", {
       requestId,
       toolName,
       toolUseId,
-      inputSummary: summarizeUnknown(toolInput),
+      inputSummary: summarizeUnknown(rewrittenInput),
     });
     const pending = this.relay.createPending(requestId, toolName);
 
@@ -364,7 +434,7 @@ export class BrainSession {
       requestId,
       toolName,
       toolUseId,
-      input: toolInput,
+      input: rewrittenInput,
     };
 
     try {
@@ -435,8 +505,32 @@ export class BrainSession {
     this.log.debug("拒绝工具调用", { toolName });
     return {
       behavior: "deny",
-      message: `Axon 当前未配置通过 Hand 执行工具 ${toolName}`,
+      message: `Tool ${toolName} is not available in this session`,
     };
+  }
+
+  private captureClaudeSessionId(message: QueryMessage): void {
+    const sessionId = extractClaudeSessionId(message);
+    if (!sessionId) {
+      return;
+    }
+
+    if (this.claudeSessionId === sessionId) {
+      return;
+    }
+
+    if (this.claudeSessionId && this.claudeSessionId !== sessionId) {
+      this.log.warn("Claude 会话 ID 发生变化", {
+        previousClaudeSessionId: this.claudeSessionId,
+        nextClaudeSessionId: sessionId,
+      });
+    } else {
+      this.log.debug("绑定 Claude 原生会话", {
+        claudeSessionId: sessionId,
+      });
+    }
+
+    this.claudeSessionId = sessionId;
   }
 }
 
@@ -559,6 +653,93 @@ export function resolveClaudeCodeExecutable(candidates = CLAUDE_EXECUTABLE_CANDI
   throw new Error(
     `Could not find Claude Code executable. Tried: ${candidates.join(", ")}. Set CLAUDE_CODE_EXECUTABLE env var or install via \`brew install --cask claude-code\`.`
   );
+}
+
+function extractClaudeSessionId(message: QueryMessage): string | undefined {
+  const sessionId = (message as { session_id?: unknown }).session_id;
+  return typeof sessionId === "string" && sessionId.trim() ? sessionId : undefined;
+}
+
+function rewriteToolInputForHand(
+  toolName: string,
+  input: unknown,
+  options: {
+    brainHomeDir: string;
+    handHomeDir?: string;
+    brainCwd: string;
+    handCwd: string;
+  }
+): unknown {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const inputRecord = { ...(input as Record<string, unknown>) };
+
+  switch (toolName) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      if (typeof inputRecord.file_path === "string") {
+        inputRecord.file_path = rewriteClaudePathForHand(inputRecord.file_path, options);
+      }
+      return inputRecord;
+    case "Grep":
+    case "Glob":
+      if (typeof inputRecord.path === "string") {
+        inputRecord.path = rewriteClaudePathForHand(inputRecord.path, options);
+      }
+      return inputRecord;
+    case "Bash":
+      if (typeof inputRecord.command === "string") {
+        inputRecord.command = rewriteClaudeCommandForHand(inputRecord.command, options);
+      }
+      return inputRecord;
+    default:
+      return input;
+  }
+}
+
+function rewriteClaudeCommandForHand(
+  command: string,
+  options: {
+    brainHomeDir: string;
+    handHomeDir?: string;
+    brainCwd: string;
+    handCwd: string;
+  }
+): string {
+  let rewritten = command;
+  rewritten = rewritten.split(options.brainCwd).join(options.handCwd);
+
+  if (options.handHomeDir) {
+    rewritten = rewritten.split(path.join(options.brainHomeDir, ".claude.json")).join(path.join(options.handHomeDir, ".claude.json"));
+    rewritten = rewritten.split(path.join(options.brainHomeDir, ".claude")).join(path.join(options.handHomeDir, ".claude"));
+    rewritten = rewritten.split(options.brainHomeDir).join(options.handHomeDir);
+  }
+
+  return rewritten;
+}
+
+function rewriteClaudePathForHand(
+  filePath: string,
+  options: {
+    brainHomeDir: string;
+    handHomeDir?: string;
+    brainCwd: string;
+    handCwd: string;
+  }
+): string {
+  if (filePath === options.brainCwd || filePath.startsWith(`${options.brainCwd}${path.sep}`)) {
+    return `${options.handCwd}${filePath.slice(options.brainCwd.length)}`;
+  }
+
+  if (options.handHomeDir && (filePath === options.brainHomeDir || filePath.startsWith(`${options.brainHomeDir}${path.sep}`))) {
+    return `${options.handHomeDir}${filePath.slice(options.brainHomeDir.length)}`;
+  }
+
+  return filePath;
 }
 
 function runSdkQuery(input: QueryRunnerInput): AsyncIterable<QueryMessage> {

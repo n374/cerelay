@@ -10,7 +10,7 @@ Split architecture for Claude Code: users interact on Hand, Hand executes tools 
 flowchart LR
     H1[Hand CLI / TypeScript<br/>用户交互 + 工具执行]
     HN[Hand N / Future]
-    S[Axon Server / TypeScript<br/>query() + injected .claude hook bridge]
+    S[Axon Server / TypeScript<br/>query() + SDK PreToolUse hooks]
     C[Claude Code CLI<br/>spawned by SDK]
 
     H1 <-->|WebSocket| S
@@ -29,9 +29,9 @@ Hand (TypeScript) ←→ WebSocket ←→ Server (TypeScript) ←→ Claude Agen
 ## 概念 / Concepts
 
 - **Hand 端 / Hand**：用户交互入口，也是 Claude 原生工具的执行环境。当前实现为 TypeScript CLI，支持 `Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`。
-- **Server 端 / Server**：Brain 端，位于 [`server/src`](./server/src)。使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` 驱动 Claude Code，并为每个 session 生成临时 Claude 项目目录，把 `PreToolUse` hook 真实注入到 `.claude/settings.local.json`。
+- **Server 端 / Server**：Brain 端，位于 [`server/src`](./server/src)。使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` 驱动 Claude Code，并通过 SDK `PreToolUse` hooks 拦截工具调用。
 - **通信 / Transport**：Server 与 Hand 之间通过 WebSocket 全双工通信，文本流和工具调用共用一条连接。
-- **Hook Bridge**：Claude Code 的 `PreToolUse` command hook 会命中 Server 内部 HTTP bridge，再由 Server 通过 WebSocket 把工具调用转发给 Hand。
+- **Session Runtime**：每个 session 都有独立的 Claude runtime。Docker 默认开启 mount namespace 运行时，让 Claude 看到 Hand 上报的 `HOME` 与 `cwd`；不满足条件时回退到普通目录运行时。
 
 ## 核心时序 / Core Sequence
 
@@ -43,16 +43,16 @@ sequenceDiagram
     participant C as claude CLI
 
     H->>S: WS prompt
-    S->>S: create temp Claude project + inject .claude/settings.local.json
-    S->>SDK: query({ prompt, cwd: injected-project })
+    S->>S: create session runtime (cwd/home view)
+    S->>SDK: query({ prompt, cwd: session-runtime, hooks })
     SDK->>C: run prompt
     C-->>S: assistant text/thinking stream
     S-->>H: text_chunk / thought_chunk
-    C->>S: command hook POST /internal/hooks/pretooluse
+    SDK->>S: PreToolUse callback
     S-->>H: WS tool_call
     H->>H: execute Read/Write/Edit/MultiEdit/Bash/Grep/Glob
     H-->>S: WS tool_result
-    S-->>C: hook JSON return (deny + additionalContext)
+    S-->>SDK: hook result (deny + additionalContext)
     C-->>S: final result
     S-->>H: session_end
 ```
@@ -62,7 +62,9 @@ sequenceDiagram
 Key points:
 
 - **SDK 直接集成 / Direct SDK integration**：不再通过 ACP bridge 把工具调用转换成 client-side methods，而是直接使用 `query()` 驱动 Claude Code。
-- **真实 Claude Hook 注入 / Real Claude hook injection**：Server 为每个 session 注入 `.claude/settings.local.json`，让 Claude Code 走原生 `PreToolUse` command hook。
+- **SDK Hook 拦截 / SDK hook interception**：Server 直接通过 SDK `PreToolUse` callback 接管工具调用，不修改项目内的 `.claude/settings.local.json`。
+- **Session Runtime / Session runtime**：Docker 默认给每个 session 建独立 Claude runtime；开启 mount namespace 时，Claude 看到的 `HOME` 与 `cwd` 会对齐 Hand 上报的本地路径。
+- **MCP 配置主权 / MCP config ownership**：Server 从 Claude 自己的配置文件读取 `mcpServers`，再把标准化后的 server 配置下发给 Hand；Hand 负责真正执行 `tools/list` / `tools/call`。
 - **Hand 执行 Claude 原生工具 / Hand executes Claude-native tools**：Hand 按 Claude 工具语义执行本地操作，而不是 ACP 方法名。
 
 ## 项目结构 / Project Structure
@@ -75,9 +77,9 @@ axon/
 │   ├── tsconfig.json
 │   └── src/
 │       ├── index.ts          # Server CLI 入口，解析 --port / --model
-│       ├── server.ts         # HTTP + WebSocket Server + internal hook bridge
+│       ├── server.ts         # HTTP + WebSocket Server
 │       ├── session.ts        # query() 会话驱动 + Hand tool relay
-│       ├── claude-hook-injection.ts # 注入 .claude/settings.local.json 与 hook 脚本
+│       ├── claude-session-runtime.ts # Claude session runtime / mount namespace
 │       ├── relay.ts          # 工具调用 pending/result 管理
 │       └── protocol.ts       # 消息类型定义
 ├── hand/                     # TypeScript Hand CLI
@@ -120,6 +122,7 @@ By default, no `.env` file is required. The container will:
 - 复用当前 shell / Claude Code 注入的环境变量
 - 默认挂载宿主机 `~/.claude` 到容器 `/home/node/.claude`
 - 默认挂载宿主机 `~/.claude.json` 到容器 `/home/node/.claude.json`
+- 默认启用 per-session mount namespace runtime
 
 然后直接启动：
 
@@ -128,6 +131,8 @@ Then start directly:
 ```bash
 npm run brain:up
 ```
+
+这个 compose 配置会给容器添加 `SYS_ADMIN`，并在镜像里安装 `util-linux`，用于 `unshare` / `nsenter` 形式的 session runtime。
 
 临时打开 debug 日志：
 
@@ -158,6 +163,8 @@ BRAIN_HOST_PORT=8765
 LOG_LEVEL=debug
 LOG_JSON=false
 CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+AXON_ENABLE_MOUNT_NAMESPACE=true
+AXON_NAMESPACE_RUNTIME_ROOT=/opt/axon-runtime
 ```
 
 例如：
@@ -237,9 +244,9 @@ Open [http://localhost:8766](http://localhost:8766), then fill in:
 
 ### 5. 交互 / Interact
 
-Hand CLI 连接成功后会自动创建 session。输入 prompt，Server 会通过 SDK 发起一次 `query()`；当 Claude 调用工具时，Hand 在本地执行并把结果回传。
+Hand CLI 连接成功后会自动创建 session。输入 prompt，Server 会通过 SDK 发起一次 `query()`；第一次 prompt 会创建 Claude Code 原生会话，后续 prompt 会自动 `resume` 同一个 Claude 会话，因此上下文会连续保留。当 Claude 调用工具时，Hand 在本地执行并把结果回传。
 
-After Hand connects, it creates a session automatically. Each prompt triggers one SDK `query()` call; when Claude requests a tool, Hand executes it locally and returns the result.
+After Hand connects, it creates a session automatically. Each prompt triggers one SDK `query()` call; the first prompt creates a native Claude Code session and later prompts automatically `resume` the same Claude session, preserving conversation context. When Claude requests a tool, Hand executes it locally and returns the result.
 
 ## 本地直跑 Server（可选） / Running Server Locally (Optional)
 
@@ -262,8 +269,9 @@ This mode requires a locally installed and authenticated `claude` CLI, and a wor
 - 位于 [`server/src`](./server/src)
 - 使用 `@anthropic-ai/claude-agent-sdk`
 - 通过 `query()` 获取流式输出
-- 通过注入的 `.claude/settings.local.json` `PreToolUse` hook 拦截工具调用
+- 通过 SDK `PreToolUse` hooks 拦截工具调用
 - 通过 WebSocket 将 `tool_call` / `tool_result` 与 Hand 关联
+- 为每个 session 创建 Claude runtime；Docker 默认启用 mount namespace 模式
 - 默认监听 `/ws` 和 `/health`
 
 ### Hand CLI
@@ -292,7 +300,8 @@ This mode requires a locally installed and authenticated `claude` CLI, and a wor
 | Brain Server | TypeScript + Node.js | 直接接入 Claude Agent SDK |
 | Hand CLI | TypeScript + Node.js | 轻量 CLI，本地执行 Claude 原生工具 |
 | Server ↔ Hand | WebSocket | 双向流式输出与工具回传 |
-| Tool interception | Claude Code `PreToolUse` command hook | `.claude/settings.local.json` + internal HTTP bridge |
+| Tool interception | Claude Agent SDK `PreToolUse` hook | SDK callback，结果转发到 Hand |
+| Claude runtime | Session runtime | Docker 默认使用 mount namespace，对齐 Hand `HOME` / `cwd` |
 | Claude driver | `query()` | 官方 SDK 主接口 |
 
 ## Roadmap

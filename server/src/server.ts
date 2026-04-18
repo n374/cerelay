@@ -21,6 +21,7 @@ import type {
   ListSessions,
   Prompt,
   RestoreSession,
+  SessionMcpCatalog,
   ServerError,
   ServerToHandMessage,
   ToolResult,
@@ -31,8 +32,9 @@ import { HandRegistry } from "./hand-registry.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
-import { createClaudeHookInjectionWorkspace } from "./claude-hook-injection.js";
+import { createClaudeSessionRuntime } from "./claude-session-runtime.js";
 import { createMcpProxyServers } from "./mcp-proxy.js";
+import { loadClaudeMcpServerConfigs } from "./claude-mcp-config.js";
 
 const log = createLogger("server");
 const SESSION_RESUME_GRACE_MS = 60_000;
@@ -191,12 +193,6 @@ export class AxonServer {
         time: new Date().toISOString(),
         handsOnline: this.hands.count(),
       });
-      return;
-    }
-
-    if (pathname === "/internal/hooks/pretooluse") {
-      requestLog.debug("转交内部 PreToolUse hook bridge");
-      void this.handleInjectedPreToolUseRequest(req, res);
       return;
     }
 
@@ -533,6 +529,9 @@ export class AxonServer {
         case "tool_result":
           await this.handleToolResult(handId, JSON.parse(raw) as ToolResult);
           return;
+        case "session_mcp_catalog":
+          await this.handleSessionMcpCatalog(handId, JSON.parse(raw) as SessionMcpCatalog);
+          return;
         case "list_sessions":
           await this.handleListSessions(handId, JSON.parse(raw) as ListSessions);
           return;
@@ -556,24 +555,26 @@ export class AxonServer {
       model: message.model || this.defaultModel,
     });
     const sessionId = `sess-${Date.now()}-${randomUUID()}`;
-    const hookToken = randomUUID();
-    const workspace = await createClaudeHookInjectionWorkspace({
-      bridgeUrl: `http://127.0.0.1:${this.getListenPort()}/internal/hooks/pretooluse?sessionId=${encodeURIComponent(sessionId)}`,
+    const runtime = await createClaudeSessionRuntime({
       sessionId,
-      token: hookToken,
+      cwd: message.cwd || ".",
+      handHomeDir: message.homeDir,
+    });
+    const claudeMcpConfigs = await loadClaudeMcpServerConfigs({
+      cwd: message.cwd || ".",
     });
 
     let session!: BrainSession;
     session = BrainSession.createSession({
       id: sessionId,
       cwd: message.cwd || ".",
+      claudeEnv: runtime.env,
+      claudeHomeDir: runtime.env.HOME,
+      handHomeDir: message.homeDir,
       model: message.model || this.defaultModel,
-      mcpServers: createMcpProxyServers(
-        message.mcpToolCatalog,
-        (toolName, input) => session.executeToolViaHand(toolName, input)
-      ),
-      sdkCwd: workspace.cwd,
-      onClose: workspace.cleanup,
+      sdkCwd: runtime.cwd,
+      spawnClaudeCodeProcess: runtime.spawnClaudeCodeProcess,
+      onClose: runtime.cleanup,
       shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
       transport: {
         send: async (payload) => {
@@ -600,7 +601,6 @@ export class AxonServer {
       session,
       handId,
       resumableUntil: null,
-      hookToken,
     });
     this.hands.bindSession(handId, sessionId);
     this.stats.onSessionCreated();
@@ -610,6 +610,33 @@ export class AxonServer {
     await this.sendToHand(handId, {
       type: "session_created",
       sessionId,
+      mcpServerConfigs: claudeMcpConfigs,
+    });
+  }
+
+  private async handleSessionMcpCatalog(handId: string, message: SessionMcpCatalog): Promise<void> {
+    const entry = this.getSessionEntry(message.sessionId);
+    if (entry.handId !== handId) {
+      throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+    }
+
+    entry.session.setMcpServers(
+      createMcpProxyServers(
+        message.mcpToolCatalog,
+        (toolName, input) => entry.session.executeToolViaHand(toolName, input)
+      )
+    );
+
+    log.debug("已应用 Hand 返回的 MCP tool catalog", {
+      sessionId: message.sessionId,
+      handId,
+      serverCount: Object.keys(message.mcpToolCatalog).length,
+      servers: Object.keys(message.mcpToolCatalog),
+    });
+
+    await this.sendToHand(handId, {
+      type: "session_mcp_catalog_applied",
+      sessionId: message.sessionId,
     });
   }
 
@@ -675,6 +702,8 @@ export class AxonServer {
       hasError: Boolean(message.error),
       hasSummary: Boolean(message.summary),
       outputType: message.output === undefined ? "undefined" : typeof message.output,
+      error: message.error,
+      outputSummary: summarizeUnknown(message.output),
     });
     entry.session.resolveToolResult(message.requestId, {
       output: message.output,
@@ -810,95 +839,12 @@ export class AxonServer {
     log.info("Session 已销毁", { sessionId, handId: boundHandId, reason });
   }
 
-  private async handleInjectedPreToolUseRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.method !== "POST") {
-      this.sendJson(res, 405, { error: "method_not_allowed" });
-      return;
-    }
-
-    const sessionId = this.getQueryParam(req.url, "sessionId");
-    if (!sessionId) {
-      this.sendJson(res, 400, { error: "missing_session_id" });
-      return;
-    }
-
-    const entry = this.sessions.get(sessionId);
-    if (!entry) {
-      this.sendJson(res, 404, { error: "session_not_found" });
-      return;
-    }
-
-    const token = req.headers["x-axon-hook-token"];
-    if (token !== entry.hookToken) {
-      this.sendJson(res, 403, { error: "forbidden" });
-      return;
-    }
-
-    let body: string;
-    try {
-      body = await this.readRequestBody(req);
-    } catch (error) {
-      log.warn("读取内部 hook bridge 请求体失败", {
-        sessionId,
-        error: asError(error).message,
-      });
-      this.sendJson(res, 400, { error: "invalid_body" });
-      return;
-    }
-
-    try {
-      const payload = JSON.parse(body) as { tool_name?: string; tool_input?: unknown; tool_use_id?: string };
-      if (typeof payload.tool_name !== "string") {
-        throw new Error("missing tool_name");
-      }
-
-      const result = await entry.session.handleInjectedPreToolUse({
-        tool_name: payload.tool_name,
-        tool_input: payload.tool_input,
-        tool_use_id: payload.tool_use_id,
-      });
-      this.sendJson(res, 200, result);
-    } catch (error) {
-      log.warn("处理内部 PreToolUse hook bridge 失败", {
-        sessionId,
-        error: asError(error).message,
-      });
-      this.sendJson(res, 500, {
-        decision: "block",
-        reason: `Axon bridge failed: ${asError(error).message}`,
-      });
-    }
-  }
-
-  private getQueryParam(requestUrl: string | undefined, name: string): string | null {
-    if (!requestUrl) {
-      return null;
-    }
-
-    try {
-      return new URL(requestUrl, "http://localhost").searchParams.get(name);
-    } catch {
-      return null;
-    }
-  }
-
-  private readRequestBody(req: IncomingMessage): Promise<string> {
-    return new Promise((resolve, reject) => {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", () => resolve(body));
-      req.on("error", reject);
-    });
-  }
 }
 
 interface SessionEntry {
   session: BrainSession;
   handId: string | null;
   resumableUntil: number | null;
-  hookToken: string;
 }
 
 function asError(error: unknown): Error {
@@ -940,4 +886,20 @@ function previewText(text: string, maxLength = 120): string {
     return normalized;
   }
   return `${normalized.slice(0, maxLength)}...`;
+}
+
+function summarizeUnknown(value: unknown): string {
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  if (typeof value === "string") {
+    return previewText(value, 160);
+  }
+
+  try {
+    return previewText(JSON.stringify(value), 160);
+  } catch {
+    return String(value);
+  }
 }

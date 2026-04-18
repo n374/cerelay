@@ -18,7 +18,8 @@ Hand CLI (本地 / local)
 │                                     │
 │  docker-entrypoint.sh               │
 │    └─ axon-server (Node.js)         │
-│         └─ claude CLI (spawn)       │
+│         └─ claude CLI (per-session) │
+│              └─ mount namespace     │
 │                                     │
 │  EXPOSE 8765                        │
 └─────────────────────────────────────┘
@@ -71,6 +72,8 @@ npm start -- --server 192.168.1.100:8765
 | `CLAUDE_CONFIG` | 空 | claude CLI 额外配置（JSON 字符串） |
 | `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | 宿主机 Claude 配置目录挂载源 |
 | `CLAUDE_JSON_PATH` | `${HOME}/.claude.json` | 宿主机 Claude 登录态文件挂载源 |
+| `AXON_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 per-session mount namespace runtime |
+| `AXON_NAMESPACE_RUNTIME_ROOT` | `/opt/axon-runtime` | 容器内 session runtime 根目录 |
 
 ## 手动 Docker 命令 / Manual Docker Commands
 
@@ -82,6 +85,7 @@ docker build -t axon-brain:latest .
 docker run -d \
   --name axon-brain \
   -p 8765:8765 \
+  --cap-add SYS_ADMIN \
   -e ANTHROPIC_API_KEY=your-key \
   # 或者 / Or:
   # -e ANTHROPIC_AUTH_TOKEN=your-auth-token \
@@ -103,6 +107,20 @@ docker-compose 配置了 `claude_config` 卷挂载到容器内的 `/home/node/.c
 此外还会把宿主机的 `~/.claude.json` 挂载到容器内 `/home/node/.claude.json`，因为部分 Claude Code 登录态存放在该文件中。
 
 The docker-compose config mounts the host `~/.claude` directory to `/home/node/.claude` inside the container, and also mounts `~/.claude.json` to `/home/node/.claude.json`, because part of the Claude Code login state is stored in that file.
+
+此外，默认 compose 配置会启用 per-session mount namespace runtime。每次创建 session 时，Brain 会在容器内创建独立的 Claude runtime，并把 Hand 上报的 `HOME` / `cwd` 视图投影进去，再在该 runtime 中启动 Claude Code。
+
+This setup also enables a per-session mount namespace runtime by default. For each session, Brain creates an isolated Claude runtime, projects the Hand-reported `HOME` / `cwd` view into it, and launches Claude Code inside that runtime.
+
+## Namespace 前置条件 / Namespace Prerequisites
+
+- 容器需要 `SYS_ADMIN` capability
+- 镜像内需要 `util-linux`，以提供 `unshare` / `nsenter`
+- `~/.claude` 与 `~/.claude.json` 仍需挂载到容器，作为共享 Claude 配置源
+
+如果这些条件不满足，可以把 `AXON_ENABLE_MOUNT_NAMESPACE=false`，Brain 会回退到普通目录 runtime。
+
+If these requirements are not available, set `AXON_ENABLE_MOUNT_NAMESPACE=false` and Brain will fall back to a plain directory runtime.
 
 ## 健康检查 / Health Check
 

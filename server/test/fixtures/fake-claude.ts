@@ -6,17 +6,15 @@ import path from "node:path";
 // FakeClaude Fixture
 //
 // 生成一个可执行的 fake-claude stub，行为与真实 claude 完全兼容：
-//   1. 保存 argv + cwd 到 AXON_FAKE_CLAUDE_ARGS_FILE
+//   1. 追加保存 argv + cwd 到 AXON_FAKE_CLAUDE_ARGS_FILE(JSONL)
 //   2. 收到 control_request/initialize → 响应 control_response/success
-//   3. 收到第一个 user 消息 → 从当前 cwd 的 .claude/settings.local.json 读取 PreToolUse hook 命令并执行
-//   4. 将 hook stdout 解析为 Claude hook JSON，输出 assistant 文本 + result/success，退出
+//   3. 收到第一个 user 消息 → 直接输出 assistant 文本 + result/success，退出
 //
 // stdin 内容同时追加到 AXON_FAKE_CLAUDE_STDIN_FILE，供测试断言。
 // ============================================================
 
 export interface FakeClaudeOptions {
-  /** 触发的 Bash 命令，默认 "pwd" */
-  command?: string;
+  assistantText?: string;
 }
 
 export interface FakeClaudeHandle {
@@ -25,7 +23,7 @@ export interface FakeClaudeHandle {
 }
 
 export async function writeFakeClaude(options?: FakeClaudeOptions): Promise<FakeClaudeHandle> {
-  const command = options?.command ?? "pwd";
+  const assistantText = options?.assistantText ?? "fake assistant";
 
   const tempDir = await mkdtemp(path.join(tmpdir(), "axon-fake-claude-"));
   const executablePath = path.join(tempDir, "fake-claude");
@@ -35,13 +33,10 @@ export async function writeFakeClaude(options?: FakeClaudeOptions): Promise<Fake
 exec node "${nodeScriptPath}" "$@"
 `;
 
-  // 使用 JSON.stringify 将命令安全地嵌入脚本，避免任何转义问题
-  const commandLiteral = JSON.stringify(command);
+  const assistantTextLiteral = JSON.stringify(assistantText);
 
   const script = String.raw`#!/usr/bin/env node
-import { execFileSync } from "node:child_process";
-import { appendFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { appendFile } from "node:fs/promises";
 import process from "node:process";
 import readline from "node:readline";
 
@@ -52,10 +47,14 @@ if (!argsFile || !stdinFile) {
   process.exit(1);
 }
 
-await writeFile(argsFile, JSON.stringify({
+const resumeIndex = process.argv.indexOf("--resume");
+const resumeSessionId = resumeIndex >= 0 ? process.argv[resumeIndex + 1] : undefined;
+const sessionId = resumeSessionId || "11111111-1111-4111-8111-111111111111";
+
+await appendFile(argsFile, JSON.stringify({
   argv: process.argv.slice(2),
   cwd: process.cwd(),
-}), "utf8");
+}) + "\n", "utf8");
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -92,29 +91,10 @@ for await (const line of rl) {
 
   if (message.type === "user" && !userSeen) {
     userSeen = true;
-    const settingsPath = path.join(process.cwd(), ".claude", "settings.local.json");
-    const settings = JSON.parse(await (await import("node:fs/promises")).readFile(settingsPath, "utf8"));
-    const command = settings?.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command;
-    if (typeof command !== "string" || !command.trim()) {
-      throw new Error("missing injected PreToolUse command");
-    }
-
-    const hookInput = JSON.stringify({
-      hook_event_name: "PreToolUse",
-      tool_name: "Bash",
-      tool_use_id: "toolu_fake_1",
-      tool_input: { command: ` + commandLiteral + ` },
-    });
-    const hookStdout = execFileSync("/bin/sh", ["-lc", command], {
-      input: hookInput,
-      encoding: "utf8",
-    });
-    const hookResponse = hookStdout.trim() ? JSON.parse(hookStdout) : {};
-    const additionalContext = hookResponse?.hookSpecificOutput?.additionalContext ?? "";
     emit({
       type: "assistant",
       message: {
-        content: [{ type: "text", text: "fake assistant: " + additionalContext }],
+        content: [{ type: "text", text: ` + assistantTextLiteral + ` }],
       },
     });
     emit({
@@ -122,6 +102,7 @@ for await (const line of rl) {
       subtype: "success",
       is_error: false,
       result: "fake done",
+      session_id: sessionId,
     });
     break;
   }

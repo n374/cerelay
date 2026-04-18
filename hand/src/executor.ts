@@ -6,7 +6,7 @@ import { webFetch, type WebFetchInput, type WebFetchOutput } from "./tools/web.j
 import { McpRuntime } from "./mcp/runtime.js";
 import { ToolError } from "./tool-error.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { McpServerCatalogEntry } from "./protocol.js";
+import type { McpServerCatalogEntry, McpServerConfig } from "./protocol.js";
 import type {
   ReadInput,
   ReadOutput,
@@ -45,9 +45,9 @@ export class ToolExecutor {
   private readonly cwd: string;
   private readonly mcpRuntime: McpRuntime;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, mcpServerConfigs?: Record<string, McpServerConfig>) {
     this.cwd = cwd;
-    this.mcpRuntime = new McpRuntime(cwd);
+    this.mcpRuntime = new McpRuntime(cwd, mcpServerConfigs);
   }
 
   // 根据工具名分发，与 Go Executor.Execute 完全对齐

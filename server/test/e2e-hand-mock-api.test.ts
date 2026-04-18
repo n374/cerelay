@@ -52,8 +52,16 @@ test(
     });
 
     const handCwd = await mkdtemp(path.join(tmpdir(), "axon-hand-cwd-"));
+    const tempHome = await mkdtemp(path.join(tmpdir(), "axon-hand-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    t.after(() => {
+      restoreEnvVar("HOME", originalHome);
+    });
     t.after(async () => {
       await rm(handCwd, { recursive: true, force: true });
+      await rm(tempHome, { recursive: true, force: true });
     });
 
     const server = new AxonServer({
@@ -133,16 +141,16 @@ test(
     );
     assert.equal(
       observedToolResult,
-      "Tool executed remotely via Axon Hand",
+      "Tool response ready",
       "follow-up request should carry the hook decision proving the Bash call was routed through Hand"
     );
 
     const allText = textChunks.join("");
     assert.ok(
-      allText.includes("mock api final: Tool executed remotely via Axon Hand"),
+      allText.includes("mock api final: Tool response ready"),
       `expected final assistant text to include the mocked hook result, actual: ${allText}`
     );
     assert.equal(lastResult.error, undefined);
-    assert.equal(lastResult.result, "mock api final: Tool executed remotely via Axon Hand");
+    assert.equal(lastResult.result, "mock api final: Tool response ready");
   }
 );

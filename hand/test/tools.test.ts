@@ -83,11 +83,10 @@ test("ToolExecutor dispatches tools and formats results", async () => {
   assert.equal(formatToolError(new Error("plain")), "plain");
 });
 
-test("ToolExecutor discovers MCP tools from .mcp.json and executes them through a generic MCP client", async (t) => {
+test("ToolExecutor discovers MCP tools from Brain-provided config and executes them through a generic MCP client", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-"));
   const scriptDir = await fs.mkdtemp(path.join(process.cwd(), ".axon-hand-mcp-script-"));
   const scriptPath = path.join(scriptDir, "demo-mcp.mjs");
-  const configPath = path.join(cwd, ".mcp.json");
 
   t.after(async () => {
     await fs.rm(scriptDir, { recursive: true, force: true });
@@ -118,20 +117,12 @@ await server.connect(new StdioServerTransport());
     "utf8"
   );
 
-  await fs.writeFile(
-    configPath,
-    JSON.stringify({
-      mcpServers: {
-        demo: {
-          command: process.execPath,
-          args: [scriptPath],
-        },
-      },
-    }),
-    "utf8"
-  );
-
-  const executor = new ToolExecutor(cwd);
+  const executor = new ToolExecutor(cwd, {
+    demo: {
+      command: process.execPath,
+      args: [scriptPath],
+    },
+  });
   t.after(async () => {
     await executor.close();
   });
