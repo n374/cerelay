@@ -26,6 +26,7 @@ export interface HandClientCallbacks {
   onThoughtChunk?: (text: string) => void;
   onToolCall?: (toolName: string, requestId: string, input: unknown) => void;
   onToolCallComplete?: (toolName: string, requestId: string) => void;
+  onToolResult?: (toolName: string, requestId: string, output: unknown, error?: string) => void;
 }
 
 export interface HandClientOptions {
@@ -58,6 +59,7 @@ export class HandClient {
 
   // 最后一次 session_end 结果（供 ACP Server 查询）
   private lastResult: { result?: string; error?: string } = {};
+  private activeCallbacks: HandClientCallbacks | undefined;
 
   // 写锁：用 Promise 链模拟互斥，确保并发写安全
   private writeChain: Promise<void> = Promise.resolve();
@@ -197,11 +199,13 @@ export class HandClient {
         return;
       }
 
+      this.activeCallbacks = callbacks;
       const ws = this.ws;
 
       const onMessage = (raw: string) => {
         const done = this.handleMessage(raw, callbacks);
         if (done) {
+          this.activeCallbacks = undefined;
           releaseMessageConsumer();
           ws.off("error", onError);
           ws.off("close", onClose);
@@ -210,12 +214,14 @@ export class HandClient {
       };
 
       const onError = (err: Error) => {
+        this.activeCallbacks = undefined;
         releaseMessageConsumer();
         ws.off("close", onClose);
         reject(err);
       };
 
       const onClose = () => {
+        this.activeCallbacks = undefined;
         releaseMessageConsumer();
         ws.off("error", onError);
         reject(new Error("WebSocket 连接已关闭"));
@@ -388,6 +394,8 @@ export class HandClient {
         summary: summarizeToolResult(msg.toolName, result),
       };
 
+      this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, result);
+
       await this.writeJSON(resp).catch((writeErr: unknown) => {
         this.ui.printError(
           `发送 tool_result 失败: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`
@@ -404,6 +412,8 @@ export class HandClient {
         requestId: msg.requestId,
         error: formatToolError(err),
       };
+
+      this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, undefined, resp.error);
 
       await this.writeJSON(resp).catch((writeErr: unknown) => {
         this.ui.printError(
