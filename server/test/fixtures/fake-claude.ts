@@ -6,10 +6,10 @@ import path from "node:path";
 // FakeClaude Fixture
 //
 // 生成一个可执行的 fake-claude stub，行为与真实 claude 完全兼容：
-//   1. 保存 argv 到 AXON_FAKE_CLAUDE_ARGS_FILE
-//   2. 收到 control_request/initialize → 响应 control_response/success，并记录 callbackId
-//   3. 收到第一个 user 消息 → 发 hook_callback（触发 PreToolUse），命令为 options.command
-//   4. 收到 control_response（hook 响应）→ 发 assistant 文本 + result/success，退出
+//   1. 保存 argv + cwd 到 AXON_FAKE_CLAUDE_ARGS_FILE
+//   2. 收到 control_request/initialize → 响应 control_response/success
+//   3. 收到第一个 user 消息 → 从当前 cwd 的 .claude/settings.local.json 读取 PreToolUse hook 命令并执行
+//   4. 将 hook stdout 解析为 Claude hook JSON，输出 assistant 文本 + result/success，退出
 //
 // stdin 内容同时追加到 AXON_FAKE_CLAUDE_STDIN_FILE，供测试断言。
 // ============================================================
@@ -39,7 +39,9 @@ exec node "${nodeScriptPath}" "$@"
   const commandLiteral = JSON.stringify(command);
 
   const script = String.raw`#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { appendFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
@@ -50,15 +52,16 @@ if (!argsFile || !stdinFile) {
   process.exit(1);
 }
 
-await writeFile(argsFile, JSON.stringify(process.argv.slice(2)), "utf8");
+await writeFile(argsFile, JSON.stringify({
+  argv: process.argv.slice(2),
+  cwd: process.cwd(),
+}), "utf8");
 
 const rl = readline.createInterface({
   input: process.stdin,
   crlfDelay: Infinity,
 });
 
-let callbackId = "";
-let hookRequestId = "";
 let userSeen = false;
 
 function emit(message) {
@@ -71,7 +74,6 @@ for await (const line of rl) {
   const message = JSON.parse(line);
 
   if (message.type === "control_request" && message.request?.subtype === "initialize") {
-    callbackId = message.request.hooks?.PreToolUse?.[0]?.hookCallbackIds?.[0] ?? "";
     emit({
       type: "control_response",
       response: {
@@ -90,26 +92,25 @@ for await (const line of rl) {
 
   if (message.type === "user" && !userSeen) {
     userSeen = true;
-    hookRequestId = "hook-request-1";
-    emit({
-      type: "control_request",
-      request_id: hookRequestId,
-      request: {
-        subtype: "hook_callback",
-        callback_id: callbackId,
-        tool_use_id: "toolu_fake_1",
-        input: {
-          tool_name: "Bash",
-          tool_use_id: "toolu_fake_1",
-          tool_input: { command: ` + commandLiteral + ` },
-        },
-      },
-    });
-    continue;
-  }
+    const settingsPath = path.join(process.cwd(), ".claude", "settings.local.json");
+    const settings = JSON.parse(await (await import("node:fs/promises")).readFile(settingsPath, "utf8"));
+    const command = settings?.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command;
+    if (typeof command !== "string" || !command.trim()) {
+      throw new Error("missing injected PreToolUse command");
+    }
 
-  if (message.type === "control_response" && message.response?.request_id === hookRequestId) {
-    const additionalContext = message.response?.response?.additionalContext ?? "";
+    const hookInput = JSON.stringify({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_use_id: "toolu_fake_1",
+      tool_input: { command: ` + commandLiteral + ` },
+    });
+    const hookStdout = execFileSync("/bin/sh", ["-lc", command], {
+      input: hookInput,
+      encoding: "utf8",
+    });
+    const hookResponse = hookStdout.trim() ? JSON.parse(hookStdout) : {};
+    const additionalContext = hookResponse?.hookSpecificOutput?.additionalContext ?? "";
     emit({
       type: "assistant",
       message: {

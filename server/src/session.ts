@@ -68,11 +68,16 @@ interface ResultMessage {
 }
 
 type QueryMessage = AssistantMessage | ResultMessage | { type: string; [key: string]: unknown };
-type PreToolUseHookResult = {
-  hookEventName: "PreToolUse";
-  permissionDecision: "deny";
-  permissionDecisionReason: string;
-  additionalContext: string;
+type SyncHookJsonOutput = {
+  decision?: "approve" | "block";
+  reason?: string;
+  hookSpecificOutput?: {
+    hookEventName: "PreToolUse";
+    permissionDecision?: "allow" | "deny" | "ask" | "defer";
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
+    additionalContext?: string;
+  };
 };
 
 interface SessionQueryOptions {
@@ -82,12 +87,6 @@ interface SessionQueryOptions {
   permissionMode: "default";
   canUseTool: CanUseToolHandler;
   maxTurns: number;
-  hooks: {
-    PreToolUse: Array<{
-      matcher: string;
-      hooks: Array<(input: HookInput) => Promise<PreToolUseHookResult>>;
-    }>;
-  };
 }
 
 interface QueryRunnerInput {
@@ -105,6 +104,8 @@ export interface BrainSessionOptions {
   cwd: string;
   id: string;
   model: string;
+  sdkCwd?: string;
+  onClose?: () => void | Promise<void>;
   transport: SessionTransport;
   shouldRouteToolToHand?: (toolName: string) => boolean;
   queryRunner?: QueryRunner;
@@ -117,8 +118,10 @@ export class BrainSession {
   readonly createdAt: Date;
 
   private readonly relay = new ToolRelay();
+  private readonly sdkCwd: string;
   private readonly transport: SessionTransport;
   private readonly canUseTool: CanUseToolHandler;
+  private readonly onClose?: () => void | Promise<void>;
   private readonly shouldRouteToolToHand: (toolName: string) => boolean;
   private readonly queryRunner: QueryRunner;
   private readonly log: Logger;
@@ -131,6 +134,8 @@ export class BrainSession {
     this.cwd = options.cwd;
     this.model = options.model;
     this.transport = options.transport;
+    this.sdkCwd = options.sdkCwd ?? os.tmpdir();
+    this.onClose = options.onClose;
     this.createdAt = new Date();
     this.shouldRouteToolToHand = options.shouldRouteToolToHand ?? ((toolName) => isHandRoutedToolName(toolName));
     this.canUseTool = async (toolName: string) => this.handleCanUseTool(toolName);
@@ -191,6 +196,13 @@ export class BrainSession {
     this.closed = true;
     this.status = "ended";
     this.relay.cleanup();
+    if (this.onClose) {
+      Promise.resolve(this.onClose()).catch((error) => {
+        this.log.warn("执行 session 清理回调失败", {
+          error: asError(error).message,
+        });
+      });
+    }
   }
 
   private async runPrompt(text: string): Promise<void> {
@@ -211,21 +223,14 @@ export class BrainSession {
       const stream = this.queryRunner({
         prompt: text,
         options: {
-          // Brain 内的 SDK 子进程不做真正的文件操作:builtin 工具被 PreToolUse hook 拦截后路由到
-          // Hand,Hand 侧 ToolExecutor 用自身 cwd 执行。这里显式使用系统临时目录,而不是透传
-          // Hand 传来的宿主机路径 —— 否则在容器里(或本地 dev 跨机环境)该路径很可能不存在,
-          // 导致 child_process.spawn 因 cwd ENOENT 而失败;tmpdir 总是存在且不会沾染项目配置。
-          cwd: os.tmpdir(),
+          // Claude CLI 必须在注入工作区启动,这样它会加载我们为当前 session 生成的
+          // .claude/settings.local.json。Hand 仍使用 this.cwd 作为真实宿主机 cwd 执行工具。
+          cwd: this.sdkCwd,
           model: this.model,
           pathToClaudeCodeExecutable: resolveClaudeCodeExecutable(),
           permissionMode: "default",
           canUseTool: this.canUseTool,
           maxTurns: 100,
-          hooks: {
-            PreToolUse: [
-              { matcher: ".*", hooks: [async (input: HookInput) => this.handlePreToolUse(input)] },
-            ],
-          },
         },
       });
 
@@ -302,7 +307,7 @@ export class BrainSession {
     await this.sendSessionEnd(result, null);
   }
 
-  private async handlePreToolUse(input: HookInput): Promise<PreToolUseHookResult> {
+  async handleInjectedPreToolUse(input: HookInput): Promise<SyncHookJsonOutput> {
     if (this.closed) {
       this.log.warn("会话已关闭，无法继续工具调用");
       throw new Error("会话已关闭");
@@ -313,11 +318,29 @@ export class BrainSession {
         toolName: input.tool_name,
       });
       return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: `Axon 不接管工具 ${input.tool_name}`,
+        },
+      };
+    }
+
+    const result = await this.relayToolCallToHand(input);
+    return {
+      hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `Axon 不支持工具 ${input.tool_name}`,
-        additionalContext: "",
-      };
+        permissionDecisionReason: "Tool executed remotely via Axon Hand",
+        additionalContext: renderToolResultForClaude(input.tool_name, result),
+      },
+    };
+  }
+
+  private async relayToolCallToHand(input: HookInput): Promise<RemoteToolResult> {
+    if (this.closed) {
+      this.log.warn("会话已关闭，无法继续工具调用");
+      throw new Error("会话已关闭");
     }
 
     const requestId = `hook-${this.id}-${randomUUID()}`;
@@ -375,12 +398,7 @@ export class BrainSession {
       toolName: input.tool_name,
     });
 
-    return {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: "Tool executed remotely via Axon Hand",
-      additionalContext: summarizeToolResult(result),
-    };
+    return result;
   }
 
   private async sendSessionEnd(result: string, error: Error | null): Promise<void> {
@@ -416,24 +434,74 @@ export class BrainSession {
   }
 }
 
-function summarizeToolResult(result: RemoteToolResult): string {
-  if (result.summary) {
-    return result.summary;
-  }
-
+function renderToolResultForClaude(toolName: string, result: RemoteToolResult): string {
   if (result.error) {
     return result.error;
   }
 
-  if (result.output === undefined) {
-    return "";
+  const output = result.output;
+  if (output === undefined) {
+    return result.summary ?? "";
   }
 
-  if (typeof result.output === "string") {
-    return result.output;
+  if (typeof output === "string") {
+    return output;
   }
 
-  return JSON.stringify(result.output);
+  if (!output || typeof output !== "object") {
+    return String(output);
+  }
+
+  if (toolName === "Read" && typeof (output as { content?: unknown }).content === "string") {
+    return (output as { content: string }).content;
+  }
+
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") {
+    const pathValue = (output as { path?: unknown }).path;
+    if (typeof pathValue === "string") {
+      return pathValue;
+    }
+  }
+
+  if (toolName === "Bash") {
+    const bash = output as { stdout?: unknown; stderr?: unknown; exit_code?: unknown };
+    const parts: string[] = [];
+    if (typeof bash.stdout === "string" && bash.stdout.length > 0) {
+      parts.push(`stdout:\n${bash.stdout}`);
+    }
+    if (typeof bash.stderr === "string" && bash.stderr.length > 0) {
+      parts.push(`stderr:\n${bash.stderr}`);
+    }
+    if (typeof bash.exit_code === "number") {
+      parts.push(`exit_code: ${bash.exit_code}`);
+    }
+    return parts.join("\n");
+  }
+
+  if (toolName === "Glob" && Array.isArray((output as { files?: unknown }).files)) {
+    return ((output as { files: unknown[] }).files)
+      .filter((file): file is string => typeof file === "string")
+      .join("\n");
+  }
+
+  if (toolName === "Grep" && Array.isArray((output as { matches?: unknown }).matches)) {
+    return ((output as { matches: unknown[] }).matches)
+      .flatMap((match) => {
+        if (!match || typeof match !== "object") {
+          return [];
+        }
+        const file = (match as { file?: unknown }).file;
+        const line = (match as { line?: unknown }).line;
+        const text = (match as { text?: unknown }).text;
+        if (typeof file !== "string" || typeof line !== "number" || typeof text !== "string") {
+          return [];
+        }
+        return [`${file}:${line}:${text}`];
+      })
+      .join("\n");
+  }
+
+  return JSON.stringify(output, null, 2);
 }
 
 function previewText(text: string, maxLength = 120): string {

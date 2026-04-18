@@ -6,14 +6,14 @@
  *   - HandClient 进程内实例化，通过 WebSocket 连接 Server
  *   - fake-claude 发出 Bash tool_call（echo brain-hand-e2e）
  *   - HandClient 的 ToolExecutor 真实执行 Bash，将 tool_result 通过 WebSocket 回传
- *   - fake-claude 将 tool_result 摘要作为 text_chunk 输出，并发 session_end
+ *   - fake-claude 将 tool_result 原始输出作为 text_chunk 输出，并发 session_end
  *
  * 验证路径：Hand 收到 tool_call → Bash 真跑 → tool_result 回传 → text_chunk + session_end 到达
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { AxonServer } from "../src/server.js";
@@ -142,30 +142,32 @@ test(
       "期望收到 Bash tool_call_complete"
     );
 
-    // 6c. fake-claude 将 tool_result 摘要作为 text_chunk 输出
-    //     BrainSession 通过 PreToolUse hook 将 summary 作为 additionalContext 返回给 fake-claude
-    //     摘要格式：summarizeToolResult("Bash", ...) → "Bash 完成，exit_code=0, stdout=16B, stderr=0B"
-    //     fake-claude 将 additionalContext 拼到 "fake assistant: " 前缀后输出
-    //     exit_code=0 证明 Bash 真正执行成功（echo 不会失败）
+    // 6c. fake-claude 将 Hand 侧 Bash 原始输出作为 text_chunk 输出
+    //     BrainSession 通过 PreToolUse hook 将 stdout/stderr/exit_code 文本化后
+    //     作为 additionalContext 返回给 fake-claude。
     assert.ok(textChunks.length >= 1, `期望至少 1 个 text_chunk，实际 ${textChunks.length} 个`);
     const allText = textChunks.join("");
     assert.ok(
       allText.includes("fake assistant:"),
       `期望 text_chunk 包含 "fake assistant:"，实际: "${allText}"`
     );
-    // "Bash 完成" 在 text_chunk 中证明 summarizeToolResult 对 Bash 的处理路径已走通
     assert.ok(
-      allText.includes("Bash 完成"),
-      `期望 text_chunk 包含 "Bash 完成"（证明 tool_result 摘要已回传），实际: "${allText}"`
+      allText.includes("stdout:\nbrain-hand-e2e\n"),
+      `期望 text_chunk 包含 Bash stdout（证明 Brain 看到了 Hand 原始输出），实际: "${allText}"`
     );
-    // exit_code=0 证明 echo 命令真实执行成功
     assert.ok(
-      allText.includes("exit_code=0"),
-      `期望 text_chunk 包含 "exit_code=0"（证明 Bash 真实执行），实际: "${allText}"`
+      allText.includes("exit_code: 0"),
+      `期望 text_chunk 包含 "exit_code: 0"（证明 Bash 真实执行），实际: "${allText}"`
     );
 
     // 6d. session_end 正常到达
     assert.equal(sessionEndResult, "fake done", `期望 session_end.result = "fake done"，实际: "${sessionEndResult}"`);
     assert.equal(sessionEndError, undefined, `期望 session_end.error 为 undefined，实际: "${sessionEndError}"`);
+
+    const argsRecord = JSON.parse(await readFile(argsFile, "utf8")) as { argv: string[]; cwd: string };
+    assert.ok(
+      argsRecord.cwd.includes("axon-claude-"),
+      `期望 fake Claude 在注入工作区启动，实际 cwd: "${argsRecord.cwd}"`
+    );
   }
 );

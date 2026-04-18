@@ -2,12 +2,15 @@ import os from "node:os";
 import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
 import { BrainSession } from "../src/session.js";
 import type { ServerToHandMessage } from "../src/protocol.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
 test("BrainSession streams thought/text chunks and passes Claude executable options to query runner", async (t) => {
   const fake = await writeFakeClaude({ command: "pwd" });
+  const sdkCwd = await mkdtemp(path.join(os.tmpdir(), "axon-session-flow-sdk-cwd-"));
   const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
   process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
 
@@ -18,6 +21,7 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
       process.env.CLAUDE_CODE_EXECUTABLE = originalExecutable;
     }
     await fake.cleanup();
+    await rm(sdkCwd, { recursive: true, force: true });
   });
 
   const sent: ServerToHandMessage[] = [];
@@ -27,6 +31,7 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
     id: "sess-flow-1",
     cwd: "/workspace/demo",
     model: "claude-test",
+    sdkCwd,
     transport: {
       send: async (message) => {
         sent.push(message);
@@ -62,8 +67,7 @@ test("BrainSession streams thought/text chunks and passes Claude executable opti
   assert.deepEqual(queryInput, {
     prompt: "测试 prompt",
     options: {
-      // SDK 应收到系统临时目录,而非 Hand 的宿主机 cwd:避免 spawn ENOENT,且不污染项目配置
-      cwd: os.tmpdir(),
+      cwd: sdkCwd,
       model: "claude-test",
       pathToClaudeCodeExecutable: fake.executablePath,
     },
@@ -133,30 +137,27 @@ test("BrainSession relays tool calls through Hand and completes once tool_result
         if (message.type === "tool_call") {
           queueMicrotask(() => {
             session.resolveToolResult(message.requestId, {
-              output: { stdout: "/workspace/demo\n", exit_code: 0 },
+              output: { stdout: "/workspace/demo\n", stderr: "", exit_code: 0 },
               summary: "pwd 完成",
             });
           });
         }
       },
     },
-    queryRunner: (input) => (async function* () {
-      const hook = input.options.hooks.PreToolUse[0]?.hooks[0];
-      assert.ok(hook);
-
-      const decision = await hook({
+    queryRunner: () => (async function* () {
+      const decision = await session.handleInjectedPreToolUse({
         tool_name: "Bash",
         tool_use_id: "toolu_123",
         tool_input: { command: "pwd" },
       });
 
-      assert.equal(decision.permissionDecisionReason, "Tool executed remotely via Axon Hand");
-      assert.equal(decision.additionalContext, "pwd 完成");
+      assert.equal(decision.hookSpecificOutput?.permissionDecisionReason, "Tool executed remotely via Axon Hand");
+      assert.equal(decision.hookSpecificOutput?.additionalContext, "stdout:\n/workspace/demo\n\nexit_code: 0");
 
       yield {
         type: "assistant",
         message: {
-          content: [{ type: "text", text: `工具结果: ${decision.additionalContext}` }],
+          content: [{ type: "text", text: `工具结果: ${decision.hookSpecificOutput?.additionalContext ?? ""}` }],
         },
       };
       yield { type: "result", result: "done" };
@@ -170,7 +171,7 @@ test("BrainSession relays tool calls through Hand and completes once tool_result
   assert.deepEqual(sent[2], {
     type: "text_chunk",
     sessionId: "sess-flow-2",
-    text: "工具结果: pwd 完成",
+    text: "工具结果: stdout:\n/workspace/demo\n\nexit_code: 0",
   });
   assert.deepEqual(sent[3], {
     type: "session_end",

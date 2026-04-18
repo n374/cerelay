@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { createServer } from "node:http";
 import { BrainSession } from "../src/session.js";
 import type { ServerToHandMessage } from "../src/protocol.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
+import { createClaudeHookInjectionWorkspace } from "../src/claude-hook-injection.js";
 
 const WORKDIR = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -39,11 +41,48 @@ test("BrainSession can drive the real SDK transport with a fake Claude executabl
 
   const sent: ServerToHandMessage[] = [];
   let session!: BrainSession;
+  const hookToken = "axon-sdk-spawn-hook-token";
+  const bridge = createServer((req, res) => {
+    if (req.method !== "POST" || req.headers["x-axon-hook-token"] !== hookToken) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "forbidden" }));
+      return;
+    }
+
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body) as { tool_name: string; tool_input?: unknown; tool_use_id?: string };
+        const result = await session.handleInjectedPreToolUse({
+          tool_name: payload.tool_name,
+          tool_input: payload.tool_input,
+          tool_use_id: payload.tool_use_id,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ decision: "block", reason: String(error) }));
+      }
+    });
+  });
+  await new Promise<void>((resolvePromise) => bridge.listen(0, "127.0.0.1", resolvePromise));
+  const address = bridge.address();
+  assert.ok(address && typeof address !== "string");
+  const workspace = await createClaudeHookInjectionWorkspace({
+    bridgeUrl: `http://127.0.0.1:${address.port}/hook`,
+    sessionId: "sess-sdk-spawn",
+    token: hookToken,
+  });
 
   session = BrainSession.createSession({
     id: "sess-sdk-spawn",
     cwd: WORKDIR,
     model: "claude-test",
+    sdkCwd: workspace.cwd,
     transport: {
       send: async (message) => {
         sent.push(message);
@@ -57,6 +96,11 @@ test("BrainSession can drive the real SDK transport with a fake Claude executabl
     },
   });
 
+  t.after(async () => {
+    bridge.close();
+    await workspace.cleanup();
+  });
+
   await session.prompt("你好");
 
   assert.equal(sent[0]?.type, "tool_call");
@@ -65,7 +109,7 @@ test("BrainSession can drive the real SDK transport with a fake Claude executabl
   assert.deepEqual(sent[2], {
     type: "text_chunk",
     sessionId: "sess-sdk-spawn",
-    text: "fake assistant: pwd 完成",
+    text: `fake assistant: stdout:\n${WORKDIR}\n\nexit_code: 0`,
   });
   assert.deepEqual(sent[3], {
     type: "session_end",
@@ -74,14 +118,17 @@ test("BrainSession can drive the real SDK transport with a fake Claude executabl
     error: undefined,
   });
 
-  const argv = JSON.parse(await readFile(argsFile, "utf8")) as string[];
-  assert.ok(argv.includes("--output-format"));
-  assert.ok(argv.includes("stream-json"));
-  assert.ok(argv.includes("--input-format"));
-  assert.ok(argv.includes("--model"));
-  assert.ok(argv.includes("claude-test"));
-  assert.ok(argv.includes("--permission-mode"));
-  assert.ok(argv.includes("default"));
+  const argsRecord = JSON.parse(await readFile(argsFile, "utf8")) as { argv: string[]; cwd: string };
+  assert.ok(argsRecord.argv.includes("--output-format"));
+  assert.ok(argsRecord.argv.includes("stream-json"));
+  assert.ok(argsRecord.argv.includes("--input-format"));
+  assert.ok(argsRecord.argv.includes("--model"));
+  assert.ok(argsRecord.argv.includes("claude-test"));
+  assert.ok(argsRecord.argv.includes("--permission-mode"));
+  assert.ok(argsRecord.argv.includes("default"));
+  assert.equal(await realpath(argsRecord.cwd), await realpath(workspace.cwd));
+  await stat(workspace.settingsPath);
+  await stat(workspace.scriptPath);
 
   const stdinLines = (await readFile(stdinFile, "utf8"))
     .trim()
