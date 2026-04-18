@@ -22,6 +22,8 @@ test("docker entrypoint forwards startup flags and preserves Claude executable e
     CLAUDE_CODE_EXECUTABLE: "/custom/claude",
     CLAUDE_CONFIG: configJson,
     ANTHROPIC_API_KEY: "test-key",
+    ANTHROPIC_AUTH_TOKEN: "auth-token",
+    ANTHROPIC_BASE_URL: "https://example.invalid",
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
@@ -32,6 +34,8 @@ test("docker entrypoint forwards startup flags and preserves Claude executable e
     /NODE_ARGS:\/app\/server\/dist\/index\.js --port 9999 --model claude-test --log-level debug --log-json/
   );
   assert.match(result.stdout, /CLAUDE_CODE_EXECUTABLE_ENV:\/custom\/claude/);
+  assert.match(result.stdout, /ANTHROPIC_AUTH_TOKEN_ENV:auth-token/);
+  assert.match(result.stdout, /ANTHROPIC_BASE_URL_ENV:https:\/\/example\.invalid/);
 
   const writtenConfig = await readFile(path.join(sandbox.homeDir, ".claude", "claude_config.json"), "utf8");
   assert.equal(writtenConfig, configJson);
@@ -47,6 +51,9 @@ test("docker entrypoint can reuse mounted claude config without API key", async 
     MODEL: "claude-sonnet-4",
     LOG_LEVEL: "info",
     LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "",
+    ANTHROPIC_AUTH_TOKEN: "",
+    ANTHROPIC_BASE_URL: "",
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
@@ -83,6 +90,8 @@ exit 1
     `#!/bin/sh
 printf 'NODE_ARGS:%s\\n' "$*"
 printf 'CLAUDE_CODE_EXECUTABLE_ENV:%s\\n' "$CLAUDE_CODE_EXECUTABLE"
+printf 'ANTHROPIC_AUTH_TOKEN_ENV:%s\\n' "$ANTHROPIC_AUTH_TOKEN"
+printf 'ANTHROPIC_BASE_URL_ENV:%s\\n' "$ANTHROPIC_BASE_URL"
 printf 'PORT_ENV:%s\\n' "$PORT"
 printf 'MODEL_ENV:%s\\n' "$MODEL"
 printf 'LOG_LEVEL_ENV:%s\\n' "$LOG_LEVEL"

@@ -31,6 +31,7 @@ Hand CLI (本地 / local)
 ```bash
 cp .env.example .env
 # 编辑 .env，填入 ANTHROPIC_API_KEY
+# 或者使用 ANTHROPIC_AUTH_TOKEN（如有需要可同时配置 ANTHROPIC_BASE_URL）
 ```
 
 ### 2. 启动 Brain 容器
@@ -61,11 +62,15 @@ npm start -- --server 192.168.1.100:8765
 
 | 环境变量 | 默认值 | 说明 |
 |---------|--------|------|
-| `ANTHROPIC_API_KEY` | **必填** | Anthropic API Key |
+| `ANTHROPIC_API_KEY` | 可选 | Anthropic API Key |
+| `ANTHROPIC_AUTH_TOKEN` | 可选 | Claude / Anthropic 鉴权 Token |
+| `ANTHROPIC_BASE_URL` | 可选 | 自定义 Anthropic 兼容 API Base URL |
 | `PORT` | `8765` | 容器内监听端口 |
 | `MODEL` | `claude-sonnet-4-20250514` | 使用的 Claude 模型 |
 | `BRAIN_HOST_PORT` | `8765` | 宿主机映射端口（仅 docker-compose） |
 | `CLAUDE_CONFIG` | 空 | claude CLI 额外配置（JSON 字符串） |
+| `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | 宿主机 Claude 配置目录挂载源 |
+| `CLAUDE_JSON_PATH` | `${HOME}/.claude.json` | 宿主机 Claude 登录态文件挂载源 |
 
 ## 手动 Docker 命令 / Manual Docker Commands
 
@@ -78,6 +83,9 @@ docker run -d \
   --name axon-brain \
   -p 8765:8765 \
   -e ANTHROPIC_API_KEY=your-key \
+  # 或者 / Or:
+  # -e ANTHROPIC_AUTH_TOKEN=your-auth-token \
+  # -e ANTHROPIC_BASE_URL=https://your-anthropic-compatible-endpoint \
   axon-brain:latest
 
 # 查看日志
@@ -92,7 +100,9 @@ docker rm axon-brain
 
 docker-compose 配置了 `claude_config` 卷挂载到容器内的 `/home/node/.claude`，用于持久化 claude CLI 的登录状态和配置，避免每次重启容器后重新认证。
 
-The docker-compose config mounts a `claude_config` volume to `/home/node/.claude` inside the container, persisting claude CLI login state and config across container restarts.
+此外还会把宿主机的 `~/.claude.json` 挂载到容器内 `/home/node/.claude.json`，因为部分 Claude Code 登录态存放在该文件中。
+
+The docker-compose config mounts the host `~/.claude` directory to `/home/node/.claude` inside the container, and also mounts `~/.claude.json` to `/home/node/.claude.json`, because part of the Claude Code login state is stored in that file.
 
 ## 健康检查 / Health Check
 

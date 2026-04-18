@@ -2,7 +2,7 @@
 # Axon Brain — docker-compose 配置
 # 使用方式：
 #   1. 默认复用当前 shell / Claude Code 注入的环境变量
-#   2. 默认挂载宿主机 ~/.claude
+#   2. 默认挂载宿主机 ~/.claude 和 ~/.claude.json
 #   3. docker compose up -d
 # ============================================================
 
@@ -18,6 +18,8 @@ services:
     environment:
       # 优先复用当前 shell / Claude Code 注入的环境变量
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL-}
       # 可选：覆盖端口（容器内端口，与 ports 映射对应）
       - PORT=${BRAIN_PORT:-8765}
       # 可选：覆盖模型
@@ -35,11 +37,14 @@ services:
     ports:
       - "${BRAIN_HOST_PORT:-8765}:${BRAIN_PORT:-8765}"
 
-    # 数据持久化：挂载 claude CLI 凭证目录（避免每次重启重新认证）
+    # 数据持久化：挂载 claude CLI 凭证目录与登录态文件（避免每次重启重新认证）
     volumes:
       - type: bind
         source: ${CLAUDE_CONFIG_DIR:-${HOME}/.claude}
         target: /home/node/.claude
+      - type: bind
+        source: ${CLAUDE_JSON_PATH:-${HOME}/.claude.json}
+        target: /home/node/.claude.json
       # 可选：挂载工作目录（Brain 执行工具时的默认 cwd）
       # - ./workspace:/workspace
 

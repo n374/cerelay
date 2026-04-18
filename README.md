@@ -10,7 +10,7 @@ Split architecture for Claude Code: users interact on Hand, Hand executes tools 
 flowchart LR
     H1[Hand CLI / TypeScript<br/>用户交互 + 工具执行]
     HN[Hand N / Future]
-    S[Axon Server / TypeScript<br/>query() + hooks.PreToolUse]
+    S[Axon Server / TypeScript<br/>query() + injected .claude hook bridge]
     C[Claude Code CLI<br/>spawned by SDK]
 
     H1 <-->|WebSocket| S
@@ -29,9 +29,9 @@ Hand (TypeScript) ←→ WebSocket ←→ Server (TypeScript) ←→ Claude Agen
 ## 概念 / Concepts
 
 - **Hand 端 / Hand**：用户交互入口，也是 Claude 原生工具的执行环境。当前实现为 TypeScript CLI，支持 `Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`。
-- **Server 端 / Server**：Brain 端，位于 [`server/src`](./server/src)。使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` 驱动 Claude Code，并通过 `hooks.PreToolUse` 在进程内拦截工具调用。
+- **Server 端 / Server**：Brain 端，位于 [`server/src`](./server/src)。使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` 驱动 Claude Code，并为每个 session 生成临时 Claude 项目目录，把 `PreToolUse` hook 真实注入到 `.claude/settings.local.json`。
 - **通信 / Transport**：Server 与 Hand 之间通过 WebSocket 全双工通信，文本流和工具调用共用一条连接。
-- **Proxy / Hook 脚本**：[`proxy/`](./proxy) 中的 Axon relay 模式已实现，但不是主路径；主路径不依赖 HTTP hookbridge、`dispatch.sh` relay 或 `settings.local.json` 注入。
+- **Hook Bridge**：Claude Code 的 `PreToolUse` command hook 会命中 Server 内部 HTTP bridge，再由 Server 通过 WebSocket 把工具调用转发给 Hand。
 
 ## 核心时序 / Core Sequence
 
@@ -43,15 +43,16 @@ sequenceDiagram
     participant C as claude CLI
 
     H->>S: WS prompt
-    S->>SDK: query({ prompt, hooks.PreToolUse })
+    S->>S: create temp Claude project + inject .claude/settings.local.json
+    S->>SDK: query({ prompt, cwd: injected-project })
     SDK->>C: run prompt
     C-->>S: assistant text/thinking stream
     S-->>H: text_chunk / thought_chunk
-    C->>S: hooks.PreToolUse(tool_name, tool_input)
+    C->>S: command hook POST /internal/hooks/pretooluse
     S-->>H: WS tool_call
     H->>H: execute Read/Write/Edit/MultiEdit/Bash/Grep/Glob
     H-->>S: WS tool_result
-    S-->>C: hook return (deny + additionalContext)
+    S-->>C: hook JSON return (deny + additionalContext)
     C-->>S: final result
     S-->>H: session_end
 ```
@@ -60,8 +61,8 @@ sequenceDiagram
 
 Key points:
 
-- **SDK 直接集成 / Direct SDK integration**：不再通过 ACP bridge 把工具调用转换成 client-side methods，而是直接使用 `query()` 和 `hooks.PreToolUse`。
-- **进程内 Hook / In-process hooks**：工具拦截发生在 TypeScript Server 进程内，不需要额外的 HTTP bridge。
+- **SDK 直接集成 / Direct SDK integration**：不再通过 ACP bridge 把工具调用转换成 client-side methods，而是直接使用 `query()` 驱动 Claude Code。
+- **真实 Claude Hook 注入 / Real Claude hook injection**：Server 为每个 session 注入 `.claude/settings.local.json`，让 Claude Code 走原生 `PreToolUse` command hook。
 - **Hand 执行 Claude 原生工具 / Hand executes Claude-native tools**：Hand 按 Claude 工具语义执行本地操作，而不是 ACP 方法名。
 
 ## 项目结构 / Project Structure
@@ -74,8 +75,9 @@ axon/
 │   ├── tsconfig.json
 │   └── src/
 │       ├── index.ts          # Server CLI 入口，解析 --port / --model
-│       ├── server.ts         # HTTP + WebSocket Server
-│       ├── session.ts        # query() + hooks.PreToolUse 会话驱动
+│       ├── server.ts         # HTTP + WebSocket Server + internal hook bridge
+│       ├── session.ts        # query() 会话驱动 + Hand tool relay
+│       ├── claude-hook-injection.ts # 注入 .claude/settings.local.json 与 hook 脚本
 │       ├── relay.ts          # 工具调用 pending/result 管理
 │       └── protocol.ts       # 消息类型定义
 ├── hand/                     # TypeScript Hand CLI
@@ -117,6 +119,7 @@ By default, no `.env` file is required. The container will:
 
 - 复用当前 shell / Claude Code 注入的环境变量
 - 默认挂载宿主机 `~/.claude` 到容器 `/home/node/.claude`
+- 默认挂载宿主机 `~/.claude.json` 到容器 `/home/node/.claude.json`
 
 然后直接启动：
 
@@ -132,9 +135,9 @@ npm run brain:up
 LOG_LEVEL=debug npm run brain:up
 ```
 
-默认会把宿主机的 `~/.claude` 挂载到容器内 `/home/node/.claude`。
+默认会把宿主机的 `~/.claude` 挂载到容器内 `/home/node/.claude`，并把宿主机的 `~/.claude.json` 挂载到容器内 `/home/node/.claude.json`。
 
-By default, the container bind-mounts the host `~/.claude` directory to `/home/node/.claude`.
+By default, the container bind-mounts the host `~/.claude` directory to `/home/node/.claude`, and the host `~/.claude.json` file to `/home/node/.claude.json`.
 
 如果你想覆盖默认挂载路径或端口，可以再创建 `.env`：
 
@@ -150,6 +153,7 @@ For example, add this to `.env`:
 
 ```bash
 CLAUDE_CONFIG_DIR=/absolute/path/to/.claude
+CLAUDE_JSON_PATH=/absolute/path/to/.claude.json
 BRAIN_HOST_PORT=8765
 LOG_LEVEL=debug
 LOG_JSON=false
@@ -162,6 +166,7 @@ For example:
 
 ```bash
 CLAUDE_CONFIG_DIR=/Users/yourname/.claude
+CLAUDE_JSON_PATH=/Users/yourname/.claude.json
 ```
 
 查看日志 / View logs:
@@ -179,7 +184,7 @@ npm run brain:down
 前置条件 / Prerequisites：
 
 - 已安装 Docker / Docker Compose
-- 已配置 `ANTHROPIC_API_KEY`
+- 已配置 `ANTHROPIC_API_KEY`，或 `ANTHROPIC_AUTH_TOKEN`（如有需要可同时配置 `ANTHROPIC_BASE_URL`）
 
 默认情况下，Brain Server 会监听宿主机 `localhost:8765`，容器内已包含 `claude-code`。
 
@@ -192,8 +197,10 @@ services:
   axon-brain:
     volumes:
       - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.claude.json:/home/node/.claude.json
       # 或者 / Or:
       # - /absolute/path/to/.claude:/home/node/.claude
+      # - /absolute/path/to/.claude.json:/home/node/.claude.json
 ```
 
 ### 3. 启动 Hand / Start the Hand
@@ -255,7 +262,7 @@ This mode requires a locally installed and authenticated `claude` CLI, and a wor
 - 位于 [`server/src`](./server/src)
 - 使用 `@anthropic-ai/claude-agent-sdk`
 - 通过 `query()` 获取流式输出
-- 通过 `hooks.PreToolUse` 拦截工具调用
+- 通过注入的 `.claude/settings.local.json` `PreToolUse` hook 拦截工具调用
 - 通过 WebSocket 将 `tool_call` / `tool_result` 与 Hand 关联
 - 默认监听 `/ws` 和 `/health`
 
@@ -285,7 +292,7 @@ This mode requires a locally installed and authenticated `claude` CLI, and a wor
 | Brain Server | TypeScript + Node.js | 直接接入 Claude Agent SDK |
 | Hand CLI | TypeScript + Node.js | 轻量 CLI，本地执行 Claude 原生工具 |
 | Server ↔ Hand | WebSocket | 双向流式输出与工具回传 |
-| Tool interception | `hooks.PreToolUse` | SDK 进程内回调 |
+| Tool interception | Claude Code `PreToolUse` command hook | `.claude/settings.local.json` + internal HTTP bridge |
 | Claude driver | `query()` | 官方 SDK 主接口 |
 
 ## Roadmap
