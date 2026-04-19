@@ -48,6 +48,51 @@ export interface Connected {
   sessionId?: string;
 }
 
+export interface CreatePtySession {
+  type: "create_pty_session";
+  cwd: string;
+  homeDir?: string;
+  model?: string;
+  projectClaudeSettingsLocalContent?: string;
+  cols?: number;
+  rows?: number;
+  term?: string;
+  colorTerm?: string;
+  termProgram?: string;
+  termProgramVersion?: string;
+}
+
+export interface PtySessionCreated {
+  type: "pty_session_created";
+  sessionId: string;
+}
+
+export interface PtyInput {
+  type: "pty_input";
+  sessionId: string;
+  data: string;
+}
+
+export interface PtyResize {
+  type: "pty_resize";
+  sessionId: string;
+  cols: number;
+  rows: number;
+}
+
+export interface PtyOutput {
+  type: "pty_output";
+  sessionId: string;
+  data: string;
+}
+
+export interface PtyExit {
+  type: "pty_exit";
+  sessionId: string;
+  exitCode?: number;
+  signal?: string;
+}
+
 export interface McpToolDescriptor {
   name: string;
   title?: string;
@@ -176,6 +221,9 @@ export interface CloseSession {
 export type ServerToHandMessage =
   | Connected
   | CreateSessionResponse
+  | PtySessionCreated
+  | PtyOutput
+  | PtyExit
   | RestoreSessionResponse
   | ServerError
   | SessionMcpCatalogApplied
@@ -189,8 +237,11 @@ export type ServerToHandMessage =
 export type HandToServerMessage =
   | CloseSession
   | CreateSession
+  | CreatePtySession
   | ListSessions
   | Prompt
+  | PtyInput
+  | PtyResize
   | RestoreSession
   | SessionMcpCatalog
   | ToolResult;

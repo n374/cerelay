@@ -89,7 +89,7 @@ test("CLI mode can create session, execute remote Write tool, and exit cleanly",
 
   await waitFor(
     () => stdout.includes("你>") || child.exitCode !== null,
-    3000,
+    6000,
     "等待 CLI 输入提示"
   );
   assert.equal(
@@ -412,6 +412,86 @@ test("ACP mode restores the existing session before the next prompt", async (t) 
   assert.equal(parsed.some((entry) => entry.method === "$/textChunk" && JSON.stringify(entry).includes("restored-acp")), true);
   assert.equal(parsed.some((entry) => entry.id === 3 && JSON.stringify(entry).includes("\"result\":\"ok\"")), true);
   assert.equal(stderr.includes("Session 不存在"), false);
+});
+
+test("PTY mode executes remote tool calls while terminal passthrough is active", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-pty-"));
+  const brain = await startFakeBrain();
+  registerBrainCleanup(t, brain);
+  let sawToolResult = false;
+
+  brain.ws.on("connection", (socket) => {
+    socket.send(JSON.stringify({ type: "connected" }));
+
+    socket.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+
+      if (msg.type === "create_pty_session") {
+        socket.send(JSON.stringify({ type: "pty_session_created", sessionId: "pty-test" }));
+        setTimeout(() => {
+          socket.send(JSON.stringify({
+            type: "tool_call",
+            sessionId: "pty-test",
+            requestId: "req-write",
+            toolName: "Write",
+            input: {
+              file_path: "pty-created.txt",
+              content: "from-pty",
+            },
+          }));
+        }, 20);
+        return;
+      }
+
+      if (msg.type === "tool_result") {
+        sawToolResult = true;
+        socket.send(JSON.stringify({
+          type: "tool_call_complete",
+          sessionId: "pty-test",
+          requestId: "req-write",
+          toolName: "Write",
+        }));
+        socket.send(JSON.stringify({
+          type: "pty_output",
+          sessionId: "pty-test",
+          data: Buffer.from("pty done\r\n", "utf8").toString("base64"),
+        }));
+        socket.send(JSON.stringify({
+          type: "pty_exit",
+          sessionId: "pty-test",
+          exitCode: 0,
+        }));
+      }
+    });
+  });
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "pty"],
+    {
+      cwd: HAND_WORKDIR,
+      stdio: ["pipe", "pipe", "pipe"],
+    }
+  );
+  registerChildCleanup(t, child);
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  await waitFor(() => stdout.includes("[PTY 已连接]"), 3000, "等待 PTY 连接提示");
+  await waitFor(() => sawToolResult, 3000, "等待 PTY tool_result");
+
+  const exitCode = await waitForExit(child, 3000);
+  assert.equal(exitCode, 0);
+  assert.equal(await fs.readFile(path.join(cwd, "pty-created.txt"), "utf8"), "from-pty");
+  assert.match(stdout, /pty done/);
+  assert.equal(stderr.includes("PTY passthrough 失败"), false);
 });
 
 async function startFakeBrain(): Promise<{

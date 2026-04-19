@@ -15,6 +15,21 @@ function restoreEnvVar(name: string, value: string | undefined): void {
   process.env[name] = value;
 }
 
+async function rmWithRetries(target: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 test(
   "Hand↔Brain e2e with fake Claude executable keeps the session prompt path working",
   { concurrency: false, timeout: 15_000 },
@@ -44,8 +59,8 @@ test(
     });
     t.after(async () => {
       await fake.cleanup();
-      await rm(argsDir, { recursive: true, force: true });
-      await rm(tempHome, { recursive: true, force: true });
+      await rmWithRetries(argsDir);
+      await rmWithRetries(tempHome);
     });
 
     const server = new AxonServer({

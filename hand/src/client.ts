@@ -1,15 +1,24 @@
 import os from "node:os";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
 import WebSocket from "ws";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { UI } from "./ui.js";
-import { createLogger } from "./logger.js";
+import { createLogger, configureLogger } from "./logger.js";
 import type {
   CreateSession,
+  CreatePtySession,
   CreateSessionResponse,
   McpServerConfig,
   McpServerCatalogEntry,
   Prompt,
+  PtyExit,
+  PtyInput,
+  PtyOutput,
+  PtyResize,
+  PtySessionCreated,
   RestoreSession,
   RestoreSessionResponse,
   SessionMcpCatalog,
@@ -65,6 +74,7 @@ export class HandClient {
 
   // 当前活跃的 session ID
   private sessionId = "";
+  private ptySessionId = "";
 
   // 最后一次 session_end 结果（供 ACP Server 查询）
   private lastResult: { result?: string; error?: string } = {};
@@ -153,9 +163,35 @@ export class HandClient {
     await this.waitForSessionReady("session_restored");
   }
 
+  async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
+    this.currentCwd = cwd;
+    const projectClaudeSettingsLocalContent = await readProjectClaudeSettingsLocal(cwd);
+    const msg: CreatePtySession = {
+      type: "create_pty_session",
+      cwd,
+      homeDir: os.homedir(),
+      model,
+      projectClaudeSettingsLocalContent,
+      cols: process.stdout.columns ?? 80,
+      rows: process.stdout.rows ?? 24,
+      term: process.env.TERM,
+      colorTerm: process.env.COLORTERM,
+      termProgram: process.env.TERM_PROGRAM,
+      termProgramVersion: process.env.TERM_PROGRAM_VERSION,
+    };
+    await this.writeJSON(msg);
+    const sessionId = await this.waitForPtySessionReady();
+    this.ptySessionId = sessionId;
+    return sessionId;
+  }
+
   // 获取当前 session ID（供 ACP Server 查询）
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  getPtySessionId(): string {
+    return this.ptySessionId;
   }
 
   // 获取最后一次 session_end 的结果（供 ACP Server 查询）
@@ -316,6 +352,51 @@ export class HandClient {
     });
   }
 
+  private waitForPtySessionReady(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error("WebSocket 未连接"));
+        return;
+      }
+
+      const ws = this.ws;
+
+      const onMessage = (raw: string) => {
+        let msg: ServerToHandMessage;
+        try {
+          msg = JSON.parse(raw) as ServerToHandMessage;
+        } catch {
+          return;
+        }
+
+        switch (msg.type) {
+          case "pty_session_created": {
+            const created = msg as PtySessionCreated;
+            releaseMessageConsumer();
+            ws.off("error", onError);
+            resolve(created.sessionId);
+            break;
+          }
+          case "error": {
+            releaseMessageConsumer();
+            ws.off("error", onError);
+            reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
+            break;
+          }
+        }
+      };
+
+      const onError = (err: Error) => {
+        releaseMessageConsumer();
+        reject(new Error(`等待 pty_session_created 失败: ${err.message}`));
+      };
+
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
+      ws.on("error", onError);
+    });
+  }
+
   // 处理单条消息，返回 true 表示会话结束（session_end）
   // callbacks 为可选，有则通知回调方（ACP 场景），无则使用 UI 输出（CLI 场景）
   private handleMessage(raw: string, callbacks?: HandClientCallbacks): boolean {
@@ -395,7 +476,7 @@ export class HandClient {
 
   // 在后台执行工具调用并将结果发回 Server
   private async executeToolCall(msg: ToolCall): Promise<void> {
-    log.debug("开始执行工具调用", {
+    log.info("开始执行工具调用", {
       sessionId: msg.sessionId,
       requestId: msg.requestId,
       toolName: msg.toolName,
@@ -419,7 +500,7 @@ export class HandClient {
         summary: summarizeToolResult(msg.toolName, result),
       };
 
-      log.debug("工具调用执行成功", {
+      log.info("工具调用执行成功", {
         sessionId: msg.sessionId,
         requestId: msg.requestId,
         toolName: msg.toolName,
@@ -464,6 +545,141 @@ export class HandClient {
         );
       });
     }
+  }
+
+  async runPtyPassthrough(sessionId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error("WebSocket 未连接"));
+        return;
+      }
+
+      // 在 PTY passthrough 期间禁用日志 console 输出，避免日志混入 PTY 数据流
+      configureLogger({ console: false });
+
+      const ws = this.ws;
+      const stdin = process.stdin;
+      const stdout = process.stdout;
+      const isTTY = Boolean(stdin.isTTY);
+      const previousRawMode = isTTY ? stdin.isRaw : false;
+
+      const cleanup = () => {
+        releaseMessageConsumer();
+        ws.off("error", onError);
+        ws.off("close", onClose);
+        stdin.off("data", onInput);
+        stdout.off("resize", onResize);
+        if (isTTY) {
+          stdin.setRawMode(previousRawMode);
+        }
+        stdin.pause();
+        // PTY passthrough 完成后恢复日志 console 输出
+        configureLogger({ console: true });
+      };
+
+      const finish = (error?: Error) => {
+        cleanup();
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+
+      const onMessage = (raw: string) => {
+        let msg: ServerToHandMessage;
+        try {
+          msg = JSON.parse(raw) as ServerToHandMessage;
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+
+        switch (msg.type) {
+          case "tool_call": {
+            const toolCall = msg as ToolCall;
+            if (toolCall.sessionId !== sessionId) {
+              break;
+            }
+            void this.executeToolCall(toolCall);
+            break;
+          }
+          case "tool_call_complete": {
+            const complete = msg as import("./protocol.js").ToolCallComplete;
+            if (complete.sessionId !== sessionId) {
+              break;
+            }
+            break;
+          }
+          case "pty_output": {
+            const output = msg as PtyOutput;
+            if (output.sessionId !== sessionId) {
+              break;
+            }
+            stdout.write(Buffer.from(output.data, "base64"));
+            break;
+          }
+          case "pty_exit": {
+            const exit = msg as PtyExit;
+            if (exit.sessionId !== sessionId) {
+              break;
+            }
+            finish();
+            break;
+          }
+          case "error": {
+            const serverError = msg as ServerError;
+            if (serverError.sessionId && serverError.sessionId !== sessionId) {
+              break;
+            }
+            finish(new Error(`服务器错误: ${serverError.message}`));
+            break;
+          }
+        }
+      };
+
+      const onInput = (chunk: Buffer | string) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const payload: PtyInput = {
+          type: "pty_input",
+          sessionId,
+          data: buffer.toString("base64"),
+        };
+        void this.writeJSON(payload).catch((error) => {
+          finish(error instanceof Error ? error : new Error(String(error)));
+        });
+      };
+
+      const onResize = () => {
+        const payload: PtyResize = {
+          type: "pty_resize",
+          sessionId,
+          cols: stdout.columns ?? 80,
+          rows: stdout.rows ?? 24,
+        };
+        void this.writeJSON(payload).catch(() => undefined);
+      };
+
+      const onError = (err: Error) => {
+        finish(err);
+      };
+
+      const onClose = () => {
+        finish(new Error("WebSocket 连接已关闭"));
+      };
+
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
+      ws.on("error", onError);
+      ws.on("close", onClose);
+      if (isTTY) {
+        stdin.setRawMode(true);
+      }
+      stdin.resume();
+      stdin.on("data", onInput);
+      stdout.on("resize", onResize);
+      onResize();
+    });
   }
 
   // 线程安全的 JSON 写入（通过 Promise 链串行化）
@@ -625,6 +841,24 @@ function summarizeUnknown(value: unknown): string {
     return previewText(JSON.stringify(value), 120);
   } catch {
     return String(value);
+  }
+}
+
+async function readProjectClaudeSettingsLocal(cwd: string): Promise<string | undefined> {
+  const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+  if (!existsSync(settingsPath)) {
+    return undefined;
+  }
+
+  try {
+    return await readFile(settingsPath, "utf8");
+  } catch (error) {
+    log.warn("读取项目级 Claude settings.local.json 失败，已忽略", {
+      cwd,
+      settingsPath,
+      error: formatErrorForLog(error),
+    });
+    return undefined;
   }
 }
 

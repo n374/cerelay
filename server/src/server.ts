@@ -12,14 +12,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import type {
   Connected,
   CloseSession,
   CreateSession,
+  CreatePtySession,
   Envelope,
   ListSessions,
   Prompt,
+  PtyInput,
+  PtyResize,
   RestoreSession,
   SessionMcpCatalog,
   ServerError,
@@ -32,9 +37,12 @@ import { HandRegistry } from "./hand-registry.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
-import { createClaudeSessionRuntime } from "./claude-session-runtime.js";
+import { createClaudeSessionRuntime, getClaudeSessionRuntimeRoot } from "./claude-session-runtime.js";
 import { createMcpProxyServers } from "./mcp-proxy.js";
 import { loadClaudeMcpServerConfigs } from "./claude-mcp-config.js";
+import { ClaudePtySession } from "./pty-session.js";
+import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
+import type { HookInput } from "./session.js";
 
 const log = createLogger("server");
 const SESSION_RESUME_GRACE_MS = 60_000;
@@ -69,6 +77,7 @@ export class AxonServer {
   private readonly auth: TokenStore;
   private readonly hands = new HandRegistry();
   private readonly sessions = new Map<string, SessionEntry>();
+  private readonly ptySessions = new Map<string, PtySessionEntry>();
   private readonly stats = new StatsCollector();
   private readonly toolRouting = new ToolRoutingStore();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
@@ -145,6 +154,9 @@ export class AxonServer {
       session.close();
     }
     this.sessions.clear();
+    for (const [sessionId, entry] of Array.from(this.ptySessions.entries())) {
+      this.destroyPtySession(sessionId, entry, "服务器关闭");
+    }
 
     // 关闭所有 Hand 连接
     for (const hand of this.hands.all()) {
@@ -193,6 +205,12 @@ export class AxonServer {
         time: new Date().toISOString(),
         handsOnline: this.hands.count(),
       });
+      return;
+    }
+
+    if (pathname === "/internal/hooks/pretooluse") {
+      requestLog.debug("转交内部 PreToolUse hook bridge");
+      void this.handleInjectedPreToolUseRequest(req, res);
       return;
     }
 
@@ -465,6 +483,13 @@ export class AxonServer {
 
       // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
       for (const sessionId of handInfo.sessionIds) {
+        const ptyEntry = this.ptySessions.get(sessionId);
+        if (ptyEntry) {
+          handLog.debug("Hand 断开时销毁 PTY session", { sessionId });
+          this.destroyPtySession(sessionId, ptyEntry, "Hand 断开");
+          continue;
+        }
+
         const entry = this.sessions.get(sessionId);
         if (entry) {
           if (entry.session.info().status === "active") {
@@ -520,6 +545,9 @@ export class AxonServer {
         case "create_session":
           await this.handleCreateSession(handId, JSON.parse(raw) as CreateSession);
           return;
+        case "create_pty_session":
+          await this.handleCreatePtySession(handId, JSON.parse(raw) as CreatePtySession);
+          return;
         case "prompt":
           await this.handlePrompt(handId, JSON.parse(raw) as Prompt);
           return;
@@ -528,6 +556,12 @@ export class AxonServer {
           return;
         case "tool_result":
           await this.handleToolResult(handId, JSON.parse(raw) as ToolResult);
+          return;
+        case "pty_input":
+          await this.handlePtyInput(handId, JSON.parse(raw) as PtyInput);
+          return;
+        case "pty_resize":
+          await this.handlePtyResize(handId, JSON.parse(raw) as PtyResize);
           return;
         case "session_mcp_catalog":
           await this.handleSessionMcpCatalog(handId, JSON.parse(raw) as SessionMcpCatalog);
@@ -614,6 +648,127 @@ export class AxonServer {
     });
   }
 
+  private async handleCreatePtySession(handId: string, message: CreatePtySession): Promise<void> {
+    log.debug("收到创建 PTY Session 请求", {
+      handId,
+      cwd: message.cwd || ".",
+      model: message.model || this.defaultModel,
+      cols: message.cols,
+      rows: message.rows,
+    });
+
+    const sessionId = `pty-${Date.now()}-${randomUUID()}`;
+    const hookToken = randomUUID();
+    const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
+    await rm(runtimeRoot, { recursive: true, force: true });
+    const hookInjection = await prepareClaudeHookInjection({
+      bridgeUrl: `http://127.0.0.1:${this.getListenPort()}/internal/hooks/pretooluse?sessionId=${encodeURIComponent(sessionId)}`,
+      existingProjectSettingsLocalContent: message.projectClaudeSettingsLocalContent,
+      runtimeRoot,
+      sessionId,
+      token: hookToken,
+    });
+    const runtime = await createClaudeSessionRuntime({
+      sessionId,
+      cwd: message.cwd || ".",
+      handHomeDir: message.homeDir,
+      projectSettingsLocalShadowPath: hookInjection.settingsPath,
+    });
+    await verifyPtyHookVisibleInRuntime(runtime, message.cwd || ".");
+
+    log.info("PTY Session runtime 与 hook 已准备完成", {
+      sessionId,
+      handId,
+      runtimeRoot: runtime.rootDir,
+      runtimeCwd: runtime.cwd,
+      runtimeHome: runtime.env.HOME,
+      hookScriptPath: hookInjection.scriptPath,
+      hookSettingsPath: hookInjection.settingsPath,
+      hasProjectSettingsLocal: Boolean(message.projectClaudeSettingsLocalContent),
+    });
+
+    const session = new ClaudePtySession({
+      id: sessionId,
+      cwd: message.cwd || ".",
+      model: message.model || this.defaultModel,
+      runtime,
+      transport: {
+        sendOutput: async (targetSessionId, data) => {
+          const currentEntry = this.ptySessions.get(targetSessionId);
+          if (!currentEntry?.handId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          }
+          await this.sendToHand(currentEntry.handId, {
+            type: "pty_output",
+            sessionId: targetSessionId,
+            data: data.toString("base64"),
+          });
+        },
+        sendExit: async (targetSessionId, exitCode, signal) => {
+          const currentEntry = this.ptySessions.get(targetSessionId);
+          if (!currentEntry?.handId) {
+            return;
+          }
+          await this.sendToHand(currentEntry.handId, {
+            type: "pty_exit",
+            sessionId: targetSessionId,
+            exitCode,
+            signal,
+          });
+          this.destroyPtySession(targetSessionId, currentEntry, "PTY 进程退出");
+        },
+        sendToolCall: async (targetSessionId, requestId, toolName, toolUseId, input) => {
+          const currentEntry = this.ptySessions.get(targetSessionId);
+          if (!currentEntry?.handId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          }
+          this.stats.onToolCall(toolName);
+          await this.sendToHand(currentEntry.handId, {
+            type: "tool_call",
+            sessionId: targetSessionId,
+            requestId,
+            toolName,
+            toolUseId,
+            input,
+          });
+        },
+        sendToolCallComplete: async (targetSessionId, requestId, toolName) => {
+          const currentEntry = this.ptySessions.get(targetSessionId);
+          if (!currentEntry?.handId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          }
+          await this.sendToHand(currentEntry.handId, {
+            type: "tool_call_complete",
+            sessionId: targetSessionId,
+            requestId,
+            toolName,
+          });
+        },
+      },
+      term: message.term,
+      colorTerm: message.colorTerm,
+      termProgram: message.termProgram,
+      termProgramVersion: message.termProgramVersion,
+      handHomeDir: message.homeDir,
+      shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
+    });
+
+    this.ptySessions.set(sessionId, {
+      session,
+      handId,
+      hookToken,
+    });
+    this.hands.bindSession(handId, sessionId);
+    this.stats.onSessionCreated();
+    await session.start(message.cols ?? 80, message.rows ?? 24);
+    await this.sendToHand(handId, {
+      type: "pty_session_created",
+      sessionId,
+    });
+
+    log.info("PTY Session 已创建", { sessionId, handId, cwd: message.cwd, model: message.model });
+  }
+
   private async handleSessionMcpCatalog(handId: string, message: SessionMcpCatalog): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
     if (entry.handId !== handId) {
@@ -694,7 +849,6 @@ export class AxonServer {
   }
 
   private async handleToolResult(handId: string, message: ToolResult): Promise<void> {
-    const entry = this.getSessionEntry(message.sessionId);
     log.debug("收到工具结果", {
       handId,
       sessionId: message.sessionId,
@@ -705,11 +859,43 @@ export class AxonServer {
       error: message.error,
       outputSummary: summarizeUnknown(message.output),
     });
-    entry.session.resolveToolResult(message.requestId, {
+
+    const result = {
       output: message.output,
       summary: message.summary,
       error: message.error,
-    });
+    };
+
+    const sessionEntry = this.sessions.get(message.sessionId);
+    if (sessionEntry) {
+      if (sessionEntry.handId !== handId) {
+        throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+      }
+      sessionEntry.session.resolveToolResult(message.requestId, result);
+      return;
+    }
+
+    const ptyEntry = this.getPtySessionEntry(message.sessionId);
+    if (ptyEntry.handId !== handId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    }
+    ptyEntry.session.resolveToolResult(message.requestId, result);
+  }
+
+  private async handlePtyInput(handId: string, message: PtyInput): Promise<void> {
+    const entry = this.getPtySessionEntry(message.sessionId);
+    if (entry.handId !== handId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    }
+    entry.session.write(Buffer.from(message.data, "base64"));
+  }
+
+  private async handlePtyResize(handId: string, message: PtyResize): Promise<void> {
+    const entry = this.getPtySessionEntry(message.sessionId);
+    if (entry.handId !== handId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    }
+    entry.session.resize(message.cols, message.rows);
   }
 
   private async handleListSessions(handId: string, _: ListSessions): Promise<void> {
@@ -734,6 +920,16 @@ export class AxonServer {
   }
 
   private async handleCloseSession(handId: string, message: CloseSession): Promise<void> {
+    const ptyEntry = this.ptySessions.get(message.sessionId);
+    if (ptyEntry) {
+      if (ptyEntry.handId !== handId) {
+        throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+      }
+      this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
+      log.info("PTY Session 已关闭", { sessionId: message.sessionId, handId });
+      return;
+    }
+
     const entry = this.getSessionEntry(message.sessionId);
 
     if (entry.handId !== handId) {
@@ -759,6 +955,14 @@ export class AxonServer {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
       throw new Error(`会话不存在: ${sessionId}`);
+    }
+    return entry;
+  }
+
+  private getPtySessionEntry(sessionId: string): PtySessionEntry {
+    const entry = this.ptySessions.get(sessionId);
+    if (!entry) {
+      throw new Error(`PTY 会话不存在: ${sessionId}`);
     }
     return entry;
   }
@@ -839,12 +1043,190 @@ export class AxonServer {
     log.info("Session 已销毁", { sessionId, handId: boundHandId, reason });
   }
 
+  private destroyPtySession(sessionId: string, entry: PtySessionEntry, reason: string): void {
+    const boundHandId = entry.handId;
+    void entry.session.close().catch(() => undefined);
+    this.ptySessions.delete(sessionId);
+    if (boundHandId) {
+      this.hands.unbindSession(boundHandId, sessionId);
+    }
+    this.stats.onSessionEnded();
+    log.info("PTY Session 已销毁", { sessionId, handId: boundHandId, reason });
+  }
+
+  private async handleInjectedPreToolUseRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== "POST") {
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
+    const sessionId = this.getQueryParam(req.url, "sessionId");
+    if (!sessionId) {
+      this.sendJson(res, 400, { error: "missing_session_id" });
+      return;
+    }
+
+    const token = req.headers["x-axon-hook-token"];
+    const sessionEntry = this.sessions.get(sessionId);
+    const ptyEntry = this.ptySessions.get(sessionId);
+    const expectedToken = sessionEntry?.hookToken ?? ptyEntry?.hookToken;
+    if (!expectedToken) {
+      this.sendJson(res, 404, { error: "session_not_found" });
+      return;
+    }
+
+    if (token !== expectedToken) {
+      this.sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+
+    let body: string;
+    try {
+      body = await this.readRequestBody(req);
+    } catch (error) {
+      log.warn("读取内部 hook bridge 请求体失败", {
+        sessionId,
+        error: asError(error).message,
+      });
+      this.sendJson(res, 400, { error: "invalid_body" });
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(body) as HookInput;
+      if (typeof payload.tool_name !== "string") {
+        throw new Error("missing tool_name");
+      }
+
+      log.info("收到内部 PreToolUse hook bridge 请求", {
+        sessionId,
+        toolName: payload.tool_name,
+        toolUseId: payload.tool_use_id,
+        inputSummary: summarizeUnknown(payload.tool_input),
+        from: sessionEntry ? "sdk-session" : "pty-session",
+      });
+
+      const result = sessionEntry
+        ? await sessionEntry.session.handleInjectedPreToolUse(payload)
+        : await ptyEntry!.session.handleInjectedPreToolUse(payload);
+      this.sendJson(res, 200, result);
+    } catch (error) {
+      log.warn("处理内部 PreToolUse hook bridge 失败", {
+        sessionId,
+        error: asError(error).message,
+      });
+      this.sendJson(res, 500, {
+        decision: "block",
+        reason: `Tool hook bridge failed: ${asError(error).message}`,
+      });
+    }
+  }
+
+  private getQueryParam(requestUrl: string | undefined, name: string): string | null {
+    if (!requestUrl) {
+      return null;
+    }
+
+    try {
+      return new URL(requestUrl, "http://localhost").searchParams.get(name);
+    } catch {
+      return null;
+    }
+  }
+
+  private readRequestBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
+    });
+  }
+
+}
+
+async function verifyPtyHookVisibleInRuntime(
+  runtime: import("./claude-session-runtime.js").ClaudeSessionRuntime,
+  cwd: string
+): Promise<void> {
+  if (process.platform !== "linux" || process.env.AXON_ENABLE_MOUNT_NAMESPACE !== "true") {
+    return;
+  }
+
+  const spawnInRuntime = runtime.spawnInRuntime;
+  if (!spawnInRuntime) {
+    throw new Error("session runtime does not support preflight verification");
+  }
+
+  const abortController = new AbortController();
+  const child = spawnInRuntime({
+    command: "/bin/sh",
+    args: [
+      "-lc",
+      [
+        'if [ -f ".claude/settings.local.json" ]; then',
+        '  echo "__AXON_HOOK_OK__";',
+        "else",
+        '  echo "__AXON_HOOK_MISSING__";',
+        '  pwd;',
+        '  ls -la;',
+        '  if [ -d ".claude" ]; then ls -la .claude; else echo "__AXON_NO_DOT_CLAUDE_DIR__"; fi;',
+        "fi",
+      ].join(" "),
+    ],
+    cwd,
+    env: runtime.env,
+    signal: abortController.signal,
+  });
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdoutChunks.push(Buffer.from(chunk));
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrChunks.push(Buffer.from(chunk));
+  });
+
+  const [exitCode] = await once(child, "exit");
+  abortController.abort();
+
+  const stdoutText = Buffer.concat(stdoutChunks).toString("utf8").trim();
+  const stderrText = Buffer.concat(stderrChunks).toString("utf8").trim();
+  if (exitCode === 0 && stdoutText.includes("__AXON_HOOK_OK__")) {
+    log.info("PTY session hook 配置已出现在 Claude 项目目录", {
+      runtimeCwd: cwd,
+      runtimeRoot: runtime.rootDir,
+    });
+    return;
+  }
+
+  throw new Error(
+    [
+      "Claude 项目级 hook 配置未出现在 session runtime 中",
+      `cwd=${cwd}`,
+      `runtimeRoot=${runtime.rootDir}`,
+      stdoutText ? `stdout=${stdoutText}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ")
+  );
 }
 
 interface SessionEntry {
   session: BrainSession;
   handId: string | null;
   resumableUntil: number | null;
+  hookToken?: string;
+}
+
+interface PtySessionEntry {
+  session: ClaudePtySession;
+  handId: string | null;
+  hookToken: string;
 }
 
 function asError(error: unknown): Error {

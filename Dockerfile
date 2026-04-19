@@ -40,7 +40,7 @@ COPY hand/package.json ./hand/
 COPY web/package.json ./web/
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends util-linux \
+  && apt-get install -y --no-install-recommends util-linux python3 \
   && rm -rf /var/lib/apt/lists/* \
   && npm ci --omit=dev --workspace server --include-workspace-root=false \
   && npm install -g @anthropic-ai/claude-code

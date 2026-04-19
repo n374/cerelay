@@ -220,6 +220,12 @@ Run in a new terminal:
 cd hand && npm start -- --server localhost:8765 --cwd /path/to/project
 ```
 
+查看 Hand 实时日志：
+
+```bash
+cd hand && npm start -- logs
+```
+
 这一步仍然在本机运行，因为 Hand 负责执行本地工具。
 
 Hand still runs on the local machine because it executes local tools.

@@ -1,3 +1,8 @@
+import { createWriteStream, mkdirSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import process from "node:process";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 type LogFields = Record<string, unknown>;
@@ -62,8 +67,12 @@ export class Logger {
     };
 
     if (this.jsonMode) {
-      const output = level === "error" ? process.stderr : process.stdout;
-      output.write(JSON.stringify(entry) + "\n");
+      const line = JSON.stringify(entry);
+      if (globalConsoleOutputEnabled) {
+        const output = level === "error" ? process.stderr : process.stdout;
+        output.write(line + "\n");
+      }
+      writeLogFile(line);
       return;
     }
 
@@ -71,6 +80,20 @@ export class Logger {
   }
 
   private prettyPrint(entry: LogEntry): void {
+    const plainLine = formatPrettyLine(entry, false);
+    writeLogFile(plainLine);
+    if (globalConsoleOutputEnabled) {
+      const line = formatPrettyLine(entry, true);
+      if (entry.level === "error") {
+        process.stderr.write(line + "\n");
+      } else {
+        process.stdout.write(line + "\n");
+      }
+    }
+  }
+}
+
+function formatPrettyLine(entry: LogEntry, colorize: boolean): string {
     const color = {
       debug: "\x1b[90m",
       info: "\x1b[36m",
@@ -80,28 +103,22 @@ export class Logger {
     const reset = "\x1b[0m";
     const bold = "\x1b[1m";
     const dim = "\x1b[2m";
+    const maybeColor = (value: string): string => colorize ? value : "";
 
     const extras = Object.entries(entry)
       .filter(([key]) => !["time", "level", "component", "message"].includes(key))
-      .map(([key, value]) => `${dim}${key}=${JSON.stringify(value)}${reset}`)
+      .map(([key, value]) => `${maybeColor(dim)}${key}=${JSON.stringify(value)}${maybeColor(reset)}`)
       .join(" ");
 
-    const line = [
-      `${dim}${entry.time.substring(11, 23)}${reset}`,
-      `${color}${bold}${entry.level.toUpperCase().padEnd(5)}${reset}`,
-      `${dim}[${entry.component}]${reset}`,
+    return [
+      `${maybeColor(dim)}${entry.time.substring(11, 23)}${maybeColor(reset)}`,
+      `${maybeColor(color)}${maybeColor(bold)}${entry.level.toUpperCase().padEnd(5)}${maybeColor(reset)}`,
+      `${maybeColor(dim)}[${entry.component}]${maybeColor(reset)}`,
       entry.message,
       extras,
     ]
       .filter(Boolean)
       .join(" ");
-
-    if (entry.level === "error") {
-      process.stderr.write(line + "\n");
-    } else {
-      process.stdout.write(line + "\n");
-    }
-  }
 }
 
 class ChildLogger extends Logger {
@@ -119,16 +136,64 @@ class ChildLogger extends Logger {
 
 let globalMinLevel: LogLevel = "info";
 let globalJsonMode = false;
+let globalLogFilePath: string | null = resolveDefaultLogFilePath();
+let globalLogFileStream: ReturnType<typeof createWriteStream> | null = null;
+let globalConsoleOutputEnabled = true;
 
-export function configureLogger(options: { minLevel?: LogLevel; json?: boolean }): void {
+export function configureLogger(options: { minLevel?: LogLevel; json?: boolean; filePath?: string | null; console?: boolean }): void {
   if (options.minLevel) {
     globalMinLevel = options.minLevel;
   }
   if (options.json !== undefined) {
     globalJsonMode = options.json;
   }
+  if (options.filePath !== undefined) {
+    if (globalLogFileStream) {
+      globalLogFileStream.end();
+      globalLogFileStream = null;
+    }
+    globalLogFilePath = options.filePath;
+  }
+  if (options.console !== undefined) {
+    globalConsoleOutputEnabled = options.console;
+  }
 }
 
 export function createLogger(component: string): Logger {
   return new Logger(component, globalMinLevel, globalJsonMode);
+}
+
+export function resolveDefaultLogFilePath(): string {
+  return path.join(tmpdir(), "axon-hand.log");
+}
+
+export function getLogFilePath(): string | null {
+  return globalLogFilePath;
+}
+
+function writeLogFile(line: string): void {
+  const stream = ensureLogFileStream();
+  if (!stream) {
+    return;
+  }
+  stream.write(line + "\n");
+}
+
+function ensureLogFileStream(): ReturnType<typeof createWriteStream> | null {
+  if (!globalLogFilePath) {
+    return null;
+  }
+  if (globalLogFileStream) {
+    return globalLogFileStream;
+  }
+
+  const dir = path.dirname(globalLogFilePath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  globalLogFileStream = createWriteStream(globalLogFilePath, {
+    flags: "a",
+    encoding: "utf8",
+  });
+  return globalLogFileStream;
 }

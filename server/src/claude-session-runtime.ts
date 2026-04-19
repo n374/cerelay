@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,20 +9,23 @@ import { createLogger } from "./logger.js";
 const log = createLogger("claude-runtime");
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
 
-interface SpawnOptions {
+export interface SpawnOptions {
   command: string;
   args: string[];
   cwd?: string;
   env: Record<string, string | undefined>;
   signal: AbortSignal;
+  extraPipeCount?: number;
 }
 
-type SpawnedProcess = ChildProcess;
+export type SpawnedProcess = ChildProcess;
 
 export interface ClaudeSessionRuntime {
   cwd: string;
   env: Record<string, string | undefined>;
+  rootDir: string;
   spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
+  spawnInRuntime?: (options: SpawnOptions) => SpawnedProcess;
   cleanup(): Promise<void>;
 }
 
@@ -30,6 +33,7 @@ export interface CreateClaudeSessionRuntimeOptions {
   sessionId: string;
   cwd: string;
   handHomeDir?: string;
+  projectSettingsLocalShadowPath?: string;
 }
 
 export async function createClaudeSessionRuntime(
@@ -44,7 +48,8 @@ export async function createClaudeSessionRuntime(
 async function createPassthroughRuntime(
   options: CreateClaudeSessionRuntimeOptions
 ): Promise<ClaudeSessionRuntime> {
-  const runtimeRoot = await mkdtemp(path.join(tmpdir(), `axon-claude-${sanitizeSessionId(options.sessionId)}-`));
+  const runtimeRoot = getClaudeSessionRuntimeRoot(options.sessionId);
+  await mkdir(runtimeRoot, { recursive: true });
   const fallbackCwd = existsSync(options.cwd) ? options.cwd : runtimeRoot;
   const effectiveHome = options.handHomeDir && existsSync(options.handHomeDir)
     ? options.handHomeDir
@@ -62,6 +67,13 @@ async function createPassthroughRuntime(
       ...process.env,
       HOME: effectiveHome,
     },
+    rootDir: runtimeRoot,
+    spawnInRuntime: (spawnOptions) => spawn(spawnOptions.command, spawnOptions.args, {
+      cwd: spawnOptions.cwd ?? fallbackCwd,
+      env: spawnOptions.env,
+      stdio: buildStdio(spawnOptions.extraPipeCount),
+      signal: spawnOptions.signal,
+    }),
     cleanup: async () => {
       await rm(runtimeRoot, { recursive: true, force: true });
     },
@@ -95,6 +107,7 @@ async function createMountNamespaceRuntime(
         AXON_VIEW_ROOTS: viewRoots.join(":"),
         AXON_SHARED_CLAUDE_DIR: process.env.AXON_SHARED_CLAUDE_DIR || "/home/node/.claude",
         AXON_SHARED_CLAUDE_JSON: process.env.AXON_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
+        AXON_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
       },
       stdio: ["ignore", "ignore", "pipe"],
     }
@@ -130,7 +143,9 @@ async function createMountNamespaceRuntime(
       ...process.env,
       HOME: handHomeDir,
     },
+    rootDir: runtimeRoot,
     spawnClaudeCodeProcess: (spawnOptions) => spawnClaudeInNamespace(anchor, spawnOptions, options.cwd),
+    spawnInRuntime: (spawnOptions) => spawnClaudeInNamespace(anchor, spawnOptions, options.cwd),
     cleanup: async () => {
       if (!anchor.killed) {
         anchor.kill("SIGTERM");
@@ -168,10 +183,18 @@ function spawnClaudeInNamespace(
         ...options.env,
         AXON_TARGET_CWD: targetCwd,
       },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: buildStdio(options.extraPipeCount),
       signal: options.signal,
     }
   );
+}
+
+function buildStdio(extraPipeCount: number | undefined): Array<"pipe"> {
+  const stdio: Array<"pipe"> = ["pipe", "pipe", "pipe"];
+  for (let index = 0; index < (extraPipeCount ?? 0); index += 1) {
+    stdio.push("pipe");
+  }
+  return stdio;
 }
 
 function shouldUseMountNamespace(): boolean {
@@ -231,6 +254,12 @@ if [ -f "$AXON_RUNTIME_ROOT/staged/claude.json" ]; then
   mount --bind "$AXON_RUNTIME_ROOT/staged/claude.json" "$AXON_HOME_DIR/.claude.json"
 fi
 
+if [ -n "\${AXON_PROJECT_SETTINGS_SOURCE:-}" ] && [ -f "$AXON_PROJECT_SETTINGS_SOURCE" ]; then
+  mkdir -p "$AXON_WORK_DIR/.claude"
+  : > "$AXON_WORK_DIR/.claude/settings.local.json"
+  mount --bind "$AXON_PROJECT_SETTINGS_SOURCE" "$AXON_WORK_DIR/.claude/settings.local.json"
+fi
+
 touch "$AXON_READY_FILE"
 exec sleep infinity
 `;
@@ -266,4 +295,13 @@ function sleep(ms: number): Promise<void> {
 
 function sanitizeSessionId(sessionId: string): string {
   return sessionId.replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+export function getClaudeSessionRuntimeRoot(sessionId: string): string {
+  if (shouldUseMountNamespace() && process.platform === "linux") {
+    const runtimeParent = process.env.AXON_NAMESPACE_RUNTIME_ROOT?.trim() || "/opt/axon-runtime";
+    return path.join(runtimeParent, sanitizeSessionId(sessionId));
+  }
+
+  return path.join(tmpdir(), `axon-claude-${sanitizeSessionId(sessionId)}`);
 }

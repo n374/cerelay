@@ -5,6 +5,7 @@ import { executeExternalTool, type ExternalToolOutput } from "./tools/external.j
 import { webFetch, type WebFetchInput, type WebFetchOutput } from "./tools/web.js";
 import { McpRuntime } from "./mcp/runtime.js";
 import { ToolError } from "./tool-error.js";
+import { createLogger } from "./logger.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerCatalogEntry, McpServerConfig } from "./protocol.js";
 import type {
@@ -24,6 +25,8 @@ import type {
 } from "./tools/search.js";
 
 export { ToolError } from "./tool-error.js";
+
+const log = createLogger("hand-executor");
 
 // 工具执行结果联合类型
 export type ToolOutput =
@@ -52,34 +55,69 @@ export class ToolExecutor {
 
   // 根据工具名分发，与 Go Executor.Execute 完全对齐
   async dispatch(toolName: string, input: unknown): Promise<ToolOutput> {
-    switch (toolName) {
-      case "Read":
-        return readFile(input as ReadInput, this.cwd);
-      case "Write":
-        return writeFile(input as WriteInput, this.cwd);
-      case "Edit":
-        return editFile(input as EditInput, this.cwd);
-      case "MultiEdit":
-        return multiEdit(input as MultiEditInput, this.cwd);
-      case "Bash":
-        return executeBash(input as BashInput, this.cwd);
-      case "Grep":
-        return grep(input as GrepInput, this.cwd);
-      case "Glob":
-        return globFiles(input as GlobInput, this.cwd);
-      case "WebFetch":
-        return webFetch(input as WebFetchInput);
-      default:
-        if (isMcpToolName(toolName)) {
-          try {
-            return await this.mcpRuntime.callTool(toolName, input);
-          } catch (error) {
-            if (!(error instanceof ToolError) || error.code !== "tool_unconfigured") {
-              throw error;
+    log.info("开始分发工具调用", {
+      cwd: this.cwd,
+      toolName,
+      inputSummary: summarizeUnknown(input),
+    });
+
+    try {
+      let result: ToolOutput;
+      switch (toolName) {
+        case "Read":
+          result = await readFile(input as ReadInput, this.cwd);
+          break;
+        case "Write":
+          result = await writeFile(input as WriteInput, this.cwd);
+          break;
+        case "Edit":
+          result = await editFile(input as EditInput, this.cwd);
+          break;
+        case "MultiEdit":
+          result = await multiEdit(input as MultiEditInput, this.cwd);
+          break;
+        case "Bash":
+          result = await executeBash(input as BashInput, this.cwd);
+          break;
+        case "Grep":
+          result = await grep(input as GrepInput, this.cwd);
+          break;
+        case "Glob":
+          result = await globFiles(input as GlobInput, this.cwd);
+          break;
+        case "WebFetch":
+          result = await webFetch(input as WebFetchInput);
+          break;
+        default:
+          if (isMcpToolName(toolName)) {
+            try {
+              result = await this.mcpRuntime.callTool(toolName, input);
+              break;
+            } catch (error) {
+              if (!(error instanceof ToolError) || error.code !== "tool_unconfigured") {
+                throw error;
+              }
             }
           }
-        }
-        return executeExternalTool(toolName, input, this.cwd);
+          result = await executeExternalTool(toolName, input, this.cwd);
+          break;
+      }
+
+      log.info("工具调用分发完成", {
+        cwd: this.cwd,
+        toolName,
+        summary: summarizeToolResult(toolName, result),
+        outputSummary: summarizeUnknown(result),
+      });
+      return result;
+    } catch (error) {
+      log.warn("工具调用分发失败", {
+        cwd: this.cwd,
+        toolName,
+        inputSummary: summarizeUnknown(input),
+        error: formatToolError(error),
+      });
+      throw error;
     }
   }
 
@@ -169,4 +207,26 @@ const BUILTIN_TOOL_NAMES = new Set<BuiltinToolName>([
 
 function isMcpToolName(toolName: string): boolean {
   return /^mcp__[A-Za-z0-9_-]+__.+$/.test(toolName);
+}
+
+function summarizeUnknown(value: unknown): string {
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "string") {
+    return previewText(value, 120);
+  }
+  try {
+    return previewText(JSON.stringify(value), 120);
+  } catch {
+    return String(value);
+  }
+}
+
+function previewText(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
 }

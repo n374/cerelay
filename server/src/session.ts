@@ -42,7 +42,7 @@ type CanUseToolHandler = (
   | { behavior: "deny"; message: string }
 >;
 
-interface HookInput {
+export interface HookInput {
   tool_name: string;
   tool_use_id?: string;
   tool_input: unknown;
@@ -72,7 +72,7 @@ interface ResultMessage {
 }
 
 type QueryMessage = AssistantMessage | ResultMessage | { type: string; [key: string]: unknown };
-type SyncHookJsonOutput = {
+export type SyncHookJsonOutput = {
   decision?: "approve" | "block";
   reason?: string;
   hookSpecificOutput?: {
@@ -420,7 +420,7 @@ export class BrainSession {
       handCwd: this.cwd,
     });
     const requestId = `hook-${this.id}-${randomUUID()}`;
-    this.log.debug("准备转发工具调用到 Hand", {
+    this.log.info("准备转发工具调用到 Hand", {
       requestId,
       toolName,
       toolUseId,
@@ -439,7 +439,7 @@ export class BrainSession {
 
     try {
       await this.transport.send(toolCall);
-      this.log.debug("工具调用已发送到 Hand", {
+      this.log.info("工具调用已发送到 Hand", {
         requestId,
         toolName,
       });
@@ -454,7 +454,7 @@ export class BrainSession {
     }
 
     const result = await pending;
-    this.log.debug("收到 Hand 返回的工具结果", {
+    this.log.info("收到 Hand 返回的工具结果", {
       requestId,
       toolName,
       hasError: Boolean(result.error),
@@ -469,7 +469,7 @@ export class BrainSession {
       toolName,
     };
     await this.transport.send(toolCallComplete);
-    this.log.debug("工具调用完成通知已发送", {
+    this.log.info("工具调用完成通知已发送", {
       requestId,
       toolName,
     });
@@ -534,7 +534,7 @@ export class BrainSession {
   }
 }
 
-function renderToolResultForClaude(toolName: string, result: RemoteToolResult): string {
+export function renderToolResultForClaude(toolName: string, result: RemoteToolResult): string {
   if (result.error) {
     return result.error;
   }
@@ -660,7 +660,7 @@ function extractClaudeSessionId(message: QueryMessage): string | undefined {
   return typeof sessionId === "string" && sessionId.trim() ? sessionId : undefined;
 }
 
-function rewriteToolInputForHand(
+export function rewriteToolInputForHand(
   toolName: string,
   input: unknown,
   options: {
