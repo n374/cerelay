@@ -226,12 +226,76 @@ export interface ListSessions {
 }
 
 // ============================================================
+// File Proxy：Hand 侧文件系统代理（FUSE 透传）
+// ============================================================
+
+export type FileProxyOp =
+  | "getattr"
+  | "readdir"
+  | "read"
+  | "write"
+  | "create"
+  | "unlink"
+  | "mkdir"
+  | "rmdir"
+  | "rename"
+  | "truncate"
+  | "utimens"
+  | "snapshot";
+
+export interface FileProxyRequest {
+  type: "file_proxy_request";
+  reqId: string;
+  sessionId: string;
+  op: FileProxyOp;
+  path: string;
+  data?: string;
+  offset?: number;
+  size?: number;
+  newPath?: string;
+  mode?: number;
+  mtime?: number;
+  atime?: number;
+}
+
+export interface FileProxyStat {
+  mode: number;
+  size: number;
+  mtime: number;
+  atime: number;
+  uid: number;
+  gid: number;
+  isDir: boolean;
+}
+
+/** snapshot 操作返回的单个文件/目录条目 */
+export interface FileProxySnapshotEntry {
+  path: string;
+  stat: FileProxyStat;
+  entries?: string[];
+  data?: string;
+}
+
+export interface FileProxyResponse {
+  type: "file_proxy_response";
+  reqId: string;
+  sessionId: string;
+  error?: { code: number; message: string };
+  stat?: FileProxyStat;
+  entries?: string[];
+  data?: string;
+  written?: number;
+  snapshot?: FileProxySnapshotEntry[];
+}
+
+// ============================================================
 // Union 类型
 // ============================================================
 
 export type ServerToHandMessage =
   | Connected
   | CreateSessionResponse
+  | FileProxyRequest
   | PtySessionCreated
   | PtyOutput
   | PtyExit
@@ -249,6 +313,7 @@ export type HandToServerMessage =
   | CloseSession
   | CreateSession
   | CreatePtySession
+  | FileProxyResponse
   | ListSessions
   | Prompt
   | PtyInput
@@ -297,4 +362,8 @@ export function isCreateSessionResponse(
   msg: ServerToHandMessage
 ): msg is CreateSessionResponse {
   return msg.type === "session_created";
+}
+
+export function isFileProxyRequest(msg: ServerToHandMessage): msg is FileProxyRequest {
+  return msg.type === "file_proxy_request";
 }

@@ -54,6 +54,10 @@ services:
     cap_add:
       - SYS_ADMIN
 
+    # FUSE 设备：供 Hand 侧文件代理使用
+    devices:
+      - /dev/fuse:/dev/fuse
+
     # 健康检查（覆盖 Dockerfile 中的定义，可按需调整）
     healthcheck:
       test:

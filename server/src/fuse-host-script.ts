@@ -1,0 +1,656 @@
+/**
+ * Python FUSE daemon 脚本（fusepy）。
+ * 嵌入模式与 pty-host-script.ts 完全一致：
+ *   - 作为 TypeScript 字符串常量导出
+ *   - 运行时写入临时文件后执行
+ *   - 通过 stdin/stdout JSON line 与 Brain Node.js 通信
+ *   - 通过 fd 3 控制管道接收 shutdown 命令
+ *
+ * 环境变量：
+ *   AXON_FUSE_MOUNT_POINT  — 挂载点目录
+ *   AXON_FUSE_CONTROL_FD   — 控制管道 fd（默认 3）
+ *   AXON_FUSE_ROOTS        — JSON 字符串，虚拟根映射 {"home-claude": "/real/path", ...}
+ *   AXON_FUSE_READY_FILE   — 就绪标记文件路径
+ */
+export const PYTHON_FUSE_HOST_SCRIPT = String.raw`
+import base64
+import errno
+import json
+import os
+import stat as stat_mod
+import sys
+import threading
+import time
+import traceback
+
+try:
+    from fuse import FUSE, FuseOSError, Operations
+except ImportError:
+    try:
+        from fusepy import FUSE, FuseOSError, Operations
+    except ImportError:
+        sys.stderr.write("fusepy not installed. Install with: pip3 install fusepy\n")
+        sys.exit(1)
+
+# ============================================================
+# 配置
+# ============================================================
+
+MOUNT_POINT = os.environ["AXON_FUSE_MOUNT_POINT"]
+CONTROL_FD = int(os.environ.get("AXON_FUSE_CONTROL_FD", "3"))
+ROOTS = json.loads(os.environ.get("AXON_FUSE_ROOTS", "{}"))
+READY_FILE = os.environ.get("AXON_FUSE_READY_FILE", "")
+# Shadow files: FUSE 内路径 → 本地真实文件路径（如 hook injection 的 settings.local.json）
+# 这些文件由 FUSE daemon 直接从本地读取，不代理到 Hand
+SHADOW_FILES = json.loads(os.environ.get("AXON_FUSE_SHADOW_FILES", "{}"))
+
+# reqId 计数器
+_req_counter = 0
+_req_lock = threading.Lock()
+
+# 待处理请求: reqId → threading.Event + result dict
+_pending = {}
+_pending_lock = threading.Lock()
+
+# stdout 写锁
+_stdout_lock = threading.Lock()
+
+# ============================================================
+# 缓存
+# ============================================================
+
+class Cache:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stat = {}     # path → (timestamp, stat_dict)
+        self._readdir = {}  # path → (timestamp, entries)
+        self._read = {}     # path → (timestamp, bytes)
+        self._stat_ttl = 10.0
+        self._readdir_ttl = 10.0
+        self._read_ttl = 10.0
+        self._read_max_size = 256 * 1024  # 256KB
+
+    def get_stat(self, path):
+        with self._lock:
+            entry = self._stat.get(path)
+            if entry and (time.monotonic() - entry[0]) < self._stat_ttl:
+                return entry[1]
+        return None
+
+    def put_stat(self, path, st):
+        with self._lock:
+            self._stat[path] = (time.monotonic(), st)
+
+    def get_readdir(self, path):
+        with self._lock:
+            entry = self._readdir.get(path)
+            if entry and (time.monotonic() - entry[0]) < self._readdir_ttl:
+                return entry[1]
+        return None
+
+    def put_readdir(self, path, entries):
+        with self._lock:
+            self._readdir[path] = (time.monotonic(), entries)
+
+    def get_read(self, path, offset, size):
+        with self._lock:
+            entry = self._read.get(path)
+            if entry and (time.monotonic() - entry[0]) < self._read_ttl:
+                data = entry[1]
+                return data[offset:offset + size]
+        return None
+
+    def put_read_full(self, path, data):
+        if len(data) > self._read_max_size:
+            return
+        with self._lock:
+            self._read[path] = (time.monotonic(), data)
+
+    def invalidate(self, path):
+        with self._lock:
+            self._stat.pop(path, None)
+            self._read.pop(path, None)
+            parent = os.path.dirname(path)
+            self._readdir.pop(parent, None)
+            self._readdir.pop(path, None)
+
+_cache = Cache()
+
+# ============================================================
+# JSON-RPC 通信
+# ============================================================
+
+def next_req_id():
+    global _req_counter
+    with _req_lock:
+        _req_counter += 1
+        return f"fuse-{_req_counter}"
+
+def send_request(req):
+    """发送 JSON 请求到 stdout，等待 stdin 响应。"""
+    req_id = req["reqId"]
+    event = threading.Event()
+    result_holder = {"result": None}
+
+    with _pending_lock:
+        _pending[req_id] = (event, result_holder)
+
+    with _stdout_lock:
+        sys.stdout.write(json.dumps(req) + "\n")
+        sys.stdout.flush()
+
+    # 等待响应，超时 30 秒
+    if not event.wait(timeout=30.0):
+        with _pending_lock:
+            _pending.pop(req_id, None)
+        raise FuseOSError(errno.EIO)
+
+    resp = result_holder["result"]
+    if resp is None:
+        raise FuseOSError(errno.EIO)
+
+    if "error" in resp and resp["error"]:
+        code = resp["error"].get("code", errno.EIO)
+        raise FuseOSError(code)
+
+    return resp
+
+def response_reader():
+    """从 stdin 读取 JSON 响应，dispatch 到等待的请求。"""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            resp = json.loads(line)
+        except Exception:
+            continue
+
+        req_id = resp.get("reqId")
+        if not req_id:
+            continue
+
+        with _pending_lock:
+            entry = _pending.pop(req_id, None)
+
+        if entry:
+            event, result_holder = entry
+            result_holder["result"] = resp
+            event.set()
+
+# ============================================================
+# 路径解析
+# ============================================================
+
+def parse_fuse_path(fuse_path):
+    """
+    将 FUSE 内路径解析为 (root_name, rel_path)。
+    /home-claude/settings.json → ("home-claude", "settings.json")
+    /home-claude-json → ("home-claude-json", "")
+    / → (None, "")
+    """
+    parts = fuse_path.strip("/").split("/", 1)
+    if not parts or not parts[0]:
+        return None, ""
+    root_name = parts[0]
+    rel_path = parts[1] if len(parts) > 1 else ""
+    return root_name, rel_path
+
+def resolve_hand_path(root_name, rel_path):
+    """将虚拟根名 + 相对路径解析为 Hand 侧绝对路径。"""
+    hand_root = ROOTS.get(root_name)
+    if not hand_root:
+        return None
+    if rel_path:
+        return os.path.join(hand_root, rel_path)
+    return hand_root
+
+# ============================================================
+# 虚拟节点 stat
+# ============================================================
+
+def virtual_dir_stat():
+    now = int(time.time())
+    return {
+        "st_mode": stat_mod.S_IFDIR | 0o755,
+        "st_nlink": 2,
+        "st_size": 0,
+        "st_atime": now,
+        "st_mtime": now,
+        "st_ctime": now,
+        "st_uid": os.getuid(),
+        "st_gid": os.getgid(),
+    }
+
+def virtual_file_stat():
+    now = int(time.time())
+    return {
+        "st_mode": stat_mod.S_IFREG | 0o644,
+        "st_nlink": 1,
+        "st_size": 0,
+        "st_atime": now,
+        "st_mtime": now,
+        "st_ctime": now,
+        "st_uid": os.getuid(),
+        "st_gid": os.getgid(),
+    }
+
+def stat_from_resp(st):
+    mode = st["mode"]
+    if st.get("isDir"):
+        mode = stat_mod.S_IFDIR | (mode & 0o7777)
+    else:
+        mode = stat_mod.S_IFREG | (mode & 0o7777)
+    return {
+        "st_mode": mode,
+        "st_nlink": 2 if st.get("isDir") else 1,
+        "st_size": st.get("size", 0),
+        "st_atime": st.get("atime", 0),
+        "st_mtime": st.get("mtime", 0),
+        "st_ctime": st.get("mtime", 0),
+        "st_uid": st.get("uid", os.getuid()),
+        "st_gid": st.get("gid", os.getgid()),
+    }
+
+# ============================================================
+# FUSE Operations
+# ============================================================
+
+class AxonFuseOps(Operations):
+
+    def getattr(self, path, fh=None):
+        # 虚拟根目录
+        if path == "/":
+            return virtual_dir_stat()
+
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name is None:
+            raise FuseOSError(errno.ENOENT)
+
+        # 虚拟根条目本身
+        if not rel_path and root_name in ROOTS:
+            if root_name == "home-claude-json":
+                # 单文件根：代理到 Hand 获取真实 size，否则 read 时内核不会请求数据
+                hand_path = ROOTS[root_name]
+                cached = _cache.get_stat(hand_path)
+                if cached:
+                    return cached
+                try:
+                    resp = send_request({
+                        "reqId": next_req_id(),
+                        "op": "getattr",
+                        "root": root_name,
+                        "relPath": "",
+                    })
+                    result = stat_from_resp(resp["stat"])
+                    _cache.put_stat(hand_path, result)
+                    return result
+                except FuseOSError:
+                    # Hand 不可达或文件不存在时返回空文件
+                    return virtual_file_stat()
+            else:
+                # 目录根：始终本地返回，不联系 Hand
+                return virtual_dir_stat()
+
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.ENOENT)
+
+        # Shadow file: 本地文件优先（如 hook injection 的 settings.local.json）
+        fuse_rel = path.lstrip("/")
+        if fuse_rel in SHADOW_FILES:
+            local_path = SHADOW_FILES[fuse_rel]
+            try:
+                st = os.stat(local_path)
+                return {
+                    "st_mode": st.st_mode,
+                    "st_nlink": st.st_nlink,
+                    "st_size": st.st_size,
+                    "st_atime": int(st.st_atime),
+                    "st_mtime": int(st.st_mtime),
+                    "st_ctime": int(st.st_ctime),
+                    "st_uid": st.st_uid,
+                    "st_gid": st.st_gid,
+                }
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.ENOENT)
+
+        cached = _cache.get_stat(hand_path)
+        if cached:
+            return cached
+
+        resp = send_request({
+            "reqId": next_req_id(),
+            "op": "getattr",
+            "root": root_name,
+            "relPath": rel_path,
+        })
+        result = stat_from_resp(resp["stat"])
+        _cache.put_stat(hand_path, result)
+        return result
+
+    def readdir(self, path, fh):
+        if path == "/":
+            return [".", ".."] + list(ROOTS.keys())
+
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.ENOENT)
+
+        # home-claude-json 是文件，不能 readdir
+        if root_name == "home-claude-json":
+            raise FuseOSError(errno.ENOTDIR)
+
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.ENOENT)
+
+        cached = _cache.get_readdir(hand_path)
+        if cached is not None:
+            return [".", ".."] + cached
+
+        try:
+            resp = send_request({
+                "reqId": next_req_id(),
+                "op": "readdir",
+                "root": root_name,
+                "relPath": rel_path,
+            })
+            entries = resp.get("entries", [])
+        except FuseOSError as e:
+            if e.errno == errno.ENOENT:
+                entries = []
+            else:
+                raise
+
+        # 注入 shadow file 到目录列表（如 hook injection 的 settings.local.json）
+        dir_prefix = path.lstrip("/") + "/"
+        for shadow_key in SHADOW_FILES:
+            if shadow_key.startswith(dir_prefix):
+                shadow_name = shadow_key[len(dir_prefix):]
+                if "/" not in shadow_name and shadow_name not in entries:
+                    entries.append(shadow_name)
+
+        _cache.put_readdir(hand_path, entries)
+        return [".", ".."] + entries
+
+    def read(self, path, size, offset, fh):
+        # Shadow file: 本地读取
+        fuse_rel = path.lstrip("/")
+        if fuse_rel in SHADOW_FILES:
+            local_path = SHADOW_FILES[fuse_rel]
+            try:
+                with open(local_path, "rb") as f:
+                    f.seek(offset)
+                    return f.read(size)
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.ENOENT)
+
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if hand_path:
+            cached = _cache.get_read(hand_path, offset, size)
+            if cached is not None:
+                return cached
+
+        resp = send_request({
+            "reqId": next_req_id(),
+            "op": "read",
+            "root": root_name,
+            "relPath": rel_path,
+            "offset": offset,
+            "size": size,
+        })
+        data = resp.get("data", "")
+        decoded = base64.b64decode(data)
+
+        # 首次从 offset 0 读取时缓存完整内容（小文件）
+        if hand_path and offset == 0:
+            _cache.put_read_full(hand_path, decoded)
+
+        return decoded
+
+    # ================================================================
+    # 写操作代理到 Hand
+    # Claude Code 启动时需要写入内部文件（sessions、backups、.config.json 等）。
+    # Tool Use 触发的文件修改通过 PreToolUse Hook 在 Hand 侧执行，不走 FUSE。
+    # ================================================================
+
+    def write(self, path, data, offset, fh):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        resp = send_request({
+            "reqId": next_req_id(),
+            "op": "write",
+            "root": root_name,
+            "relPath": rel_path,
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+            "offset": offset,
+        })
+        _cache.invalidate(hand_path)
+        return resp.get("written", len(data))
+
+    def create(self, path, mode, fi=None):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "create",
+            "root": root_name,
+            "relPath": rel_path,
+            "mode": mode,
+        })
+        _cache.invalidate(hand_path)
+        return 0
+
+    def unlink(self, path):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "unlink",
+            "root": root_name,
+            "relPath": rel_path,
+        })
+        _cache.invalidate(hand_path)
+
+    def mkdir(self, path, mode):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "mkdir",
+            "root": root_name,
+            "relPath": rel_path,
+            "mode": mode,
+        })
+        _cache.invalidate(hand_path)
+
+    def rmdir(self, path):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "rmdir",
+            "root": root_name,
+            "relPath": rel_path,
+        })
+        _cache.invalidate(hand_path)
+
+    def rename(self, old, new):
+        old_root, old_rel = parse_fuse_path(old)
+        new_root, new_rel = parse_fuse_path(new)
+        if old_root not in ROOTS or new_root not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        old_hand = resolve_hand_path(old_root, old_rel)
+        new_hand = resolve_hand_path(new_root, new_rel)
+        if not old_hand or not new_hand:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "rename",
+            "root": old_root,
+            "relPath": old_rel,
+            "newRoot": new_root,
+            "newRelPath": new_rel,
+        })
+        _cache.invalidate(old_hand)
+        _cache.invalidate(new_hand)
+
+    def truncate(self, path, length, fh=None):
+        root_name, rel_path = parse_fuse_path(path)
+        if root_name not in ROOTS:
+            raise FuseOSError(errno.EROFS)
+        hand_path = resolve_hand_path(root_name, rel_path)
+        if not hand_path:
+            raise FuseOSError(errno.EROFS)
+        send_request({
+            "reqId": next_req_id(),
+            "op": "truncate",
+            "root": root_name,
+            "relPath": rel_path,
+            "size": length,
+        })
+        _cache.invalidate(hand_path)
+
+    def utimens(self, path, times=None):
+        # utimens 不算实质性修改，静默忽略即可
+        return
+
+    def chmod(self, path, mode):
+        # Claude Code 不需要 chmod，静默忽略
+        return
+
+    def chown(self, path, uid, gid):
+        # Claude Code 不需要 chown，静默忽略
+        return
+
+    def open(self, path, flags):
+        # 无状态，返回 0 作为 fh
+        return 0
+
+    def flush(self, path, fh):
+        return
+
+    def release(self, path, fh):
+        return
+
+    def fsync(self, path, datasync, fh):
+        return
+
+    def init(self, path):
+        # FUSE mount 成功后回调，写就绪标记
+        if READY_FILE:
+            try:
+                with open(READY_FILE, "w") as f:
+                    f.write("ready")
+            except Exception:
+                pass
+
+# ============================================================
+# 控制管道处理
+# ============================================================
+
+fuse_instance = None
+
+def handle_control():
+    global fuse_instance
+    try:
+        with os.fdopen(CONTROL_FD, "r", encoding="utf-8", buffering=1) as control:
+            for line in control:
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except Exception:
+                    continue
+                if message.get("type") == "shutdown":
+                    # 请求 FUSE 退出
+                    if fuse_instance:
+                        try:
+                            import subprocess
+                            subprocess.run(
+                                ["fusermount", "-u", MOUNT_POINT],
+                                timeout=5,
+                                capture_output=True,
+                            )
+                        except Exception:
+                            pass
+                    break
+    except OSError:
+        pass
+
+# ============================================================
+# 主入口
+# ============================================================
+
+# 启动响应读取线程
+reader_thread = threading.Thread(target=response_reader, daemon=True)
+reader_thread.start()
+
+# 启动控制管道处理线程
+control_thread = threading.Thread(target=handle_control, daemon=True)
+control_thread.start()
+
+# 从快照文件加载缓存（由 Brain 在启动 FUSE 前通过 Hand snapshot 请求收集）
+_snapshot_file = os.environ.get("AXON_FUSE_CACHE_SNAPSHOT", "")
+if _snapshot_file and os.path.isfile(_snapshot_file):
+    try:
+        with open(_snapshot_file, "r") as f:
+            _snapshot = json.load(f)
+        _loaded = 0
+        for path_key, stat_val in _snapshot.get("stats", {}).items():
+            _cache.put_stat(path_key, stat_val)
+            _loaded += 1
+        for path_key, entries_val in _snapshot.get("readdirs", {}).items():
+            _cache.put_readdir(path_key, entries_val)
+            _loaded += 1
+        for path_key, data_val in _snapshot.get("reads", {}).items():
+            _cache.put_read_full(path_key, base64.b64decode(data_val))
+            _loaded += 1
+        sys.stderr.write(f"[FUSE] cache snapshot loaded: {_loaded} entries from {_snapshot_file}\n")
+    except Exception as e:
+        sys.stderr.write(f"[FUSE] cache snapshot load failed (cold start): {e}\n")
+
+# 确保挂载点存在
+os.makedirs(MOUNT_POINT, exist_ok=True)
+
+try:
+    fuse_instance = FUSE(
+        AxonFuseOps(),
+        MOUNT_POINT,
+        foreground=True,
+        nothreads=False,
+        allow_other=False,
+    )
+except Exception as e:
+    sys.stderr.write(f"FUSE mount failed: {e}\n")
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+`;

@@ -40,7 +40,8 @@ COPY hand/package.json ./hand/
 COPY web/package.json ./web/
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends util-linux python3 \
+  && apt-get install -y --no-install-recommends util-linux python3 python3-pip fuse3 libfuse2 \
+  && pip3 install --break-system-packages fusepy \
   && rm -rf /var/lib/apt/lists/* \
   && npm ci --omit=dev --workspace server --include-workspace-root=false \
   && npm install -g @anthropic-ai/claude-code

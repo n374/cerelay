@@ -34,6 +34,8 @@ export interface CreateClaudeSessionRuntimeOptions {
   cwd: string;
   handHomeDir?: string;
   projectSettingsLocalShadowPath?: string;
+  /** FUSE 文件代理挂载点。设置后 bootstrap 从 FUSE 挂载而非宿主机 bind mount */
+  fuseRootDir?: string;
 }
 
 export async function createClaudeSessionRuntime(
@@ -108,6 +110,7 @@ async function createMountNamespaceRuntime(
         AXON_SHARED_CLAUDE_DIR: process.env.AXON_SHARED_CLAUDE_DIR || "/home/node/.claude",
         AXON_SHARED_CLAUDE_JSON: process.env.AXON_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
         AXON_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
+        AXON_FUSE_ROOT: options.fuseRootDir || "",
       },
       stdio: ["ignore", "ignore", "pipe"],
     }
@@ -122,7 +125,16 @@ async function createMountNamespaceRuntime(
     await waitForReadyFile(readyFile, anchor, DEFAULT_READY_TIMEOUT_MS);
   } catch (error) {
     anchor.kill("SIGKILL");
-    await rm(runtimeRoot, { recursive: true, force: true });
+    // 注意：runtimeRoot 下可能有 FUSE 挂载点（由 FileProxyManager 管理），
+    // rm 会因 EBUSY 失败。清理工作交给调用方在关闭 FUSE 后处理。
+    try {
+      await rm(runtimeRoot, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      log.warn("清理 namespace runtimeRoot 失败（可能有活跃 FUSE 挂载）", {
+        runtimeRoot,
+        error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+      });
+    }
     const stderrText = Buffer.concat(stderrChunks).toString("utf8").trim();
     const detail = stderrText ? `: ${stderrText}` : "";
     throw new Error(`初始化 Claude mount namespace 失败${detail || `: ${String(error)}`}`);
@@ -221,8 +233,11 @@ function renderNamespaceBootstrapScript(): string {
   return `#!/bin/sh
 set -eu
 
+echo "[bootstrap] start RUNTIME_ROOT=$AXON_RUNTIME_ROOT FUSE_ROOT=\${AXON_FUSE_ROOT:-none}" >&2
+
 mkdir -p "$AXON_RUNTIME_ROOT/views" "$AXON_RUNTIME_ROOT/staged"
 
+echo "[bootstrap] staging shared claude" >&2
 if [ -d "$AXON_SHARED_CLAUDE_DIR" ]; then
   mkdir -p "$AXON_RUNTIME_ROOT/staged/claude"
   mount --bind "$AXON_SHARED_CLAUDE_DIR" "$AXON_RUNTIME_ROOT/staged/claude"
@@ -233,6 +248,7 @@ if [ -f "$AXON_SHARED_CLAUDE_JSON" ]; then
   mount --bind "$AXON_SHARED_CLAUDE_JSON" "$AXON_RUNTIME_ROOT/staged/claude.json"
 fi
 
+echo "[bootstrap] mounting view roots: $AXON_VIEW_ROOTS" >&2
 IFS=':'
 for root_name in $AXON_VIEW_ROOTS; do
   [ -n "$root_name" ] || continue
@@ -243,23 +259,52 @@ unset IFS
 
 mkdir -p "$AXON_HOME_DIR" "$AXON_WORK_DIR"
 
-if [ -d "$AXON_RUNTIME_ROOT/staged/claude" ]; then
+echo "[bootstrap] FUSE check: AXON_FUSE_ROOT=\${AXON_FUSE_ROOT:-}" >&2
+# ---- FUSE 文件代理模式 vs 宿主机 bind mount 模式 ----
+if [ -n "\${AXON_FUSE_ROOT:-}" ] && [ -d "$AXON_FUSE_ROOT/home-claude" ]; then
+  echo "[bootstrap] FUSE mode: binding home-claude" >&2
+  # FUSE 模式：从 FUSE 挂载点绑定 ~/.claude/ 和 {cwd}/.claude/
   mkdir -p "$AXON_HOME_DIR/.claude"
-  mount --bind "$AXON_RUNTIME_ROOT/staged/claude" "$AXON_HOME_DIR/.claude"
+  mount --bind "$AXON_FUSE_ROOT/home-claude" "$AXON_HOME_DIR/.claude"
+
+  echo "[bootstrap] FUSE mode: checking home-claude-json" >&2
+  if [ -f "$AXON_FUSE_ROOT/home-claude-json" ]; then
+    mkdir -p "$(dirname "$AXON_HOME_DIR/.claude.json")"
+    : > "$AXON_HOME_DIR/.claude.json"
+    mount --bind "$AXON_FUSE_ROOT/home-claude-json" "$AXON_HOME_DIR/.claude.json"
+  fi
+
+  echo "[bootstrap] FUSE mode: binding project-claude" >&2
+  mkdir -p "$AXON_WORK_DIR/.claude"
+  mount --bind "$AXON_FUSE_ROOT/project-claude" "$AXON_WORK_DIR/.claude"
+else
+  echo "[bootstrap] legacy mode" >&2
+  # 传统模式：从容器内宿主机 bind mount 挂载
+  if [ -d "$AXON_RUNTIME_ROOT/staged/claude" ]; then
+    mkdir -p "$AXON_HOME_DIR/.claude"
+    mount --bind "$AXON_RUNTIME_ROOT/staged/claude" "$AXON_HOME_DIR/.claude"
+  fi
+
+  if [ -f "$AXON_RUNTIME_ROOT/staged/claude.json" ]; then
+    mkdir -p "$(dirname "$AXON_HOME_DIR/.claude.json")"
+    : > "$AXON_HOME_DIR/.claude.json"
+    mount --bind "$AXON_RUNTIME_ROOT/staged/claude.json" "$AXON_HOME_DIR/.claude.json"
+  fi
 fi
 
-if [ -f "$AXON_RUNTIME_ROOT/staged/claude.json" ]; then
-  mkdir -p "$(dirname "$AXON_HOME_DIR/.claude.json")"
-  : > "$AXON_HOME_DIR/.claude.json"
-  mount --bind "$AXON_RUNTIME_ROOT/staged/claude.json" "$AXON_HOME_DIR/.claude.json"
-fi
-
-if [ -n "\${AXON_PROJECT_SETTINGS_SOURCE:-}" ] && [ -f "$AXON_PROJECT_SETTINGS_SOURCE" ]; then
+echo "[bootstrap] hook injection check" >&2
+# Hook injection overlay
+# FUSE 模式下 settings.local.json 由 FUSE daemon 通过 shadow file 机制直接提供，
+# 无需在只读 FUSE 上创建文件。仅传统模式需要 bind mount。
+if [ -z "\${AXON_FUSE_ROOT:-}" ] && [ -n "\${AXON_PROJECT_SETTINGS_SOURCE:-}" ] && [ -f "$AXON_PROJECT_SETTINGS_SOURCE" ]; then
+  echo "[bootstrap] hook: legacy mode bind mount" >&2
   mkdir -p "$AXON_WORK_DIR/.claude"
   : > "$AXON_WORK_DIR/.claude/settings.local.json"
   mount --bind "$AXON_PROJECT_SETTINGS_SOURCE" "$AXON_WORK_DIR/.claude/settings.local.json"
+  echo "[bootstrap] hook: done" >&2
 fi
 
+echo "[bootstrap] writing ready file" >&2
 touch "$AXON_READY_FILE"
 exec sleep infinity
 `;
