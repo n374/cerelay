@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   await server.start();
   console.log(`[cerelay-web] 已启动`);
   console.log(`  Web UI: http://localhost:${port}`);
-  console.log(`  Server: ws://${serverAddr}/ws`);
+  console.log(`  Server: ${serverAddr}`);
 }
 
 function parseArgs(argv: string[]): { port: number; server: string } {

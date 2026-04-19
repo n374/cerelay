@@ -39,15 +39,33 @@ sequenceDiagram
 - **MCP 代理**：Server 读取 Claude 的 MCP 配置下发给 Client，Client 负责连接 MCP Server 并执行工具
 - **FUSE 文件代理**：容器内通过 FUSE 将文件读写请求转发到 Client 本地文件系统
 
+## 前置条件 / Prerequisites
+
+- **Node.js** >= 18
+- **TypeScript**：编译依赖 `tsc`，已包含在 `devDependencies` 中，`npm install` 后即可用
+- **Docker**（仅 Server 容器模式需要）
+- **Claude CLI**（仅 Server 本地直跑模式需要，需已认证：`claude auth`）
+
 ## 快速开始 / Quick Start
 
-### 安装 / Install
+### 安装依赖 / Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 启动 Server（Docker） / Start the Server (Docker)
+> `npm install` 会自动安装所有 workspace（server / client / web）的依赖，包括 TypeScript 编译器。
+>
+> 如需单独为某个 workspace 添加依赖 / To add a dependency to a specific workspace:
+>
+> ```bash
+> npm install <package> -w client          # 生产依赖
+> npm install <package> --save-dev -w client  # 开发依赖
+> ```
+
+### 启动 Server / Start the Server
+
+#### Docker（推荐） / Docker (Recommended)
 
 前置条件：Docker、`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
 
@@ -66,9 +84,17 @@ cp .env.example .env       # 可选，按需修改
 LOG_LEVEL=debug npm run server:up
 ```
 
+#### 本地直跑 / Run Locally
+
+需本机已安装并认证 `claude` CLI：
+
+```bash
+cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
+```
+
 ### 安装 Client CLI / Install the Client CLI
 
-安装 `cerelay` 命令到 `~/.local/bin`，之后可在任意目录直接使用：
+将 `cerelay` 命令安装到 `~/.local/bin`，之后可在任意目录直接使用：
 
 Install the `cerelay` command to `~/.local/bin` for use from any directory:
 
@@ -100,20 +126,25 @@ After installation, run from any directory (`--cwd` defaults to current director
 cerelay --server localhost:8765
 ```
 
+`--server` 支持多种格式 / `--server` accepts multiple formats:
+
+```bash
+cerelay --server localhost:8765            # ws://localhost:8765/ws
+cerelay --server http://example.com        # ws://example.com/ws
+cerelay --server https://example.com       # wss://example.com/ws（自动 TLS）
+cerelay --server wss://example.com/prefix  # wss://example.com/prefix/ws
+```
+
 也可从源码启动 / Or run from source:
 
 ```bash
 cd client && npm start -- --server localhost:8765 --cwd /path/to/project
 ```
 
-连接后自动创建 PTY session，进入 Claude Code 终端。
-
-查看 Client 日志：
+查看 Client 日志 / View Client logs:
 
 ```bash
 cerelay logs
-# 或 / or
-cd client && npm start -- logs
 ```
 
 ### 启动 Web UI（可选） / Start the Web UI (Optional)
@@ -123,14 +154,6 @@ cd web && npm start -- --port 8766 --server localhost:8765
 ```
 
 打开 http://localhost:8766。
-
-### 本地直跑 Server / Run Server Locally
-
-不用 Docker 时，需本机已安装并认证 `claude` CLI：
-
-```bash
-cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
-```
 
 ## 鉴权 / Authentication
 
@@ -142,13 +165,16 @@ Server 通过 `CERELAY_KEY` 环境变量设置共享密钥，Client 连接时需
 # Server 端
 CERELAY_KEY=my-secret npm run server:up
 
-# Client 端（安装后） / Client (after install)
+# Client 端 / Client
 CERELAY_KEY=my-secret cerelay --server localhost:8765
 # 或 / or
 cerelay --server localhost:8765 --key my-secret
+```
 
-# 从源码启动 / From source
-CERELAY_KEY=my-secret npm start -- --server localhost:8765
+建议将 `CERELAY_KEY` 写入 `~/.zshrc` 或 `~/.bashrc`，避免每次输入：
+
+```bash
+export CERELAY_KEY=my-secret
 ```
 
 ### Claude Code 登录态
@@ -185,7 +211,23 @@ cerelay/
 └── docker-entrypoint.sh
 ```
 
-## 测试 / Testing
+## 开发 / Development
+
+### 构建 / Build
+
+```bash
+npm run test:workspaces       # 编译并测试所有 workspace
+cd server && npm run build    # 单独编译
+```
+
+### 类型检查 / Type Check
+
+```bash
+cd server && npm run typecheck
+cd client && npm run typecheck
+```
+
+### 测试 / Testing
 
 ```bash
 npm test                      # 全部测试（smoke + workspaces）

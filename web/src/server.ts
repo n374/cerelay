@@ -188,8 +188,22 @@ export class WebServer {
   // 每个浏览器 WS 连接都建立一个到 Server 的 WS 连接
   // ============================================================
 
+  private resolveWebSocketURL(server: string): string {
+    let raw = server
+      .replace(/^https:\/\//, "wss://")
+      .replace(/^http:\/\//, "ws://");
+    if (!/^wss?:\/\//.test(raw)) {
+      raw = `ws://${raw}`;
+    }
+    const u = new URL(raw);
+    if (!u.pathname.endsWith("/ws")) {
+      u.pathname = u.pathname.replace(/\/$/, "") + "/ws";
+    }
+    return u.toString().replace(/\/$/, "");
+  }
+
   private async handleBrowserConnection(browserSocket: WebSocket, _req: IncomingMessage): Promise<void> {
-    const serverURL = `ws://${this.serverAddress}/ws`;
+    const serverURL = this.resolveWebSocketURL(this.serverAddress);
     const pendingBrowserMessages: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
 
     // 建立到 Server 的连接

@@ -13,7 +13,7 @@ const program = new Command();
 program
   .name("cerelay")
   .description("Cerelay Client — 用户交互端")
-  .option("--server <host:port>", "Cerelay Server 地址", "localhost:8765")
+  .option("--server <url>", "Cerelay Server 地址（host:port / http(s):// / ws(s)://）", "localhost:8765")
   .option("--key <key>", "连接 Server 的共享密钥（默认读取 CERELAY_KEY 环境变量）")
   .option("--cwd <dir>", "工作目录（默认当前目录）")
   .option("--log-level <level>", "日志级别（debug/info/warn/error）", "info")
@@ -67,8 +67,30 @@ function resolveKey(cliKey?: string): string | undefined {
   return cliKey?.trim() || process.env.CERELAY_KEY?.trim() || undefined;
 }
 
+/**
+ * 将 --server 参数规范化为 WebSocket URL。
+ * 支持：host:port / http:// / https:// / ws:// / wss://
+ *   localhost:8765          → ws://localhost:8765/ws
+ *   http://example.com      → ws://example.com/ws
+ *   https://example.com     → wss://example.com/ws
+ *   https://example.com/pfx → wss://example.com/pfx/ws
+ */
+function resolveWebSocketURL(server: string): string {
+  let raw = server
+    .replace(/^https:\/\//, "wss://")
+    .replace(/^http:\/\//, "ws://");
+  if (!/^wss?:\/\//.test(raw)) {
+    raw = `ws://${raw}`;
+  }
+  const u = new URL(raw);
+  if (!u.pathname.endsWith("/ws")) {
+    u.pathname = u.pathname.replace(/\/$/, "") + "/ws";
+  }
+  return u.toString().replace(/\/$/, "");
+}
+
 function buildServerURL(server: string, key?: string): string {
-  const base = `ws://${server}/ws`;
+  const base = resolveWebSocketURL(server);
   if (!key) return base;
   return `${base}?key=${encodeURIComponent(key)}`;
 }
