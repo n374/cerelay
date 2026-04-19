@@ -98,6 +98,7 @@ test("mergePreToolUseHook keeps project agent definitions so sub-agents inherit 
 test("mergePreToolUseHook tolerates invalid existing JSON", () => {
   const merged = mergePreToolUseHook("not-json", "node hook.mjs");
   assert.deepEqual(merged, {
+    mcpServers: {},
     hooks: {
       PreToolUse: [
         {

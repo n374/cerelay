@@ -1220,10 +1220,15 @@ export class AxonServer {
         from: sessionEntry ? "sdk-session" : "pty-session",
       });
 
-      const result = sessionEntry
-        ? await sessionEntry.session.handleInjectedPreToolUse(payload)
-        : await ptyEntry!.session.handleInjectedPreToolUse(payload);
-      this.sendJson(res, 200, result);
+      if (sessionEntry) {
+        // SDK session: 保留 hookSpecificOutput 包装（SDK 回调期望此格式）
+        const result = await sessionEntry.session.handleInjectedPreToolUse(payload);
+        this.sendJson(res, 200, result);
+      } else {
+        // PTY session: 命令行 Hook 期望顶层字段，不认 hookSpecificOutput 包装
+        const result = await ptyEntry!.session.handleInjectedPreToolUse(payload);
+        this.sendJson(res, 200, result.hookSpecificOutput ?? result);
+      }
     } catch (error) {
       log.warn("处理内部 PreToolUse hook bridge 失败", {
         sessionId,
