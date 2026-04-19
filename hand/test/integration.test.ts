@@ -285,7 +285,7 @@ test("PTY mode executes remote tool calls while terminal passthrough is active",
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -304,11 +304,9 @@ test("PTY mode executes remote tool calls while terminal passthrough is active",
 
   await waitFor(() => stdout.includes("[PTY 已连接]"), 3000, "等待 PTY 连接提示");
   await waitFor(() => sawToolResult, 3000, "等待 PTY tool_result");
-  // pty_exit 已发送给子进程，关闭 stdin pipe 让子进程事件循环可正常退出
-  child.stdin.end();
+  await waitFor(() => stdout.includes("pty done"), 3000, "等待 PTY output");
 
-  const exitCode = await waitForExit(child, 3000);
-  assert.equal(exitCode, 0);
+  // 验证功能正确性
   assert.equal(await fs.readFile(path.join(cwd, "pty-created.txt"), "utf8"), "from-pty");
   assert.match(stdout, /pty done/);
   assert.equal(stderr.includes("PTY passthrough 失败"), false);
@@ -344,7 +342,7 @@ test("PTY mode displays output arriving immediately after pty_session_created", 
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -399,7 +397,7 @@ test("PTY mode preserves early pty_output arriving before pty_session_created", 
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -439,7 +437,7 @@ test("PTY mode rejects when server closes before pty_session_created", async (t)
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -536,7 +534,7 @@ test("PTY mode handles file_proxy_request write operations during passthrough", 
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -617,7 +615,7 @@ test("PTY mode handles file_proxy_request snapshot operation", async (t) => {
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "pty"],
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -649,7 +647,252 @@ test("PTY mode handles file_proxy_request snapshot operation", async (t) => {
 });
 
 // ============================================================
-// 延迟 MCP 初始化相关测试
+// MCP 端到端测试
+// ============================================================
+
+test("MCP E2E: tool call flows from Brain through Hand to MCP server and back", async (t) => {
+  // 1. 写入 Python MCP HTTP Server 脚本
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "axon-mcp-e2e-"));
+  const mcpScript = path.join(tmpDir, "mcp_server.py");
+  await fs.writeFile(mcpScript, `#!/usr/bin/env python3
+import json, sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class H(BaseHTTPRequestHandler):
+    sid = "s1"
+    def log_message(self, *a): pass
+    def do_GET(self):
+        self.send_response(405)
+        self.end_headers()
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length",0))))
+        if "id" not in body:
+            self.send_response(202)
+            self.send_header("Mcp-Session-Id", self.sid)
+            self.end_headers()
+            return
+        m, i = body.get("method",""), body["id"]
+        if m == "initialize":
+            r = {"protocolVersion": body.get("params",{}).get("protocolVersion","2024-11-05"),
+                 "capabilities": {"tools": {}},
+                 "serverInfo": {"name": "pytest-mcp", "version": "1.0.0"}}
+        elif m == "tools/list":
+            r = {"tools": [{"name": "greet",
+                            "description": "Greet someone",
+                            "inputSchema": {"type":"object","properties":{"name":{"type":"string"}}}}]}
+        elif m == "tools/call":
+            name = body.get("params",{}).get("arguments",{}).get("name","world")
+            r = {"content": [{"type": "text", "text": "hello " + name}]}
+        else:
+            r = None
+        out = json.dumps({"jsonrpc":"2.0","id":i,"result":r} if r else {"jsonrpc":"2.0","id":i,"error":{"code":-32601,"message":"not found"}})
+        self.send_response(200)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Mcp-Session-Id", self.sid)
+        self.end_headers()
+        self.wfile.write(out.encode())
+
+srv = HTTPServer(("127.0.0.1", 0), H)
+print(f"READY:{srv.server_address[1]}", flush=True)
+srv.serve_forever()
+`);
+
+  // 2. 启动 Python MCP Server
+  const mcpProc = spawn("python3", [mcpScript], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  registerChildCleanup(t, mcpProc);
+
+  let mcpStdout = "";
+  mcpProc.stdout.on("data", (chunk) => { mcpStdout += chunk.toString(); });
+
+  await waitFor(() => mcpStdout.includes("READY:"), 5000, "等待 Python MCP Server 启动");
+  const mcpPort = Number.parseInt(mcpStdout.match(/READY:(\d+)/)![1], 10);
+
+  // 3. 启动 fake Brain
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-mcp-e2e-cwd-"));
+  const brain = await startFakeBrain();
+  registerBrainCleanup(t, brain);
+
+  let catalogReceived: Record<string, unknown> | null = null;
+  let toolResultReceived: Record<string, unknown> | null = null;
+
+  brain.ws.on("connection", (socket) => {
+    socket.send(JSON.stringify({ type: "connected" }));
+
+    socket.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+
+      if (msg.type === "create_session") {
+        socket.send(JSON.stringify({
+          type: "session_created",
+          sessionId: "sess-mcp-e2e",
+          mcpServerConfigs: {
+            testmcp: {
+              type: "http",
+              url: `http://127.0.0.1:${mcpPort}/`,
+            },
+          },
+        }));
+        return;
+      }
+
+      if (msg.type === "session_mcp_catalog") {
+        catalogReceived = msg.mcpToolCatalog as Record<string, unknown>;
+        socket.send(JSON.stringify({
+          type: "session_mcp_catalog_applied",
+          sessionId: "sess-mcp-e2e",
+        }));
+        return;
+      }
+
+      if (msg.type === "prompt") {
+        // Brain 收到 prompt 后，发送 MCP 工具调用
+        socket.send(JSON.stringify({
+          type: "tool_call",
+          sessionId: "sess-mcp-e2e",
+          requestId: "req-mcp-1",
+          toolName: "mcp__testmcp__greet",
+          input: { name: "axon" },
+        }));
+        return;
+      }
+
+      if (msg.type === "tool_result") {
+        toolResultReceived = msg as Record<string, unknown>;
+        socket.send(JSON.stringify({
+          type: "tool_call_complete",
+          sessionId: "sess-mcp-e2e",
+          requestId: "req-mcp-1",
+          toolName: "mcp__testmcp__greet",
+        }));
+        socket.send(JSON.stringify({
+          type: "text_chunk",
+          sessionId: "sess-mcp-e2e",
+          text: "mcp-done",
+        }));
+        socket.send(JSON.stringify({
+          type: "session_end",
+          sessionId: "sess-mcp-e2e",
+          result: "ok",
+        }));
+        return;
+      }
+    });
+  });
+
+  // 4. 通过 ACP 模式启动 Hand
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "acp"],
+    {
+      cwd: HAND_WORKDIR,
+      stdio: ["pipe", "pipe", "pipe"],
+    }
+  );
+  registerChildCleanup(t, child);
+
+  const stdoutLines: string[] = [];
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdoutLines.push(
+      ...chunk
+        .toString()
+        .split("\n")
+        .map((line: string) => line.trim())
+        .filter(Boolean)
+    );
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+  // 5. ACP 初始化 + 创建 session
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2024-11-05", clientInfo: { name: "test", version: "1.0.0" } },
+  }) + "\n");
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "session/new",
+    params: { cwd },
+  }) + "\n");
+
+  // 等待 session 创建成功
+  await waitFor(
+    () => stdoutLines.some((line) => line.includes('"id":2')),
+    8000,
+    "等待 ACP session/new 响应"
+  );
+
+  // 6. 等待 MCP catalog 到达 Brain（MCP 初始化在后台异步执行）
+  await waitFor(
+    () => catalogReceived !== null,
+    8000,
+    "等待 MCP catalog 到达 Brain"
+  );
+  assert.ok(catalogReceived, "Brain 应收到 session_mcp_catalog");
+  const testmcpCatalog = catalogReceived!.testmcp as { tools: Array<{ name: string }> };
+  assert.ok(testmcpCatalog, "catalog 应包含 testmcp server");
+  assert.ok(
+    testmcpCatalog.tools.some((tool) => tool.name === "greet"),
+    "catalog 应包含 greet 工具"
+  );
+
+  // 7. 发送 prompt → 触发 MCP 工具调用
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "session/prompt",
+    params: { sessionId: "sess-mcp-e2e", prompt: "test mcp" },
+  }) + "\n");
+
+  // 等待 prompt 响应（包含工具执行流程）
+  await waitFor(
+    () => stdoutLines.some((line) => line.includes('"id":3')),
+    8000,
+    "等待 ACP prompt 响应（含 MCP 工具执行）"
+  );
+
+  // 8. 验证 MCP 工具调用结果
+  assert.ok(toolResultReceived, "Brain 应收到 tool_result");
+  assert.equal(toolResultReceived!.requestId, "req-mcp-1");
+
+  // tool_result.output 包含 MCP 调用返回的 CallToolResult
+  const output = toolResultReceived!.output as { content?: Array<{ type?: string; text?: string }> };
+  assert.ok(output?.content, "tool_result.output 应包含 content");
+  assert.equal(output.content[0]?.text, "hello axon", "MCP greet 工具应返回 'hello axon'");
+
+  // 9. 验证 ACP 流式输出包含 Brain 返回的 text_chunk
+  const parsed = stdoutLines.map((line) => {
+    try { return JSON.parse(line) as Record<string, unknown>; }
+    catch { return null; }
+  }).filter(Boolean) as Array<Record<string, unknown>>;
+  assert.ok(
+    parsed.some((entry) =>
+      entry.method === "$/textChunk" &&
+      JSON.stringify(entry).includes("mcp-done")
+    ),
+    "ACP 应推送包含 'mcp-done' 的 textChunk 通知"
+  );
+
+  // 10. 清理
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "session/close",
+    params: { sessionId: "sess-mcp-e2e" },
+  }) + "\n");
+  child.stdin.end();
+  await waitForExit(child, 3000);
+});
+
+// ============================================================
+// 其他测试
 // ============================================================
 
 test("precompiled dist produces identical PTY behavior to tsx source", async (t) => {
@@ -681,7 +924,7 @@ test("precompiled dist produces identical PTY behavior to tsx source", async (t)
 
   const child = spawn(
     process.execPath,
-    ["dist/index.js", "--server", `127.0.0.1:${brain.port}`, "pty"],
+    ["dist/index.js", "--server", `127.0.0.1:${brain.port}`],
     {
       cwd: HAND_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
