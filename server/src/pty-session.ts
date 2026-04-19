@@ -122,17 +122,46 @@ export class ClaudePtySession {
       this.controlStream.on("error", () => undefined);
     }
 
+    // 启动诊断：如果子进程长时间无 stdout 输出，打印 warn 日志辅助排查
+    let gotFirstOutput = false;
+    const startupDiagTimer = setTimeout(() => {
+      if (!gotFirstOutput && !this.closed) {
+        this.log.warn("PTY 子进程启动后 5 秒内无 stdout 输出，可能卡在 FUSE 文件代理或进程启动阶段", {
+          command: commandLine[0],
+          args: commandLine.slice(1),
+          pid: this.child?.pid,
+        });
+      }
+    }, 5_000);
+
     this.child.stdout?.on("data", (chunk: Buffer) => {
-      void this.transport.sendOutput(this.id, Buffer.from(chunk)).catch(() => undefined);
+      if (!gotFirstOutput) {
+        gotFirstOutput = true;
+        clearTimeout(startupDiagTimer);
+        this.log.info("PTY 首次 stdout 输出", { bytes: chunk.length });
+      }
+      void this.transport.sendOutput(this.id, Buffer.from(chunk)).catch((err) => {
+        this.log.warn("PTY stdout 转发失败", { error: err instanceof Error ? err.message : String(err) });
+      });
     });
     this.child.stderr?.on("data", (chunk: Buffer) => {
-      void this.transport.sendOutput(this.id, Buffer.from(chunk)).catch(() => undefined);
+      void this.transport.sendOutput(this.id, Buffer.from(chunk)).catch((err) => {
+        this.log.warn("PTY stderr 转发失败", { error: err instanceof Error ? err.message : String(err) });
+      });
     });
     this.child.on("exit", (code, signal) => {
+      clearTimeout(startupDiagTimer);
       this.log.debug("Claude PTY 会话退出", {
         exitCode: code ?? undefined,
         signal: signal ?? undefined,
       });
+      // 注意：不在 exit 事件中触发 sendExit / close，因为 exit 早于 stdio 流关闭。
+      // 如果在此处 destroyPtySession，stdout pipe 中尚未读取的 PTY 输出会因
+      // session entry 被删除而在 sendOutput 中静默丢失（.catch(() => undefined)）。
+    });
+    this.child.on("close", (code, signal) => {
+      // close 事件在所有 stdio 流关闭后触发，确保 stdout data 全部被
+      // 读取并通过 sendOutput 发出后，才发送 pty_exit 并清理 session。
       void this.transport.sendExit(this.id, code ?? undefined, signal ?? undefined).catch(() => undefined);
       void this.close();
     });
@@ -213,7 +242,7 @@ export class ClaudePtySession {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "Tool response ready",
+        permissionDecisionReason: "",
         additionalContext: renderToolResultForClaude(input.tool_name, result),
       },
     };

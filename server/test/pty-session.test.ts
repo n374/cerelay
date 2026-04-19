@@ -84,6 +84,47 @@ test("pty session can stream terminal bytes through WebSocket", async (t) => {
   }));
 });
 
+test("pty session forwards process stdout as pty_output without user input", async (t) => {
+  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
+  process.env.AXON_PTY_COMMAND = "echo PTY_AUTOTEST_OUTPUT";
+  t.after(() => {
+    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+  });
+
+  const server = new AxonServer({
+    model: "claude-sonnet-4-20250514",
+    port: 0,
+    sessionCleanupIntervalMs: 20,
+    sessionResumeGraceMs: 500,
+  });
+  t.after(async () => {
+    await server.shutdown();
+  });
+  await server.start();
+
+  const ws = await connect(server.getListenPort());
+  t.after(async () => {
+    await closeSocket(ws);
+  });
+
+  ws.send(JSON.stringify({
+    type: "create_pty_session",
+    cwd: "/tmp",
+    cols: 80,
+    rows: 24,
+  }));
+
+  const created = await waitForType(ws, "pty_session_created");
+  assert.equal(typeof created.sessionId, "string");
+  const sessionId = String(created.sessionId);
+
+  const output = await waitForOutputContains(ws, sessionId, "PTY_AUTOTEST_OUTPUT");
+  assert.match(output, /PTY_AUTOTEST_OUTPUT/);
+
+  const exit = await waitForType(ws, "pty_exit");
+  assert.equal(exit.sessionId, sessionId);
+});
+
 test("create_pty_session keeps injected hook files in the PTY runtime root", async (t) => {
   const originalPtyCommand = process.env.AXON_PTY_COMMAND;
   const originalMountNamespace = process.env.AXON_ENABLE_MOUNT_NAMESPACE;
@@ -153,6 +194,97 @@ test("create_pty_session keeps injected hook files in the PTY runtime root", asy
   }));
 });
 
+test("pty session delivers pty_exit after short-lived process terminates", async (t) => {
+  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
+  process.env.AXON_PTY_COMMAND = "true";
+  t.after(() => {
+    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+  });
+
+  const server = new AxonServer({
+    model: "claude-sonnet-4-20250514",
+    port: 0,
+    sessionCleanupIntervalMs: 20,
+    sessionResumeGraceMs: 500,
+  });
+  t.after(async () => {
+    await server.shutdown();
+  });
+  await server.start();
+
+  const ws = await connect(server.getListenPort());
+  t.after(async () => {
+    await closeSocket(ws);
+  });
+
+  ws.send(JSON.stringify({
+    type: "create_pty_session",
+    cwd: "/tmp",
+    cols: 80,
+    rows: 24,
+  }));
+
+  const created = await waitForType(ws, "pty_session_created");
+  assert.equal(typeof created.sessionId, "string");
+  const sessionId = String(created.sessionId);
+
+  const exit = await waitForType(ws, "pty_exit");
+  assert.equal(exit.sessionId, sessionId);
+});
+
+test("close_session terminates a running pty session", async (t) => {
+  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
+  process.env.AXON_PTY_COMMAND = "sleep 60";
+  t.after(() => {
+    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+  });
+
+  const server = new AxonServer({
+    model: "claude-sonnet-4-20250514",
+    port: 0,
+    sessionCleanupIntervalMs: 20,
+    sessionResumeGraceMs: 500,
+  });
+  t.after(async () => {
+    await server.shutdown();
+  });
+  await server.start();
+
+  const ws = await connect(server.getListenPort());
+  t.after(async () => {
+    await closeSocket(ws);
+  });
+
+  ws.send(JSON.stringify({
+    type: "create_pty_session",
+    cwd: "/tmp",
+    cols: 80,
+    rows: 24,
+  }));
+
+  const created = await waitForType(ws, "pty_session_created");
+  const sessionId = String(created.sessionId);
+
+  ws.send(JSON.stringify({
+    type: "close_session",
+    sessionId,
+  }));
+
+  // close 后对已销毁 session 发消息应收到 error
+  ws.send(JSON.stringify({
+    type: "pty_input",
+    sessionId,
+    data: Buffer.from("test", "utf8").toString("base64"),
+  }));
+
+  const err = await waitForType(ws, "error");
+  assert.match(String(err.message), /不存在/);
+});
+
+// ============================================================
+// 工具函数
+// ============================================================
+
 function connect(port: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
@@ -165,7 +297,7 @@ function waitForType(ws: WebSocket, type: string): Promise<JsonMessage> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error(`等待消息超时: ${type}`));
+      reject(new Error(`waitForType("${type}") timed out`));
     }, 5000);
 
     const onMessage = (data: WebSocket.RawData) => {
@@ -201,7 +333,7 @@ function waitForOutputContains(ws: WebSocket, sessionId: string, text: string): 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error(`等待 PTY 输出超时: ${text}`));
+      reject(new Error(`waitForOutputContains("${text}") timed out`));
     }, 5000);
     let combined = "";
 

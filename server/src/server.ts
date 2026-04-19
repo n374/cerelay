@@ -42,6 +42,8 @@ import { createMcpProxyServers } from "./mcp-proxy.js";
 import { loadClaudeMcpServerConfigs } from "./claude-mcp-config.js";
 import { ClaudePtySession } from "./pty-session.js";
 import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
+import { FileProxyManager } from "./file-proxy-manager.js";
+import type { FileProxyResponse } from "./protocol.js";
 import type { HookInput } from "./session.js";
 
 const log = createLogger("server");
@@ -78,6 +80,8 @@ export class AxonServer {
   private readonly hands = new HandRegistry();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly ptySessions = new Map<string, PtySessionEntry>();
+  /** sessionId → FileProxyManager，独立于 session entry 注册，确保 session 创建期间也能 dispatch */
+  private readonly fileProxies = new Map<string, FileProxyManager>();
   private readonly stats = new StatsCollector();
   private readonly toolRouting = new ToolRoutingStore();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
@@ -137,6 +141,14 @@ export class AxonServer {
       throw new Error("服务器尚未监听端口");
     }
     return address.port;
+  }
+
+  /** 判断是否应启动 FUSE 文件代理（仅 Linux + mount namespace 模式） */
+  private shouldStartFileProxy(): boolean {
+    return (
+      process.platform === "linux" &&
+      process.env.AXON_ENABLE_MOUNT_NAMESPACE === "true"
+    );
   }
 
   async shutdown(): Promise<void> {
@@ -557,6 +569,9 @@ export class AxonServer {
         case "tool_result":
           await this.handleToolResult(handId, JSON.parse(raw) as ToolResult);
           return;
+        case "file_proxy_response":
+          this.handleFileProxyResponse(handId, JSON.parse(raw) as FileProxyResponse);
+          return;
         case "pty_input":
           await this.handlePtyInput(handId, JSON.parse(raw) as PtyInput);
           return;
@@ -582,6 +597,27 @@ export class AxonServer {
     }
   }
 
+  // ============================================================
+  // File Proxy 响应分发
+  // ============================================================
+
+  private handleFileProxyResponse(_handId: string, resp: FileProxyResponse): void {
+    const proxy = this.fileProxies.get(resp.sessionId);
+    if (proxy) {
+      proxy.resolveResponse(resp);
+      return;
+    }
+
+    log.debug("收到 file_proxy_response 但未找到对应 FileProxyManager", {
+      sessionId: resp.sessionId,
+      reqId: resp.reqId,
+    });
+  }
+
+  // ============================================================
+  // Session 创建
+  // ============================================================
+
   private async handleCreateSession(handId: string, message: CreateSession): Promise<void> {
     log.debug("收到创建 Session 请求", {
       handId,
@@ -589,11 +625,40 @@ export class AxonServer {
       model: message.model || this.defaultModel,
     });
     const sessionId = `sess-${Date.now()}-${randomUUID()}`;
-    const runtime = await createClaudeSessionRuntime({
-      sessionId,
-      cwd: message.cwd || ".",
-      handHomeDir: message.homeDir,
-    });
+    const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
+
+    // 启动 FUSE 文件代理（mount namespace 模式下）
+    let fileProxy: FileProxyManager | undefined;
+    if (this.shouldStartFileProxy()) {
+      fileProxy = new FileProxyManager({
+        runtimeRoot,
+        handHomeDir: message.homeDir || process.env.HOME || "/home/node",
+        handCwd: message.cwd || ".",
+        sessionId,
+        sendToHand: async (msg) => {
+          await this.sendToHand(handId, msg);
+        },
+      });
+      this.fileProxies.set(sessionId, fileProxy);
+      await fileProxy.start();
+    }
+
+    let runtime;
+    try {
+      runtime = await createClaudeSessionRuntime({
+        sessionId,
+        cwd: message.cwd || ".",
+        handHomeDir: message.homeDir,
+        fuseRootDir: fileProxy?.mountPoint,
+      });
+    } catch (err) {
+      if (fileProxy) {
+        this.fileProxies.delete(sessionId);
+        await fileProxy.shutdown().catch(() => undefined);
+      }
+      await rm(runtimeRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
     const claudeMcpConfigs = await loadClaudeMcpServerConfigs({
       cwd: message.cwd || ".",
     });
@@ -635,6 +700,7 @@ export class AxonServer {
       session,
       handId,
       resumableUntil: null,
+      fileProxy,
     });
     this.hands.bindSession(handId, sessionId);
     this.stats.onSessionCreated();
@@ -668,13 +734,52 @@ export class AxonServer {
       sessionId,
       token: hookToken,
     });
-    const runtime = await createClaudeSessionRuntime({
-      sessionId,
-      cwd: message.cwd || ".",
-      handHomeDir: message.homeDir,
-      projectSettingsLocalShadowPath: hookInjection.settingsPath,
-    });
-    await verifyPtyHookVisibleInRuntime(runtime, message.cwd || ".");
+
+    // 启动 FUSE 文件代理（mount namespace 模式下）
+    let fileProxy: FileProxyManager | undefined;
+    if (this.shouldStartFileProxy()) {
+      // hook injection 的 settings.local.json 作为 shadow file 注入 FUSE
+      const shadowFiles: Record<string, string> = {};
+      if (hookInjection.settingsPath) {
+        shadowFiles["project-claude/settings.local.json"] = hookInjection.settingsPath;
+      }
+      fileProxy = new FileProxyManager({
+        runtimeRoot,
+        handHomeDir: message.homeDir || process.env.HOME || "/home/node",
+        handCwd: message.cwd || ".",
+        sessionId,
+        shadowFiles,
+        sendToHand: async (msg) => {
+          await this.sendToHand(handId, msg);
+        },
+      });
+      // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
+      // 发出的 file_proxy_request → Hand 响应 file_proxy_response 时，
+      // handleFileProxyResponse 找不到 FileProxyManager，响应被丢弃导致 FUSE 请求超时。
+      this.fileProxies.set(sessionId, fileProxy);
+      await fileProxy.start();
+    }
+
+    let runtime;
+    try {
+      runtime = await createClaudeSessionRuntime({
+        sessionId,
+        cwd: message.cwd || ".",
+        handHomeDir: message.homeDir,
+        // FUSE 模式下 settings.local.json 由 FUSE shadow file 提供，不需要 bind mount
+        projectSettingsLocalShadowPath: fileProxy ? undefined : hookInjection.settingsPath,
+        fuseRootDir: fileProxy?.mountPoint,
+      });
+      await verifyPtyHookVisibleInRuntime(runtime, message.cwd || ".");
+    } catch (err) {
+      // runtime 创建失败时必须先关闭 FUSE，否则 rm(runtimeRoot) 会 EBUSY
+      if (fileProxy) {
+        this.fileProxies.delete(sessionId);
+        await fileProxy.shutdown().catch(() => undefined);
+      }
+      await rm(runtimeRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
 
     log.info("PTY Session runtime 与 hook 已准备完成", {
       sessionId,
@@ -757,6 +862,7 @@ export class AxonServer {
       session,
       handId,
       hookToken,
+      fileProxy,
     });
     this.hands.bindSession(handId, sessionId);
     this.stats.onSessionCreated();
@@ -1035,6 +1141,10 @@ export class AxonServer {
   private destroySession(sessionId: string, entry: SessionEntry, reason: string): void {
     const boundHandId = entry.handId;
     entry.session.close();
+    if (entry.fileProxy) {
+      this.fileProxies.delete(sessionId);
+      void entry.fileProxy.shutdown().catch(() => undefined);
+    }
     this.sessions.delete(sessionId);
     if (boundHandId) {
       this.hands.unbindSession(boundHandId, sessionId);
@@ -1046,6 +1156,10 @@ export class AxonServer {
   private destroyPtySession(sessionId: string, entry: PtySessionEntry, reason: string): void {
     const boundHandId = entry.handId;
     void entry.session.close().catch(() => undefined);
+    if (entry.fileProxy) {
+      this.fileProxies.delete(sessionId);
+      void entry.fileProxy.shutdown().catch(() => undefined);
+    }
     this.ptySessions.delete(sessionId);
     if (boundHandId) {
       this.hands.unbindSession(boundHandId, sessionId);
@@ -1221,12 +1335,14 @@ interface SessionEntry {
   handId: string | null;
   resumableUntil: number | null;
   hookToken?: string;
+  fileProxy?: FileProxyManager;
 }
 
 interface PtySessionEntry {
   session: ClaudePtySession;
   handId: string | null;
   hookToken: string;
+  fileProxy?: FileProxyManager;
 }
 
 function asError(error: unknown): Error {

@@ -5,12 +5,15 @@ import path from "node:path";
 import process from "node:process";
 import WebSocket from "ws";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
+import { FileProxyHandler } from "./file-proxy.js";
 import { UI } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
 import type {
   CreateSession,
   CreatePtySession,
   CreateSessionResponse,
+  FileProxyRequest,
+  FileProxyResponse,
   McpServerConfig,
   McpServerCatalogEntry,
   Prompt,
@@ -70,6 +73,7 @@ export class HandClient {
   private activeMessageConsumer: ((raw: string) => void) | null = null;
   // executor 在 session 创建后含有正确的 cwd，先用占位 cwd 初始化
   private executor: ToolExecutor;
+  private fileProxy: FileProxyHandler;
   private currentCwd: string;
 
   // 当前活跃的 session ID
@@ -90,6 +94,7 @@ export class HandClient {
     this.ui = new UI();
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
+    this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
   }
 
   // 连接到 Server
@@ -109,6 +114,11 @@ export class HandClient {
         this.ws = ws;
         ws.on("message", (data) => {
           const raw = data.toString();
+          // file_proxy_request 必须始终响应，不受 consumer 状态影响
+          // （session 创建期间 FUSE bootstrap 就会发起文件操作）
+          if (this.tryHandleFileProxyFromRaw(raw)) {
+            return;
+          }
           if (this.activeMessageConsumer) {
             this.activeMessageConsumer(raw);
             return;
@@ -303,6 +313,12 @@ export class HandClient {
 
       const ws = this.ws;
 
+      const cleanup = () => {
+        releaseMessageConsumer();
+        ws.off("error", onError);
+        ws.off("close", onClose);
+      };
+
       const onMessage = (raw: string) => {
         let msg: ServerToHandMessage;
         try {
@@ -320,8 +336,7 @@ export class HandClient {
 
             const response = msg as CreateSessionResponse | RestoreSessionResponse;
             this.sessionId = response.sessionId;
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             if (this.interactiveOutput) {
               const prefix = expectedType === "session_restored" ? "[已恢复]" : "[已连接]";
               process.stdout.write(`\x1b[36m${prefix} Session: ${this.sessionId}\x1b[0m\n`);
@@ -333,22 +348,31 @@ export class HandClient {
             // 忽略 connected 通知，继续等待
             break;
           case "error": {
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
             break;
           }
+          default:
+            // 未处理的消息保留给后续消费器
+            this.pendingMessages.push(raw);
+            break;
         }
       };
 
       const onError = (err: Error) => {
-        releaseMessageConsumer();
+        cleanup();
         reject(new Error(`等待 session_created 失败: ${err.message}`));
+      };
+
+      const onClose = () => {
+        cleanup();
+        reject(new Error("等待 session_created 时连接已关闭"));
       };
 
       const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
       this.flushPendingMessages();
       ws.on("error", onError);
+      ws.on("close", onClose);
     });
   }
 
@@ -361,6 +385,12 @@ export class HandClient {
 
       const ws = this.ws;
 
+      const cleanup = () => {
+        releaseMessageConsumer();
+        ws.off("error", onError);
+        ws.off("close", onClose);
+      };
+
       const onMessage = (raw: string) => {
         let msg: ServerToHandMessage;
         try {
@@ -372,28 +402,40 @@ export class HandClient {
         switch (msg.type) {
           case "pty_session_created": {
             const created = msg as PtySessionCreated;
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             resolve(created.sessionId);
             break;
           }
+          case "connected":
+            // 忽略 connected 通知，继续等待
+            break;
           case "error": {
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
             break;
           }
+          default:
+            // 未处理的消息（如早到的 pty_output / pty_exit）必须保留给
+            // 后续的 runPtyPassthrough 消费，否则会被吞掉导致 Hand 卡死
+            this.pendingMessages.push(raw);
+            break;
         }
       };
 
       const onError = (err: Error) => {
-        releaseMessageConsumer();
+        cleanup();
         reject(new Error(`等待 pty_session_created 失败: ${err.message}`));
+      };
+
+      const onClose = () => {
+        cleanup();
+        reject(new Error("等待 pty_session_created 时连接已关闭"));
       };
 
       const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
       this.flushPendingMessages();
       ws.on("error", onError);
+      ws.on("close", onClose);
     });
   }
 
@@ -431,6 +473,12 @@ export class HandClient {
         } else if (this.interactiveOutput) {
           this.ui.printThought(chunk.text);
         }
+        break;
+      }
+
+      case "file_proxy_request": {
+        const proxyReq = msg as FileProxyRequest;
+        void this.handleFileProxyRequest(proxyReq);
         break;
       }
 
@@ -472,6 +520,38 @@ export class HandClient {
     }
 
     return false;
+  }
+
+  /**
+   * 从原始 JSON 中尝试识别并处理 file_proxy_request。
+   * 返回 true 表示已拦截，调用方不再分发。
+   */
+  private tryHandleFileProxyFromRaw(raw: string): boolean {
+    // 快速前缀检查，避免对每条消息都 JSON.parse
+    if (!raw.includes('"file_proxy_request"')) {
+      return false;
+    }
+    try {
+      const msg = JSON.parse(raw) as { type?: string };
+      if (msg.type !== "file_proxy_request") {
+        return false;
+      }
+      void this.handleFileProxyRequest(msg as FileProxyRequest);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // 处理文件代理请求并将结果发回 Server
+  private async handleFileProxyRequest(req: FileProxyRequest): Promise<void> {
+    const resp = await this.fileProxy.handle(req);
+    await this.writeJSON(resp).catch((writeErr: unknown) => {
+      log.error("发送 file_proxy_response 失败", {
+        reqId: req.reqId,
+        error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+      });
+    });
   }
 
   // 在后台执行工具调用并将结果发回 Server
@@ -563,7 +643,10 @@ export class HandClient {
       const isTTY = Boolean(stdin.isTTY);
       const previousRawMode = isTTY ? stdin.isRaw : false;
 
+      let stopSpinner: (() => void) | undefined;
+
       const cleanup = () => {
+        stopSpinner?.();
         releaseMessageConsumer();
         ws.off("error", onError);
         ws.off("close", onClose);
@@ -596,6 +679,14 @@ export class HandClient {
         }
 
         switch (msg.type) {
+          case "file_proxy_request": {
+            const proxyReq = msg as FileProxyRequest;
+            if (proxyReq.sessionId !== sessionId) {
+              break;
+            }
+            void this.handleFileProxyRequest(proxyReq);
+            break;
+          }
           case "tool_call": {
             const toolCall = msg as ToolCall;
             if (toolCall.sessionId !== sessionId) {
@@ -668,7 +759,35 @@ export class HandClient {
         finish(new Error("WebSocket 连接已关闭"));
       };
 
-      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      // 启动 spinner：在首次有效 PTY 输出到达前显示加载提示
+      const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+      let spinnerIndex = 0;
+      let spinnerActive = true;
+      const spinnerTimer = setInterval(() => {
+        if (!spinnerActive) return;
+        const frame = spinnerFrames[spinnerIndex % spinnerFrames.length];
+        stdout.write(`\r\x1b[36m${frame} 正在启动 Claude Code...\x1b[0m\x1b[K`);
+        spinnerIndex++;
+      }, 100);
+
+      stopSpinner = () => {
+        if (!spinnerActive) return;
+        spinnerActive = false;
+        clearInterval(spinnerTimer);
+        // 清除 spinner 行
+        stdout.write("\r\x1b[K");
+      };
+
+      // 包装 onMessage，在首次 pty_output 时关闭 spinner
+      const wrappedOnMessage = (raw: string) => {
+        // 快速前缀检测：如果是 pty_output 且 spinner 还在，先关闭
+        if (spinnerActive && raw.includes('"pty_output"')) {
+          stopSpinner();
+        }
+        onMessage(raw);
+      };
+
+      const releaseMessageConsumer = this.attachMessageConsumer(wrappedOnMessage);
       this.flushPendingMessages();
       ws.on("error", onError);
       ws.on("close", onClose);
@@ -711,6 +830,7 @@ export class HandClient {
   }
 
   private async resetExecutor(cwd: string): Promise<void> {
+    this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
     await this.resetExecutorWithConfig(cwd, undefined);
   }
 
@@ -769,6 +889,12 @@ export class HandClient {
 
       const ws = this.ws;
 
+      const cleanup = () => {
+        releaseMessageConsumer();
+        ws.off("error", onError);
+        ws.off("close", onClose);
+      };
+
       const onMessage = (raw: string) => {
         let msg: ServerToHandMessage;
         try {
@@ -783,28 +909,36 @@ export class HandClient {
             if (applied.sessionId !== sessionId) {
               break;
             }
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             resolve();
             break;
           }
           case "error": {
-            releaseMessageConsumer();
-            ws.off("error", onError);
+            cleanup();
             reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
             break;
           }
+          default:
+            // 未处理的消息保留给后续消费器
+            this.pendingMessages.push(raw);
+            break;
         }
       };
 
       const onError = (err: Error) => {
-        releaseMessageConsumer();
+        cleanup();
         reject(new Error(`等待 MCP catalog 应用失败: ${err.message}`));
+      };
+
+      const onClose = () => {
+        cleanup();
+        reject(new Error("等待 MCP catalog 应用时连接已关闭"));
       };
 
       const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
       this.flushPendingMessages();
       ws.on("error", onError);
+      ws.on("close", onClose);
     });
   }
 

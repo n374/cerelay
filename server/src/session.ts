@@ -401,7 +401,7 @@ export class BrainSession {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "Tool response ready",
+        permissionDecisionReason: "",
         additionalContext: renderToolResultForClaude(input.tool_name, result),
       },
     };
