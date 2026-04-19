@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { AxonServer } from "../src/server.js";
-import { HandClient } from "../../hand/src/client.js";
+import { CerelayServer } from "../src/server.js";
+import { CerelayClient } from "../../client/src/client.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
 function restoreEnvVar(name: string, value: string | undefined): void {
@@ -31,11 +31,11 @@ async function rmWithRetries(target: string, timeoutMs = 5_000): Promise<void> {
 }
 
 test(
-  "Hand↔Brain e2e with fake Claude executable keeps the session prompt path working",
+  "Client↔Server e2e with fake Claude executable keeps the session prompt path working",
   { concurrency: false, timeout: 15_000 },
   async (t) => {
-    const argsDir = await mkdtemp(path.join(tmpdir(), "axon-e2e-args-"));
-    const tempHome = await mkdtemp(path.join(tmpdir(), "axon-e2e-home-"));
+    const argsDir = await mkdtemp(path.join(tmpdir(), "cerelay-e2e-args-"));
+    const tempHome = await mkdtemp(path.join(tmpdir(), "cerelay-e2e-home-"));
     const argsFile = path.join(argsDir, "argv.jsonl");
     const stdinFile = path.join(argsDir, "stdin.jsonl");
 
@@ -63,7 +63,7 @@ test(
       await rmWithRetries(tempHome);
     });
 
-    const server = new AxonServer({
+    const server = new CerelayServer({
       model: "claude-test",
       port: 0,
       sessionCleanupIntervalMs: 5_000,
@@ -76,7 +76,7 @@ test(
 
     await server.start();
 
-    const client = new HandClient(
+    const client = new CerelayClient(
       `ws://127.0.0.1:${server.getListenPort()}/ws`,
       process.cwd(),
       { interactiveOutput: false }

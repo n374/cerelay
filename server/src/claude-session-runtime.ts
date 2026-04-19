@@ -32,7 +32,7 @@ export interface ClaudeSessionRuntime {
 export interface CreateClaudeSessionRuntimeOptions {
   sessionId: string;
   cwd: string;
-  handHomeDir?: string;
+  clientHomeDir?: string;
   projectSettingsLocalShadowPath?: string;
   /** FUSE 文件代理挂载点。设置后 bootstrap 从 FUSE 挂载而非宿主机 bind mount */
   fuseRootDir?: string;
@@ -53,8 +53,8 @@ async function createPassthroughRuntime(
   const runtimeRoot = getClaudeSessionRuntimeRoot(options.sessionId);
   await mkdir(runtimeRoot, { recursive: true });
   const fallbackCwd = existsSync(options.cwd) ? options.cwd : runtimeRoot;
-  const effectiveHome = options.handHomeDir && existsSync(options.handHomeDir)
-    ? options.handHomeDir
+  const effectiveHome = options.clientHomeDir && existsSync(options.clientHomeDir)
+    ? options.clientHomeDir
     : process.env.HOME;
 
   log.debug("使用直连 Claude runtime", {
@@ -85,12 +85,12 @@ async function createPassthroughRuntime(
 async function createMountNamespaceRuntime(
   options: CreateClaudeSessionRuntimeOptions
 ): Promise<ClaudeSessionRuntime> {
-  const runtimeParent = process.env.AXON_NAMESPACE_RUNTIME_ROOT?.trim() || "/opt/axon-runtime";
+  const runtimeParent = process.env.CERELAY_NAMESPACE_RUNTIME_ROOT?.trim() || "/opt/cerelay-runtime";
   const runtimeRoot = path.join(runtimeParent, sanitizeSessionId(options.sessionId));
   const scriptPath = path.join(runtimeRoot, "bootstrap.sh");
   const readyFile = path.join(runtimeRoot, "ready");
-  const handHomeDir = options.handHomeDir?.trim() || process.env.HOME || "/home/node";
-  const viewRoots = collectViewRoots(handHomeDir, options.cwd);
+  const clientHomeDir = options.clientHomeDir?.trim() || process.env.HOME || "/home/node";
+  const viewRoots = collectViewRoots(clientHomeDir, options.cwd);
 
   await mkdir(runtimeRoot, { recursive: true });
   await writeFile(scriptPath, renderNamespaceBootstrapScript(), "utf8");
@@ -102,15 +102,15 @@ async function createMountNamespaceRuntime(
     {
       env: {
         ...process.env,
-        AXON_RUNTIME_ROOT: runtimeRoot,
-        AXON_READY_FILE: readyFile,
-        AXON_HOME_DIR: handHomeDir,
-        AXON_WORK_DIR: options.cwd,
-        AXON_VIEW_ROOTS: viewRoots.join(":"),
-        AXON_SHARED_CLAUDE_DIR: process.env.AXON_SHARED_CLAUDE_DIR || "/home/node/.claude",
-        AXON_SHARED_CLAUDE_JSON: process.env.AXON_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
-        AXON_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
-        AXON_FUSE_ROOT: options.fuseRootDir || "",
+        CERELAY_RUNTIME_ROOT: runtimeRoot,
+        CERELAY_READY_FILE: readyFile,
+        CERELAY_HOME_DIR: clientHomeDir,
+        CERELAY_WORK_DIR: options.cwd,
+        CERELAY_VIEW_ROOTS: viewRoots.join(":"),
+        CERELAY_SHARED_CLAUDE_DIR: process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude",
+        CERELAY_SHARED_CLAUDE_JSON: process.env.CERELAY_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
+        CERELAY_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
+        CERELAY_FUSE_ROOT: options.fuseRootDir || "",
       },
       stdio: ["ignore", "ignore", "pipe"],
     }
@@ -145,7 +145,7 @@ async function createMountNamespaceRuntime(
     runtimeRoot,
     anchorPid: anchor.pid,
     cwd: options.cwd,
-    homeDir: handHomeDir,
+    homeDir: clientHomeDir,
     viewRoots,
   });
 
@@ -153,7 +153,7 @@ async function createMountNamespaceRuntime(
     cwd: options.cwd,
     env: {
       ...process.env,
-      HOME: handHomeDir,
+      HOME: clientHomeDir,
     },
     rootDir: runtimeRoot,
     spawnClaudeCodeProcess: (spawnOptions) => spawnClaudeInNamespace(anchor, spawnOptions, options.cwd),
@@ -186,14 +186,14 @@ function spawnClaudeInNamespace(
       "--",
       "/bin/sh",
       "-lc",
-      'cd "$AXON_TARGET_CWD" && exec "$0" "$@"',
+      'cd "$CERELAY_TARGET_CWD" && exec "$0" "$@"',
       options.command,
       ...options.args,
     ],
     {
       env: {
         ...options.env,
-        AXON_TARGET_CWD: targetCwd,
+        CERELAY_TARGET_CWD: targetCwd,
       },
       stdio: buildStdio(options.extraPipeCount),
       signal: options.signal,
@@ -210,7 +210,7 @@ function buildStdio(extraPipeCount: number | undefined): Array<"pipe"> {
 }
 
 function shouldUseMountNamespace(): boolean {
-  return process.env.AXON_ENABLE_MOUNT_NAMESPACE === "true";
+  return process.env.CERELAY_ENABLE_MOUNT_NAMESPACE === "true";
 }
 
 function collectViewRoots(...paths: string[]): string[] {
@@ -233,62 +233,62 @@ function renderNamespaceBootstrapScript(): string {
   return `#!/bin/sh
 set -eu
 
-echo "[bootstrap] start RUNTIME_ROOT=$AXON_RUNTIME_ROOT FUSE_ROOT=\${AXON_FUSE_ROOT:-none}" >&2
+echo "[bootstrap] start RUNTIME_ROOT=$CERELAY_RUNTIME_ROOT FUSE_ROOT=\${CERELAY_FUSE_ROOT:-none}" >&2
 
-mkdir -p "$AXON_RUNTIME_ROOT/views" "$AXON_RUNTIME_ROOT/staged"
+mkdir -p "$CERELAY_RUNTIME_ROOT/views" "$CERELAY_RUNTIME_ROOT/staged"
 
 echo "[bootstrap] staging shared claude" >&2
-if [ -d "$AXON_SHARED_CLAUDE_DIR" ]; then
-  mkdir -p "$AXON_RUNTIME_ROOT/staged/claude"
-  mount --bind "$AXON_SHARED_CLAUDE_DIR" "$AXON_RUNTIME_ROOT/staged/claude"
+if [ -d "$CERELAY_SHARED_CLAUDE_DIR" ]; then
+  mkdir -p "$CERELAY_RUNTIME_ROOT/staged/claude"
+  mount --bind "$CERELAY_SHARED_CLAUDE_DIR" "$CERELAY_RUNTIME_ROOT/staged/claude"
 fi
 
-if [ -f "$AXON_SHARED_CLAUDE_JSON" ]; then
-  : > "$AXON_RUNTIME_ROOT/staged/claude.json"
-  mount --bind "$AXON_SHARED_CLAUDE_JSON" "$AXON_RUNTIME_ROOT/staged/claude.json"
+if [ -f "$CERELAY_SHARED_CLAUDE_JSON" ]; then
+  : > "$CERELAY_RUNTIME_ROOT/staged/claude.json"
+  mount --bind "$CERELAY_SHARED_CLAUDE_JSON" "$CERELAY_RUNTIME_ROOT/staged/claude.json"
 fi
 
-echo "[bootstrap] mounting view roots: $AXON_VIEW_ROOTS" >&2
+echo "[bootstrap] mounting view roots: $CERELAY_VIEW_ROOTS" >&2
 IFS=':'
-for root_name in $AXON_VIEW_ROOTS; do
+for root_name in $CERELAY_VIEW_ROOTS; do
   [ -n "$root_name" ] || continue
-  mkdir -p "/$root_name" "$AXON_RUNTIME_ROOT/views/$root_name"
-  mount --bind "$AXON_RUNTIME_ROOT/views/$root_name" "/$root_name"
+  mkdir -p "/$root_name" "$CERELAY_RUNTIME_ROOT/views/$root_name"
+  mount --bind "$CERELAY_RUNTIME_ROOT/views/$root_name" "/$root_name"
 done
 unset IFS
 
-mkdir -p "$AXON_HOME_DIR" "$AXON_WORK_DIR"
+mkdir -p "$CERELAY_HOME_DIR" "$CERELAY_WORK_DIR"
 
-echo "[bootstrap] FUSE check: AXON_FUSE_ROOT=\${AXON_FUSE_ROOT:-}" >&2
+echo "[bootstrap] FUSE check: CERELAY_FUSE_ROOT=\${CERELAY_FUSE_ROOT:-}" >&2
 # ---- FUSE 文件代理模式 vs 宿主机 bind mount 模式 ----
-if [ -n "\${AXON_FUSE_ROOT:-}" ] && [ -d "$AXON_FUSE_ROOT/home-claude" ]; then
+if [ -n "\${CERELAY_FUSE_ROOT:-}" ] && [ -d "$CERELAY_FUSE_ROOT/home-claude" ]; then
   echo "[bootstrap] FUSE mode: binding home-claude" >&2
   # FUSE 模式：从 FUSE 挂载点绑定 ~/.claude/ 和 {cwd}/.claude/
-  mkdir -p "$AXON_HOME_DIR/.claude"
-  mount --bind "$AXON_FUSE_ROOT/home-claude" "$AXON_HOME_DIR/.claude"
+  mkdir -p "$CERELAY_HOME_DIR/.claude"
+  mount --bind "$CERELAY_FUSE_ROOT/home-claude" "$CERELAY_HOME_DIR/.claude"
 
   echo "[bootstrap] FUSE mode: checking home-claude-json" >&2
-  if [ -f "$AXON_FUSE_ROOT/home-claude-json" ]; then
-    mkdir -p "$(dirname "$AXON_HOME_DIR/.claude.json")"
-    : > "$AXON_HOME_DIR/.claude.json"
-    mount --bind "$AXON_FUSE_ROOT/home-claude-json" "$AXON_HOME_DIR/.claude.json"
+  if [ -f "$CERELAY_FUSE_ROOT/home-claude-json" ]; then
+    mkdir -p "$(dirname "$CERELAY_HOME_DIR/.claude.json")"
+    : > "$CERELAY_HOME_DIR/.claude.json"
+    mount --bind "$CERELAY_FUSE_ROOT/home-claude-json" "$CERELAY_HOME_DIR/.claude.json"
   fi
 
   echo "[bootstrap] FUSE mode: binding project-claude" >&2
-  mkdir -p "$AXON_WORK_DIR/.claude"
-  mount --bind "$AXON_FUSE_ROOT/project-claude" "$AXON_WORK_DIR/.claude"
+  mkdir -p "$CERELAY_WORK_DIR/.claude"
+  mount --bind "$CERELAY_FUSE_ROOT/project-claude" "$CERELAY_WORK_DIR/.claude"
 else
   echo "[bootstrap] legacy mode" >&2
   # 传统模式：从容器内宿主机 bind mount 挂载
-  if [ -d "$AXON_RUNTIME_ROOT/staged/claude" ]; then
-    mkdir -p "$AXON_HOME_DIR/.claude"
-    mount --bind "$AXON_RUNTIME_ROOT/staged/claude" "$AXON_HOME_DIR/.claude"
+  if [ -d "$CERELAY_RUNTIME_ROOT/staged/claude" ]; then
+    mkdir -p "$CERELAY_HOME_DIR/.claude"
+    mount --bind "$CERELAY_RUNTIME_ROOT/staged/claude" "$CERELAY_HOME_DIR/.claude"
   fi
 
-  if [ -f "$AXON_RUNTIME_ROOT/staged/claude.json" ]; then
-    mkdir -p "$(dirname "$AXON_HOME_DIR/.claude.json")"
-    : > "$AXON_HOME_DIR/.claude.json"
-    mount --bind "$AXON_RUNTIME_ROOT/staged/claude.json" "$AXON_HOME_DIR/.claude.json"
+  if [ -f "$CERELAY_RUNTIME_ROOT/staged/claude.json" ]; then
+    mkdir -p "$(dirname "$CERELAY_HOME_DIR/.claude.json")"
+    : > "$CERELAY_HOME_DIR/.claude.json"
+    mount --bind "$CERELAY_RUNTIME_ROOT/staged/claude.json" "$CERELAY_HOME_DIR/.claude.json"
   fi
 fi
 
@@ -296,16 +296,16 @@ echo "[bootstrap] hook injection check" >&2
 # Hook injection overlay
 # FUSE 模式下 settings.local.json 由 FUSE daemon 通过 shadow file 机制直接提供，
 # 无需在只读 FUSE 上创建文件。仅传统模式需要 bind mount。
-if [ -z "\${AXON_FUSE_ROOT:-}" ] && [ -n "\${AXON_PROJECT_SETTINGS_SOURCE:-}" ] && [ -f "$AXON_PROJECT_SETTINGS_SOURCE" ]; then
+if [ -z "\${CERELAY_FUSE_ROOT:-}" ] && [ -n "\${CERELAY_PROJECT_SETTINGS_SOURCE:-}" ] && [ -f "$CERELAY_PROJECT_SETTINGS_SOURCE" ]; then
   echo "[bootstrap] hook: legacy mode bind mount" >&2
-  mkdir -p "$AXON_WORK_DIR/.claude"
-  : > "$AXON_WORK_DIR/.claude/settings.local.json"
-  mount --bind "$AXON_PROJECT_SETTINGS_SOURCE" "$AXON_WORK_DIR/.claude/settings.local.json"
+  mkdir -p "$CERELAY_WORK_DIR/.claude"
+  : > "$CERELAY_WORK_DIR/.claude/settings.local.json"
+  mount --bind "$CERELAY_PROJECT_SETTINGS_SOURCE" "$CERELAY_WORK_DIR/.claude/settings.local.json"
   echo "[bootstrap] hook: done" >&2
 fi
 
 echo "[bootstrap] writing ready file" >&2
-touch "$AXON_READY_FILE"
+touch "$CERELAY_READY_FILE"
 exec sleep infinity
 `;
 }
@@ -344,9 +344,9 @@ function sanitizeSessionId(sessionId: string): string {
 
 export function getClaudeSessionRuntimeRoot(sessionId: string): string {
   if (shouldUseMountNamespace() && process.platform === "linux") {
-    const runtimeParent = process.env.AXON_NAMESPACE_RUNTIME_ROOT?.trim() || "/opt/axon-runtime";
+    const runtimeParent = process.env.CERELAY_NAMESPACE_RUNTIME_ROOT?.trim() || "/opt/cerelay-runtime";
     return path.join(runtimeParent, sanitizeSessionId(sessionId));
   }
 
-  return path.join(tmpdir(), `axon-claude-${sanitizeSessionId(sessionId)}`);
+  return path.join(tmpdir(), `cerelay-claude-${sanitizeSessionId(sessionId)}`);
 }

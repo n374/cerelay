@@ -5,20 +5,20 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const APP_PATH = "/Users/n374/Documents/Code/axon/web/public/app.js";
-const STORAGE_KEY = "axon-web-config";
-const SESSION_STORAGE_KEY = "axon-web-session";
+const STORAGE_KEY = "cerelay-web-config";
+const SESSION_STORAGE_KEY = "cerelay-web-session";
 
 test("web app restores a saved session and falls back to create_session on restore failure", async () => {
   const runtime = await createAppRuntime({
     storage: {
       [STORAGE_KEY]: JSON.stringify({
-        brainUrl: "ws://app.test/ws",
+        serverUrl: "ws://app.test/ws",
         cwd: "/workspace",
         model: "claude-test",
       }),
       [SESSION_STORAGE_KEY]: JSON.stringify({
         sessionId: "sess-old",
-        brainUrl: "ws://app.test/ws",
+        serverUrl: "ws://app.test/ws",
         cwd: "/workspace",
         model: "claude-test",
       }),
@@ -107,7 +107,7 @@ test("web app sends prompt once per turn and re-enables input after session_end"
   assert.equal(runtime.dom.btnSend.disabled, false);
 });
 
-test("web app saves and pushes configurable Hand tool routing from settings", async () => {
+test("web app saves and pushes configurable Client tool routing from settings", async () => {
   const fetchCalls: Array<{
     url: string;
     init?: RequestInit;
@@ -120,8 +120,8 @@ test("web app saves and pushes configurable Hand tool routing from settings", as
         status: 200,
         json: async () => ({
           builtinToolNames: ["Read", "Bash"],
-          handToolNames: ["WebFetch", "WebSearch"],
-          handToolPrefixes: ["mcp__", "connector__"],
+          clientToolNames: ["WebFetch", "WebSearch"],
+          clientToolPrefixes: ["mcp__", "connector__"],
         }),
       };
     },
@@ -129,12 +129,12 @@ test("web app saves and pushes configurable Hand tool routing from settings", as
   runtime.document.fireDOMContentLoaded();
   const hooks = runtime.hooks();
 
-  runtime.dom.brainUrlInput.value = "ws://app.test/ws";
+  runtime.dom.serverUrlInput.value = "ws://app.test/ws";
   runtime.dom.cwdInput.value = "/workspace";
   runtime.dom.modelInput.value = "claude-test";
   runtime.dom.adminTokenInput.value = "axon_admin";
-  runtime.dom.handToolNamesInput.value = "WebFetch\nWebSearch";
-  runtime.dom.handToolPrefixesInput.value = "mcp__\nconnector__";
+  runtime.dom.clientToolNamesInput.value = "WebFetch\nWebSearch";
+  runtime.dom.clientToolPrefixesInput.value = "mcp__\nconnector__";
 
   await hooks.onConnectClick();
 
@@ -143,13 +143,13 @@ test("web app saves and pushes configurable Hand tool routing from settings", as
   assert.equal(fetchCalls[0]?.init?.method, "PUT");
   assert.equal((fetchCalls[0]?.init?.headers ?? {})["Authorization"], "Bearer axon_admin");
   assert.deepEqual(JSON.parse(String(fetchCalls[0]?.init?.body)), {
-    handToolNames: ["WebFetch", "WebSearch"],
-    handToolPrefixes: ["mcp__", "connector__"],
+    clientToolNames: ["WebFetch", "WebSearch"],
+    clientToolPrefixes: ["mcp__", "connector__"],
   });
 
   const savedConfig = JSON.parse(runtime.localStorage.getItem(STORAGE_KEY) ?? "{}");
-  assert.deepEqual(savedConfig.handToolNames, ["WebFetch", "WebSearch"]);
-  assert.deepEqual(savedConfig.handToolPrefixes, ["mcp__", "connector__"]);
+  assert.deepEqual(savedConfig.clientToolNames, ["WebFetch", "WebSearch"]);
+  assert.deepEqual(savedConfig.clientToolPrefixes, ["mcp__", "connector__"]);
 
   const ws = runtime.lastSocket();
   assert.equal(ws?.url, "ws://app.test/ws");
@@ -215,7 +215,7 @@ async function createAppRuntime(
   }
 
   const window = {
-    __AXON_WEB_ENABLE_TEST_HOOKS__: true,
+    __CERELAY_WEB_ENABLE_TEST_HOOKS__: true,
     setTimeout: (fn: () => void) => {
       timerId += 1;
       timers.set(timerId, fn);
@@ -255,17 +255,17 @@ async function createAppRuntime(
       messages: dom.messages,
       toolCalls: dom["tool-calls"],
       modal: dom["settings-modal"],
-      brainUrlInput: dom["brain-url"],
-      cwdInput: dom["brain-cwd"],
-      modelInput: dom["brain-model"],
+      serverUrlInput: dom["server-url"],
+      cwdInput: dom["server-cwd"],
+      modelInput: dom["server-model"],
       adminTokenInput: dom["admin-token"],
-      handToolNamesInput: dom["hand-tool-names"],
-      handToolPrefixesInput: dom["hand-tool-prefixes"],
+      clientToolNamesInput: dom["client-tool-names"],
+      clientToolPrefixesInput: dom["client-tool-prefixes"],
       btnConnect: dom["btn-connect"],
       btnCancelSettings: dom["btn-cancel-settings"],
     },
     FakeWebSocket,
-    hooks: () => (window as { __AXON_WEB_TEST_HOOKS__?: Record<string, unknown> }).__AXON_WEB_TEST_HOOKS__ as Record<string, any>,
+    hooks: () => (window as { __CERELAY_WEB_TEST_HOOKS__?: Record<string, unknown> }).__CERELAY_WEB_TEST_HOOKS__ as Record<string, any>,
     lastSocket: () => FakeWebSocket.instances.at(-1),
     runReconnectTimer: () => {
       const pending = timers.entries().next();
@@ -411,12 +411,12 @@ class FakeDocument {
       "messages",
       "tool-calls",
       "settings-modal",
-      "brain-url",
-      "brain-cwd",
-      "brain-model",
+      "server-url",
+      "server-cwd",
+      "server-model",
       "admin-token",
-      "hand-tool-names",
-      "hand-tool-prefixes",
+      "client-tool-names",
+      "client-tool-prefixes",
       "btn-connect",
       "btn-cancel-settings",
     ]) {

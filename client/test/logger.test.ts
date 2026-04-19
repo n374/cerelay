@@ -6,8 +6,8 @@ import path from "node:path";
 import { configureLogger, createLogger } from "../src/logger.js";
 
 test("logger writes plain-text logs to the configured file", async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "axon-hand-log-test-"));
-  const logPath = path.join(dir, "hand.log");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cerelay-client-log-test-"));
+  const logPath = path.join(dir, "client.log");
   t.after(async () => {
     configureLogger({ filePath: null, minLevel: "info" });
     await rm(dir, { recursive: true, force: true });

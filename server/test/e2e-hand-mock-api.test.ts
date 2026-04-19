@@ -4,9 +4,9 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { AxonServer } from "../src/server.js";
+import { CerelayServer } from "../src/server.js";
 import { resolveClaudeCodeExecutable } from "../src/session.js";
-import { HandClient } from "../../hand/src/client.js";
+import { CerelayClient } from "../../client/src/client.js";
 import {
   startMockClaudeApiServer,
   type MockClaudeApiHandle,
@@ -37,7 +37,7 @@ async function rmWithRetries(target: string, timeoutMs = 5_000): Promise<void> {
 }
 
 interface E2eRunResult {
-  client: HandClient;
+  client: CerelayClient;
   handCwd: string;
   mockApi: MockClaudeApiHandle;
   textChunks: string[];
@@ -95,8 +95,8 @@ async function runMockClaudeE2e(
     restoreEnvVar("CLAUDE_CODE_EXECUTABLE", originalExecutable);
   });
 
-  const handCwd = await mkdtemp(path.join(tmpdir(), "axon-hand-cwd-"));
-  const tempHome = await mkdtemp(path.join(tmpdir(), "axon-hand-home-"));
+  const handCwd = await mkdtemp(path.join(tmpdir(), "cerelay-client-cwd-"));
+  const tempHome = await mkdtemp(path.join(tmpdir(), "cerelay-client-home-"));
   const originalHome = process.env.HOME;
   process.env.HOME = tempHome;
 
@@ -108,7 +108,7 @@ async function runMockClaudeE2e(
     await rmWithRetries(tempHome);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 5_000,
@@ -120,7 +120,7 @@ async function runMockClaudeE2e(
 
   await server.start();
 
-  const client = new HandClient(`ws://127.0.0.1:${server.getListenPort()}/ws`, handCwd, {
+  const client = new CerelayClient(`ws://127.0.0.1:${server.getListenPort()}/ws`, handCwd, {
     interactiveOutput: false,
   });
   t.after(() => {
@@ -197,8 +197,8 @@ test(
       "pwd stdout should equal the Hand cwd, proving the command executed on Hand instead of Brain"
     );
     assert.ok(
-      !bashStdout?.includes("axon-claude-"),
-      `pwd stdout should not point at the Brain Claude injection workspace, actual: ${bashStdout}`
+      !bashStdout?.includes("cerelay-claude-"),
+      `pwd stdout should not point at the Server Claude injection workspace, actual: ${bashStdout}`
     );
     assert.equal(
       observedToolResult,
@@ -251,8 +251,8 @@ test(
       restoreEnvVar("CLAUDE_CODE_EXECUTABLE", originalExecutable);
     });
 
-    const handCwd = await mkdtemp(path.join(tmpdir(), "axon-hand-cwd-"));
-    const tempHome = await mkdtemp(path.join(tmpdir(), "axon-hand-home-"));
+    const handCwd = await mkdtemp(path.join(tmpdir(), "cerelay-client-cwd-"));
+    const tempHome = await mkdtemp(path.join(tmpdir(), "cerelay-client-home-"));
     const originalHome = process.env.HOME;
     process.env.HOME = tempHome;
     t.after(() => {
@@ -263,7 +263,7 @@ test(
       await rmWithRetries(tempHome);
     });
 
-    const server = new AxonServer({
+    const server = new CerelayServer({
       model: "claude-sonnet-4-20250514",
       port: 0,
       sessionCleanupIntervalMs: 5_000,
@@ -274,7 +274,7 @@ test(
     });
     await server.start();
 
-    const client = new HandClient(`ws://127.0.0.1:${server.getListenPort()}/ws`, handCwd, {
+    const client = new CerelayClient(`ws://127.0.0.1:${server.getListenPort()}/ws`, handCwd, {
       interactiveOutput: false,
     });
     t.after(() => {

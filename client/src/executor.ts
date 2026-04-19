@@ -26,7 +26,7 @@ import type {
 
 export { ToolError } from "./tool-error.js";
 
-const log = createLogger("hand-executor");
+const log = createLogger("executor");
 
 // 工具执行结果联合类型
 export type ToolOutput =

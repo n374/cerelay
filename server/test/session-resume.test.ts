@@ -1,7 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
-import { AxonServer } from "../src/server.js";
+import { CerelayServer } from "../src/server.js";
 
 interface JsonMessage {
   type?: string;
@@ -11,7 +11,7 @@ interface JsonMessage {
 }
 
 test("idle session can be restored after reconnect", async (t) => {
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
@@ -54,7 +54,7 @@ test("idle session can be restored after reconnect", async (t) => {
 });
 
 test("detached idle session expires after resume window", async (t) => {
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 10,
@@ -150,7 +150,7 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-function registerServerCleanup(t: TestContext, server: AxonServer): void {
+function registerServerCleanup(t: TestContext, server: CerelayServer): void {
   t.after(async () => {
     await server.shutdown();
   });

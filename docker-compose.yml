@@ -1,17 +1,17 @@
 # ============================================================
-# Axon Brain — docker-compose 配置
+# Cerelay Server — docker-compose 配置
 # 使用方式：
 #   1. 默认复用当前 shell / Claude Code 注入的环境变量
 #   2. docker compose up -d
 # ============================================================
 
 services:
-  axon-brain:
+  cerelay-server:
     build:
       context: .
       dockerfile: Dockerfile
-    image: axon-brain:latest
-    container_name: axon-brain
+    image: cerelay-server:latest
+    container_name: cerelay-server
 
     # 环境变量（通过 .env 文件或 -e 参数传入）
     environment:
@@ -20,7 +20,7 @@ services:
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL-}
       # 可选：覆盖端口（容器内端口，与 ports 映射对应）
-      - PORT=${BRAIN_PORT:-8765}
+      - PORT=${SERVER_PORT:-8765}
       # 可选：覆盖模型
       - MODEL=${MODEL:-claude-sonnet-4-20250514}
       # 可选：覆盖日志级别（debug/info/warn/error）
@@ -31,15 +31,15 @@ services:
       - CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE:-/usr/local/bin/claude}
       # 可选：传入 claude CLI 额外配置（JSON 字符串）
       - CLAUDE_CONFIG=${CLAUDE_CONFIG-}
-      # 可选：Hand 连接共享密钥（未设置则不校验）
-      - AXON_KEY=${AXON_KEY-}
+      # 可选：Client 连接共享密钥（未设置则不校验）
+      - CERELAY_KEY=${CERELAY_KEY-}
       # Claude session 运行在独立 mount namespace 中
-      - AXON_ENABLE_MOUNT_NAMESPACE=${AXON_ENABLE_MOUNT_NAMESPACE:-true}
-      - AXON_NAMESPACE_RUNTIME_ROOT=${AXON_NAMESPACE_RUNTIME_ROOT:-/opt/axon-runtime}
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=${CERELAY_ENABLE_MOUNT_NAMESPACE:-true}
+      - CERELAY_NAMESPACE_RUNTIME_ROOT=${CERELAY_NAMESPACE_RUNTIME_ROOT:-/opt/cerelay-runtime}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
-      - "${BRAIN_HOST_PORT:-8765}:${BRAIN_PORT:-8765}"
+      - "${SERVER_HOST_PORT:-8765}:${SERVER_PORT:-8765}"
 
     # Claude Code 登录态：挂载宿主机凭证文件（只读）
     # 也可通过 CLAUDE_CREDENTIALS 环境变量传入 JSON 内容代替挂载
@@ -52,7 +52,7 @@ services:
     cap_add:
       - SYS_ADMIN
 
-    # FUSE 设备：供 Hand 侧文件代理使用
+    # FUSE 设备：供 Client 侧文件代理使用
     devices:
       - /dev/fuse:/dev/fuse
 

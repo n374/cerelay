@@ -1,5 +1,5 @@
 // ============================================================
-// Axon Server 入口
+// Cerelay Server 入口
 // 支持的命令行参数：
 //   --port <n>       监听端口（默认 8765）
 //   --model <name>   默认 Claude 模型
@@ -9,7 +9,7 @@
 // ============================================================
 
 import process from "node:process";
-import { AxonServer } from "./server.js";
+import { CerelayServer } from "./server.js";
 import { configureLogger, createLogger } from "./logger.js";
 
 const DEFAULT_PORT = 8765;
@@ -26,13 +26,13 @@ async function main(): Promise<void> {
 
   const log = createLogger("main");
 
-  const axonKey = process.env.AXON_KEY?.trim() || undefined;
+  const cerelayKey = process.env.CERELAY_KEY?.trim() || undefined;
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     port: opts.port,
     model: opts.model,
     authEnabled: opts.auth,
-    axonKey,
+    cerelayKey,
   });
 
   const shutdown = async (): Promise<void> => {
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
 
   await server.start();
 
-  log.info("Axon Server 已启动", {
+  log.info("Cerelay Server 已启动", {
     port: opts.port,
     model: opts.model,
     auth: opts.auth,
@@ -120,6 +120,6 @@ function parseArgs(argv: string[]): ParsedOptions {
 }
 
 main().catch((error) => {
-  console.error("[axon-server] fatal:", error);
+  console.error("[cerelay-server] fatal:", error);
   process.exit(1);
 });

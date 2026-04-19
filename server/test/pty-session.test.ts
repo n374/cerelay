@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import WebSocket from "ws";
-import { AxonServer } from "../src/server.js";
+import { CerelayServer } from "../src/server.js";
 import { getClaudeSessionRuntimeRoot } from "../src/claude-session-runtime.js";
 
 interface JsonMessage {
@@ -22,13 +22,13 @@ function restoreEnvVar(name: string, value: string | undefined): void {
 }
 
 test("pty session can stream terminal bytes through WebSocket", async (t) => {
-  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
-  process.env.AXON_PTY_COMMAND = "cat";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  process.env.CERELAY_PTY_COMMAND = "cat";
   t.after(() => {
-    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
@@ -85,13 +85,13 @@ test("pty session can stream terminal bytes through WebSocket", async (t) => {
 });
 
 test("pty session forwards process stdout as pty_output without user input", async (t) => {
-  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
-  process.env.AXON_PTY_COMMAND = "echo PTY_AUTOTEST_OUTPUT";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  process.env.CERELAY_PTY_COMMAND = "echo PTY_AUTOTEST_OUTPUT";
   t.after(() => {
-    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
@@ -126,16 +126,16 @@ test("pty session forwards process stdout as pty_output without user input", asy
 });
 
 test("create_pty_session keeps injected hook files in the PTY runtime root", async (t) => {
-  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
-  const originalMountNamespace = process.env.AXON_ENABLE_MOUNT_NAMESPACE;
-  process.env.AXON_PTY_COMMAND = "cat";
-  process.env.AXON_ENABLE_MOUNT_NAMESPACE = "false";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  const originalMountNamespace = process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
+  process.env.CERELAY_PTY_COMMAND = "cat";
+  process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = "false";
   t.after(() => {
-    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
-    restoreEnvVar("AXON_ENABLE_MOUNT_NAMESPACE", originalMountNamespace);
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
+    restoreEnvVar("CERELAY_ENABLE_MOUNT_NAMESPACE", originalMountNamespace);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
@@ -171,7 +171,7 @@ test("create_pty_session keeps injected hook files in the PTY runtime root", asy
   const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
 
   await access(path.join(runtimeRoot, "settings.local.json"));
-  await access(path.join(runtimeRoot, "hooks", "axon-pretooluse.mjs"));
+  await access(path.join(runtimeRoot, "hooks", "cerelay-pretooluse.mjs"));
   const settings = JSON.parse(
     await readFile(path.join(runtimeRoot, "settings.local.json"), "utf8")
   ) as {
@@ -186,7 +186,7 @@ test("create_pty_session keeps injected hook files in the PTY runtime root", asy
   assert.equal(Array.isArray(settings.hooks?.PreToolUse), true);
   assert.equal(settings.hooks?.PreToolUse?.[0]?.matcher, ".*");
   assert.equal(settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.type, "command");
-  assert.match(settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? "", /axon-pretooluse\.mjs/);
+  assert.match(settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? "", /cerelay-pretooluse\.mjs/);
 
   ws.send(JSON.stringify({
     type: "close_session",
@@ -195,13 +195,13 @@ test("create_pty_session keeps injected hook files in the PTY runtime root", asy
 });
 
 test("pty session delivers pty_exit after short-lived process terminates", async (t) => {
-  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
-  process.env.AXON_PTY_COMMAND = "true";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  process.env.CERELAY_PTY_COMMAND = "true";
   t.after(() => {
-    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,
@@ -233,13 +233,13 @@ test("pty session delivers pty_exit after short-lived process terminates", async
 });
 
 test("close_session terminates a running pty session", async (t) => {
-  const originalPtyCommand = process.env.AXON_PTY_COMMAND;
-  process.env.AXON_PTY_COMMAND = "sleep 60";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  process.env.CERELAY_PTY_COMMAND = "sleep 60";
   t.after(() => {
-    restoreEnvVar("AXON_PTY_COMMAND", originalPtyCommand);
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
   });
 
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     sessionCleanupIntervalMs: 20,

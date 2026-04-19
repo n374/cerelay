@@ -1,8 +1,8 @@
 // ============================================================
-// Axon Web Server
+// Cerelay Web Server
 // 1. 静态文件服务：提供 Web UI（public/ 目录）
-// 2. WebSocket 代理：浏览器 ↔ Web Server ↔ Brain Server
-//    浏览器不直接连 Brain，所有 WS 流量通过本地 Web Server 中转
+// 2. WebSocket 代理：浏览器 ↔ Web Server ↔ Server
+//    浏览器不直接连 Server，所有 WS 流量通过本地 Web Server 中转
 //    （未来可在此层加认证/TLS终止）
 // ============================================================
 
@@ -34,13 +34,13 @@ const SECURITY_HEADERS: Record<string, string> = {
 
 interface WebServerOptions {
   port: number;
-  /** Brain 服务器地址，例如 localhost:8765 */
-  brainAddress: string;
+  /** Cerelay Server 地址，例如 localhost:8765 */
+  serverAddress: string;
 }
 
 export class WebServer {
   private readonly port: number;
-  private readonly brainAddress: string;
+  private readonly serverAddress: string;
   private readonly publicDir: string;
   private readonly publicDirPrefix: string;
 
@@ -53,7 +53,7 @@ export class WebServer {
 
   constructor(options: WebServerOptions) {
     this.port = options.port;
-    this.brainAddress = options.brainAddress;
+    this.serverAddress = options.serverAddress;
 
     // 静态文件目录：同级的 public/（开发时），或编译产物的 ../public/（生产时）
     const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -184,48 +184,48 @@ export class WebServer {
   }
 
   // ============================================================
-  // 浏览器 ↔ Brain 代理
-  // 每个浏览器 WS 连接都建立一个到 Brain 的 WS 连接
+  // 浏览器 ↔ Server 代理
+  // 每个浏览器 WS 连接都建立一个到 Server 的 WS 连接
   // ============================================================
 
   private async handleBrowserConnection(browserSocket: WebSocket, _req: IncomingMessage): Promise<void> {
-    const brainURL = `ws://${this.brainAddress}/ws`;
+    const serverURL = `ws://${this.serverAddress}/ws`;
     const pendingBrowserMessages: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
 
-    // 建立到 Brain 的连接
-    const brainSocket = new WebSocket(brainURL);
+    // 建立到 Server 的连接
+    const serverSocket = new WebSocket(serverURL);
 
-    // 双向代理：浏览器 → Brain
+    // 双向代理：浏览器 → Server
     browserSocket.on("message", (data, isBinary) => {
-      if (brainSocket.readyState === WebSocket.OPEN) {
-        brainSocket.send(data, { binary: isBinary });
+      if (serverSocket.readyState === WebSocket.OPEN) {
+        serverSocket.send(data, { binary: isBinary });
         return;
       }
 
-      if (brainSocket.readyState === WebSocket.CONNECTING) {
+      if (serverSocket.readyState === WebSocket.CONNECTING) {
         pendingBrowserMessages.push({ data, isBinary });
       }
     });
 
     await new Promise<void>((resolve, reject) => {
-      brainSocket.once("open", resolve);
-      brainSocket.once("error", reject);
+      serverSocket.once("open", resolve);
+      serverSocket.once("error", reject);
     }).catch((err: Error) => {
-      console.error(`[axon-web] 连接 Brain 失败: ${err.message}`);
-      browserSocket.close(1011, "Brain unavailable");
+      console.error(`[cerelay-web] 连接 Server 失败: ${err.message}`);
+      browserSocket.close(1011, "Server unavailable");
     });
 
-    if (brainSocket.readyState !== WebSocket.OPEN) {
+    if (serverSocket.readyState !== WebSocket.OPEN) {
       return;
     }
 
     for (const pending of pendingBrowserMessages) {
-      brainSocket.send(pending.data, { binary: pending.isBinary });
+      serverSocket.send(pending.data, { binary: pending.isBinary });
     }
     pendingBrowserMessages.length = 0;
 
-    // 双向代理：Brain → 浏览器
-    brainSocket.on("message", (data, isBinary) => {
+    // 双向代理：Server → 浏览器
+    serverSocket.on("message", (data, isBinary) => {
       if (browserSocket.readyState === WebSocket.OPEN) {
         browserSocket.send(data, { binary: isBinary });
       }
@@ -233,12 +233,12 @@ export class WebServer {
 
     // 任一侧断开时，关闭另一侧
     browserSocket.on("close", () => {
-      if (brainSocket.readyState === WebSocket.OPEN || brainSocket.readyState === WebSocket.CONNECTING) {
-        brainSocket.close();
+      if (serverSocket.readyState === WebSocket.OPEN || serverSocket.readyState === WebSocket.CONNECTING) {
+        serverSocket.close();
       }
     });
 
-    brainSocket.on("close", () => {
+    serverSocket.on("close", () => {
       if (browserSocket.readyState === WebSocket.OPEN) {
         browserSocket.close();
       }
@@ -246,12 +246,12 @@ export class WebServer {
 
     // 错误处理
     browserSocket.on("error", (err) => {
-      console.error("[axon-web] 浏览器 WS 错误:", err);
-      brainSocket.close();
+      console.error("[cerelay-web] 浏览器 WS 错误:", err);
+      serverSocket.close();
     });
 
-    brainSocket.on("error", (err) => {
-      console.error("[axon-web] Brain WS 错误:", err);
+    serverSocket.on("error", (err) => {
+      console.error("[cerelay-web] Server WS 错误:", err);
       browserSocket.close();
     });
   }

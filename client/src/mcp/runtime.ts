@@ -9,7 +9,7 @@ import { ToolError } from "../tool-error.js";
 import { createLogger } from "../logger.js";
 import type { McpServerCatalogEntry, McpServerConfig, McpToolDescriptor } from "../protocol.js";
 
-const log = createLogger("hand-mcp");
+const log = createLogger("mcp");
 
 interface ClientHandle {
   client: Client;
@@ -166,7 +166,7 @@ export class McpRuntime {
     }
 
     const client = new Client({
-      name: "axon-hand",
+      name: "cerelay-client",
       version: "0.1.0",
     });
     const transport = createTransport(config, this.cwd);
@@ -242,7 +242,7 @@ function resolveServerConfigs(entries: Record<string, McpServerConfig>): Record<
   for (const [serverName, config] of Object.entries(entries)) {
     resolved[serverName] = resolveConfigInterpolation(config);
   }
-  log.debug("已加载 Brain 下发的 MCP 配置", {
+  log.debug("已加载 Server 下发的 MCP 配置", {
     serverCount: Object.keys(resolved).length,
     servers: Object.keys(resolved),
   });

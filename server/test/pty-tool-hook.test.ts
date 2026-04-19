@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ClaudePtySession } from "../src/pty-session.js";
 
-test("ClaudePtySession relays PreToolUse through Hand and rewrites Brain-local paths", async (t) => {
+test("ClaudePtySession relays PreToolUse through Client and rewrites Server-local paths", async (t) => {
   const sent: Array<{ type: string; requestId: string; toolName: string; input?: unknown }> = [];
   let session!: ClaudePtySession;
 
@@ -10,14 +10,14 @@ test("ClaudePtySession relays PreToolUse through Hand and rewrites Brain-local p
     id: "pty-hook-test",
     cwd: "/Users/n374/Documents/Code/axon",
     runtime: {
-      cwd: "/tmp/axon-claude-pty-hook-test",
+      cwd: "/tmp/cerelay-claude-pty-hook-test",
       env: {
         HOME: "/home/node",
       },
-      rootDir: "/tmp/axon-claude-pty-hook-test-root",
+      rootDir: "/tmp/cerelay-claude-pty-hook-test-root",
       cleanup: async () => {},
     },
-    handHomeDir: "/Users/n374",
+    clientHomeDir: "/Users/n374",
     transport: {
       sendOutput: async () => {},
       sendExit: async () => {},
@@ -56,7 +56,7 @@ test("ClaudePtySession relays PreToolUse through Hand and rewrites Brain-local p
     tool_name: "Bash",
     tool_use_id: "toolu_pty_1",
     tool_input: {
-      command: "cd /tmp/axon-claude-pty-hook-test && cat /home/node/.claude.json && pwd",
+      command: "cd /tmp/cerelay-claude-pty-hook-test && cat /home/node/.claude.json && pwd",
     },
   });
 

@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
-import { HandRegistry } from "../src/hand-registry.js";
+import { ClientRegistry } from "../src/client-registry.js";
 import { StatsCollector } from "../src/stats.js";
 import { ToolRelay } from "../src/relay.js";
 
-test("HandRegistry tracks hands, bindings, and stats", async () => {
-  const registry = new HandRegistry();
+test("ClientRegistry tracks clients, bindings, and stats", async () => {
+  const registry = new ClientRegistry();
   const socket = createMockSocket();
 
   registry.register("hand-1", socket, "token-1", "127.0.0.1");
@@ -27,13 +27,13 @@ test("HandRegistry tracks hands, bindings, and stats", async () => {
   assert.equal(registry.count(), 0);
 });
 
-test("HandRegistry rejects missing or closed sockets", async () => {
-  const registry = new HandRegistry();
+test("ClientRegistry rejects missing or closed sockets", async () => {
+  const registry = new ClientRegistry();
   const closedSocket = createMockSocket(WebSocket.CLOSED);
   registry.register("hand-closed", closedSocket, "token", "127.0.0.1");
 
-  await assert.rejects(() => registry.sendTo("missing", {}), /Hand 不存在/);
-  await assert.rejects(() => registry.sendTo("hand-closed", {}), /Hand 连接已关闭/);
+  await assert.rejects(() => registry.sendTo("missing", {}), /Client 不存在/);
+  await assert.rejects(() => registry.sendTo("hand-closed", {}), /Client 连接已关闭/);
 });
 
 test("StatsCollector aggregates counters", () => {

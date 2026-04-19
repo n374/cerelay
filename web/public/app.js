@@ -1,15 +1,15 @@
 // ============================================================
-// Axon Web UI — 浏览器端 JavaScript
-// 通过 WebSocket 连接到 Axon Web Server（代理到 Brain）
+// Cerelay Web UI — 浏览器端 JavaScript
+// 通过 WebSocket 连接到 Cerelay Web Server（代理到 Server）
 // 实现：会话管理、流式消息展示、工具调用状态跟踪
 // ============================================================
 
 /* ---- 配置默认值 ---- */
-const DEFAULT_BRAIN_URL = `ws://${location.host}/ws`;
+const DEFAULT_SERVER_URL = `ws://${location.host}/ws`;
 const DEFAULT_CWD = "/";
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
-const STORAGE_KEY = "axon-web-config";
-const SESSION_STORAGE_KEY = "axon-web-session";
+const STORAGE_KEY = "cerelay-web-config";
+const SESSION_STORAGE_KEY = "cerelay-web-session";
 
 // ============================================================
 // 状态
@@ -20,12 +20,12 @@ const state = {
   sessionId: /** @type {string|null} */ (null),
   resumableSessionId: /** @type {string|null} */ (null),
   restorePending: false,
-  brainUrl: DEFAULT_BRAIN_URL,
+  serverUrl: DEFAULT_SERVER_URL,
   cwd: DEFAULT_CWD,
   model: DEFAULT_MODEL,
   adminToken: "",
-  handToolNames: [],
-  handToolPrefixes: [],
+  clientToolNames: [],
+  clientToolPrefixes: [],
   isWaiting: false, // 等待 session_end
   shouldReconnect: false,
   reconnectAttempts: 0,
@@ -53,12 +53,12 @@ const dom = {
   messages: /** @type {HTMLElement} */ (document.getElementById("messages")),
   toolCalls: /** @type {HTMLElement} */ (document.getElementById("tool-calls")),
   modal: /** @type {HTMLElement} */ (document.getElementById("settings-modal")),
-  brainUrlInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-url")),
-  cwdInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-cwd")),
-  modelInput: /** @type {HTMLInputElement} */ (document.getElementById("brain-model")),
+  serverUrlInput: /** @type {HTMLInputElement} */ (document.getElementById("server-url")),
+  cwdInput: /** @type {HTMLInputElement} */ (document.getElementById("server-cwd")),
+  modelInput: /** @type {HTMLInputElement} */ (document.getElementById("server-model")),
   adminTokenInput: /** @type {HTMLInputElement} */ (document.getElementById("admin-token")),
-  handToolNamesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("hand-tool-names")),
-  handToolPrefixesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("hand-tool-prefixes")),
+  clientToolNamesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("client-tool-names")),
+  clientToolPrefixesInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("client-tool-prefixes")),
   btnConnect: /** @type {HTMLButtonElement} */ (document.getElementById("btn-connect")),
   btnCancelSettings: /** @type {HTMLButtonElement} */ (document.getElementById("btn-cancel-settings")),
 };
@@ -79,39 +79,39 @@ function loadConfig() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const cfg = JSON.parse(saved);
-      state.brainUrl = cfg.brainUrl ?? DEFAULT_BRAIN_URL;
+      state.serverUrl = cfg.serverUrl ?? DEFAULT_SERVER_URL;
       state.cwd = cfg.cwd ?? DEFAULT_CWD;
       state.model = cfg.model ?? DEFAULT_MODEL;
-      state.handToolNames = Array.isArray(cfg.handToolNames) ? cfg.handToolNames : [];
-      state.handToolPrefixes = Array.isArray(cfg.handToolPrefixes) ? cfg.handToolPrefixes : [];
+      state.clientToolNames = Array.isArray(cfg.clientToolNames) ? cfg.clientToolNames : [];
+      state.clientToolPrefixes = Array.isArray(cfg.clientToolPrefixes) ? cfg.clientToolPrefixes : [];
     }
   } catch {
     // 忽略 localStorage 错误
   }
 
-  dom.brainUrlInput.value = state.brainUrl;
+  dom.serverUrlInput.value = state.serverUrl;
   dom.cwdInput.value = state.cwd;
   dom.modelInput.value = state.model;
   dom.adminTokenInput.value = "";
-  dom.handToolNamesInput.value = formatListForTextarea(state.handToolNames);
-  dom.handToolPrefixesInput.value = formatListForTextarea(state.handToolPrefixes);
+  dom.clientToolNamesInput.value = formatListForTextarea(state.clientToolNames);
+  dom.clientToolPrefixesInput.value = formatListForTextarea(state.clientToolPrefixes);
 }
 
 function saveConfig() {
-  state.brainUrl = dom.brainUrlInput.value.trim() || DEFAULT_BRAIN_URL;
+  state.serverUrl = dom.serverUrlInput.value.trim() || DEFAULT_SERVER_URL;
   state.cwd = dom.cwdInput.value.trim() || DEFAULT_CWD;
   state.model = dom.modelInput.value.trim() || DEFAULT_MODEL;
   state.adminToken = dom.adminTokenInput.value.trim();
-  state.handToolNames = parseTextareaList(dom.handToolNamesInput.value);
-  state.handToolPrefixes = parseTextareaList(dom.handToolPrefixesInput.value);
+  state.clientToolNames = parseTextareaList(dom.clientToolNamesInput.value);
+  state.clientToolPrefixes = parseTextareaList(dom.clientToolPrefixesInput.value);
 
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      brainUrl: state.brainUrl,
+      serverUrl: state.serverUrl,
       cwd: state.cwd,
       model: state.model,
-      handToolNames: state.handToolNames,
-      handToolPrefixes: state.handToolPrefixes,
+      clientToolNames: state.clientToolNames,
+      clientToolPrefixes: state.clientToolPrefixes,
     }));
   } catch {
     // 忽略
@@ -128,7 +128,7 @@ function loadSessionSnapshot() {
     const snapshot = JSON.parse(saved);
     if (
       snapshot &&
-      snapshot.brainUrl === state.brainUrl &&
+      snapshot.serverUrl === state.serverUrl &&
       snapshot.cwd === state.cwd &&
       snapshot.model === state.model &&
       typeof snapshot.sessionId === "string"
@@ -149,7 +149,7 @@ function saveSessionSnapshot() {
   try {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
       sessionId: state.resumableSessionId,
-      brainUrl: state.brainUrl,
+      serverUrl: state.serverUrl,
       cwd: state.cwd,
       model: state.model,
     }));
@@ -201,7 +201,7 @@ function bindEvents() {
 
 function openSettingsModal() {
   dom.modal.classList.remove("hidden");
-  dom.brainUrlInput.focus();
+  dom.serverUrlInput.focus();
 }
 
 function closeSettingsModal() {
@@ -221,8 +221,8 @@ async function onConnectClick() {
 
 async function syncToolRoutingConfig() {
   if (!state.adminToken) {
-    if (state.handToolNames.length > 0 || state.handToolPrefixes.length > 0) {
-      appendErrorMessage("要写入 Hand 工具路由，请先填写管理 Token");
+    if (state.clientToolNames.length > 0 || state.clientToolPrefixes.length > 0) {
+      appendErrorMessage("要写入 Client 工具路由，请先填写管理 Token");
       return false;
     }
     return true;
@@ -236,8 +236,8 @@ async function syncToolRoutingConfig() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        handToolNames: state.handToolNames,
-        handToolPrefixes: state.handToolPrefixes,
+        clientToolNames: state.clientToolNames,
+        clientToolPrefixes: state.clientToolPrefixes,
       }),
     });
 
@@ -246,11 +246,11 @@ async function syncToolRoutingConfig() {
     }
 
     const updated = await response.json();
-    state.handToolNames = Array.isArray(updated.handToolNames) ? updated.handToolNames : [];
-    state.handToolPrefixes = Array.isArray(updated.handToolPrefixes) ? updated.handToolPrefixes : [];
-    dom.handToolNamesInput.value = formatListForTextarea(state.handToolNames);
-    dom.handToolPrefixesInput.value = formatListForTextarea(state.handToolPrefixes);
-    appendSystemMessage("Hand 工具路由已更新");
+    state.clientToolNames = Array.isArray(updated.clientToolNames) ? updated.clientToolNames : [];
+    state.clientToolPrefixes = Array.isArray(updated.clientToolPrefixes) ? updated.clientToolPrefixes : [];
+    dom.clientToolNamesInput.value = formatListForTextarea(state.clientToolNames);
+    dom.clientToolPrefixesInput.value = formatListForTextarea(state.clientToolPrefixes);
+    appendSystemMessage("Client 工具路由已更新");
     return true;
   } catch (error) {
     appendErrorMessage(error instanceof Error ? error.message : String(error));
@@ -277,9 +277,9 @@ async function connectWebSocket(options = {}) {
 
   state.shouldReconnect = true;
   setStatus("connecting");
-  appendSystemMessage(autoReconnect ? "正在重新连接 Brain..." : "正在连接 Brain...");
+  appendSystemMessage(autoReconnect ? "正在重新连接 Server..." : "正在连接 Server...");
 
-  const ws = new WebSocket(state.brainUrl);
+  const ws = new WebSocket(state.serverUrl);
   state.ws = ws;
 
   ws.onopen = () => {
@@ -309,7 +309,7 @@ async function connectWebSocket(options = {}) {
       const msg = JSON.parse(event.data);
       handleServerMessage(msg);
     } catch (err) {
-      console.error("[axon-web] 解析消息失败:", err);
+      console.error("[cerelay-web] 解析消息失败:", err);
     }
   };
 
@@ -396,7 +396,7 @@ async function createNewSession() {
 function handleServerMessage(msg) {
   switch (msg.type) {
     case "connected":
-      // Brain 连接确认，忽略（由 ws.onopen 处理）
+      // Server 连接确认，忽略（由 ws.onopen 处理）
       break;
 
     case "session_created":
@@ -477,7 +477,7 @@ function sendPrompt() {
   const text = dom.promptInput.value.trim();
   if (!text) return;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-    appendErrorMessage("未连接到 Brain");
+    appendErrorMessage("未连接到 Server");
     return;
   }
   if (!state.sessionId) {
@@ -627,11 +627,11 @@ function formatListForTextarea(items) {
 }
 
 function registerTestHooks() {
-  if (typeof window === "undefined" || window.__AXON_WEB_ENABLE_TEST_HOOKS__ !== true) {
+  if (typeof window === "undefined" || window.__CERELAY_WEB_ENABLE_TEST_HOOKS__ !== true) {
     return;
   }
 
-  window.__AXON_WEB_TEST_HOOKS__ = {
+  window.__CERELAY_WEB_TEST_HOOKS__ = {
     state,
     dom,
     init,

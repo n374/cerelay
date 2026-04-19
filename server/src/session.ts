@@ -125,11 +125,11 @@ export interface SessionTransport {
   send(message: ServerToHandMessage): Promise<void>;
 }
 
-export interface BrainSessionOptions {
+export interface ServerSessionOptions {
   claudeHomeDir?: string;
   claudeEnv?: Record<string, string | undefined>;
   cwd: string;
-  handHomeDir?: string;
+  clientHomeDir?: string;
   id: string;
   model: string;
   mcpServers?: Record<string, SdkMcpServerConfig>;
@@ -137,11 +137,11 @@ export interface BrainSessionOptions {
   spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
   onClose?: () => void | Promise<void>;
   transport: SessionTransport;
-  shouldRouteToolToHand?: (toolName: string) => boolean;
+  shouldRouteToolToClient?: (toolName: string) => boolean;
   queryRunner?: QueryRunner;
 }
 
-export class BrainSession {
+export class ServerSession {
   readonly id: string;
   readonly cwd: string;
   readonly model: string;
@@ -149,14 +149,14 @@ export class BrainSession {
 
   private readonly claudeHomeDir: string;
   private readonly claudeEnv?: Record<string, string | undefined>;
-  private readonly handHomeDir?: string;
+  private readonly clientHomeDir?: string;
   private readonly relay = new ToolRelay();
   private mcpServers?: Record<string, SdkMcpServerConfig>;
   private readonly sdkCwd: string;
   private readonly transport: SessionTransport;
   private readonly canUseTool: CanUseToolHandler;
   private readonly onClose?: () => void | Promise<void>;
-  private readonly shouldRouteToolToHand: (toolName: string) => boolean;
+  private readonly shouldRouteToolToClient: (toolName: string) => boolean;
   private readonly queryRunner: QueryRunner;
   private readonly spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
   private readonly log: Logger;
@@ -165,12 +165,12 @@ export class BrainSession {
   private claudeSessionId?: string;
   private promptChain: Promise<void> = Promise.resolve();
 
-  private constructor(options: BrainSessionOptions) {
+  private constructor(options: ServerSessionOptions) {
     this.id = options.id;
     this.claudeHomeDir = options.claudeHomeDir?.trim() || os.homedir();
     this.claudeEnv = options.claudeEnv;
     this.cwd = options.cwd;
-    this.handHomeDir = options.handHomeDir?.trim() || undefined;
+    this.clientHomeDir = options.clientHomeDir?.trim() || undefined;
     this.model = options.model;
     this.mcpServers = options.mcpServers;
     this.transport = options.transport;
@@ -178,7 +178,7 @@ export class BrainSession {
     this.onClose = options.onClose;
     this.spawnClaudeCodeProcess = options.spawnClaudeCodeProcess;
     this.createdAt = new Date();
-    this.shouldRouteToolToHand = options.shouldRouteToolToHand ?? ((toolName) => isHandRoutedToolName(toolName));
+    this.shouldRouteToolToClient = options.shouldRouteToolToClient ?? ((toolName) => isClientRoutedToolName(toolName));
     this.canUseTool = async (toolName: string) => this.handleCanUseTool(toolName);
     this.queryRunner = options.queryRunner ?? runSdkQuery;
     this.log = createLogger("session").child({
@@ -188,8 +188,8 @@ export class BrainSession {
     });
   }
 
-  static createSession(options: BrainSessionOptions): BrainSession {
-    return new BrainSession(options);
+  static createSession(options: ServerSessionOptions): ServerSession {
+    return new ServerSession(options);
   }
 
   info(): SessionInfo {
@@ -383,8 +383,8 @@ export class BrainSession {
       throw new Error("会话已关闭");
     }
 
-    if (!this.shouldRouteToolToHand(input.tool_name)) {
-      this.log.debug("工具未配置为通过 Hand 转发", {
+    if (!this.shouldRouteToolToClient(input.tool_name)) {
+      this.log.debug("工具未配置为通过 Client 转发", {
         toolName: input.tool_name,
       });
       return {
@@ -396,31 +396,31 @@ export class BrainSession {
       };
     }
 
-    const result = await this.executeToolViaHand(input.tool_name, input.tool_input, input.tool_use_id);
+    const result = await this.executeToolViaClient(input.tool_name, input.tool_input, input.tool_use_id);
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "",
+        permissionDecisionReason: "Tool response ready",
         additionalContext: renderToolResultForClaude(input.tool_name, result),
       },
     };
   }
 
-  async executeToolViaHand(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
+  async executeToolViaClient(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
     if (this.closed) {
       this.log.warn("会话已关闭，无法继续工具调用");
       throw new Error("会话已关闭");
     }
 
-    const rewrittenInput = rewriteToolInputForHand(toolName, toolInput, {
-      brainHomeDir: this.claudeHomeDir,
-      handHomeDir: this.handHomeDir,
-      brainCwd: this.sdkCwd,
-      handCwd: this.cwd,
+    const rewrittenInput = rewriteToolInputForClient(toolName, toolInput, {
+      serverHomeDir: this.claudeHomeDir,
+      clientHomeDir: this.clientHomeDir,
+      serverCwd: this.sdkCwd,
+      clientCwd: this.cwd,
     });
     const requestId = `hook-${this.id}-${randomUUID()}`;
-    this.log.info("准备转发工具调用到 Hand", {
+    this.log.info("准备转发工具调用到 Client", {
       requestId,
       toolName,
       toolUseId,
@@ -439,12 +439,12 @@ export class BrainSession {
 
     try {
       await this.transport.send(toolCall);
-      this.log.info("工具调用已发送到 Hand", {
+      this.log.info("工具调用已发送到 Client", {
         requestId,
         toolName,
       });
     } catch (error) {
-      this.log.error("发送工具调用到 Hand 失败", {
+      this.log.error("发送工具调用到 Client 失败", {
         requestId,
         toolName,
         error: asError(error).message,
@@ -454,7 +454,7 @@ export class BrainSession {
     }
 
     const result = await pending;
-    this.log.info("收到 Hand 返回的工具结果", {
+    this.log.info("收到 Client 返回的工具结果", {
       requestId,
       toolName,
       hasError: Boolean(result.error),
@@ -497,7 +497,7 @@ export class BrainSession {
     behavior: "deny";
     message: string;
   }> {
-    if (this.shouldRouteToolToHand(toolName)) {
+    if (this.shouldRouteToolToClient(toolName)) {
       this.log.debug("允许工具调用", { toolName });
       return { behavior: "allow" };
     }
@@ -636,8 +636,13 @@ function asError(error: unknown): Error {
   return new Error(typeof error === "string" ? error : JSON.stringify(error));
 }
 
-export function isHandRoutedToolName(toolName: string): boolean {
+export function isClientRoutedToolName(toolName: string): boolean {
   return isBuiltinHandToolName(toolName) || isMcpToolName(toolName);
+}
+
+/** @deprecated Use isClientRoutedToolName */
+export function isHandRoutedToolName(toolName: string): boolean {
+  return isClientRoutedToolName(toolName);
 }
 
 export function resolveClaudeCodeExecutable(candidates = CLAUDE_EXECUTABLE_CANDIDATES, env = process.env): string {
@@ -660,14 +665,14 @@ function extractClaudeSessionId(message: QueryMessage): string | undefined {
   return typeof sessionId === "string" && sessionId.trim() ? sessionId : undefined;
 }
 
-export function rewriteToolInputForHand(
+export function rewriteToolInputForClient(
   toolName: string,
   input: unknown,
   options: {
-    brainHomeDir: string;
-    handHomeDir?: string;
-    brainCwd: string;
-    handCwd: string;
+    serverHomeDir: string;
+    clientHomeDir?: string;
+    serverCwd: string;
+    clientCwd: string;
   }
 ): unknown {
   if (!input || typeof input !== "object") {
@@ -682,18 +687,18 @@ export function rewriteToolInputForHand(
     case "Edit":
     case "MultiEdit":
       if (typeof inputRecord.file_path === "string") {
-        inputRecord.file_path = rewriteClaudePathForHand(inputRecord.file_path, options);
+        inputRecord.file_path = rewriteClaudePathForClient(inputRecord.file_path, options);
       }
       return inputRecord;
     case "Grep":
     case "Glob":
       if (typeof inputRecord.path === "string") {
-        inputRecord.path = rewriteClaudePathForHand(inputRecord.path, options);
+        inputRecord.path = rewriteClaudePathForClient(inputRecord.path, options);
       }
       return inputRecord;
     case "Bash":
       if (typeof inputRecord.command === "string") {
-        inputRecord.command = rewriteClaudeCommandForHand(inputRecord.command, options);
+        inputRecord.command = rewriteClaudeCommandForClient(inputRecord.command, options);
       }
       return inputRecord;
     default:
@@ -701,42 +706,61 @@ export function rewriteToolInputForHand(
   }
 }
 
-function rewriteClaudeCommandForHand(
-  command: string,
+/** @deprecated Use rewriteToolInputForClient */
+export function rewriteToolInputForHand(
+  toolName: string,
+  input: unknown,
   options: {
     brainHomeDir: string;
     handHomeDir?: string;
     brainCwd: string;
     handCwd: string;
   }
+): unknown {
+  return rewriteToolInputForClient(toolName, input, {
+    serverHomeDir: options.brainHomeDir,
+    clientHomeDir: options.handHomeDir,
+    serverCwd: options.brainCwd,
+    clientCwd: options.handCwd,
+  });
+}
+
+function rewriteClaudeCommandForClient(
+  command: string,
+  options: {
+    serverHomeDir: string;
+    clientHomeDir?: string;
+    serverCwd: string;
+    clientCwd: string;
+  }
 ): string {
   let rewritten = command;
-  rewritten = rewritten.split(options.brainCwd).join(options.handCwd);
+  rewritten = rewritten.split(options.serverCwd).join(options.clientCwd);
 
-  if (options.handHomeDir) {
-    rewritten = rewritten.split(path.join(options.brainHomeDir, ".claude.json")).join(path.join(options.handHomeDir, ".claude.json"));
-    rewritten = rewritten.split(path.join(options.brainHomeDir, ".claude")).join(path.join(options.handHomeDir, ".claude"));
-    rewritten = rewritten.split(options.brainHomeDir).join(options.handHomeDir);
+  if (options.clientHomeDir) {
+    rewritten = rewritten.split(path.join(options.serverHomeDir, ".claude.json")).join(path.join(options.clientHomeDir, ".claude.json"));
+    rewritten = rewritten.split(path.join(options.serverHomeDir, ".claude")).join(path.join(options.clientHomeDir, ".claude"));
+    rewritten = rewritten.split(options.serverHomeDir).join(options.clientHomeDir);
   }
 
   return rewritten;
 }
 
-function rewriteClaudePathForHand(
+function rewriteClaudePathForClient(
   filePath: string,
   options: {
-    brainHomeDir: string;
-    handHomeDir?: string;
-    brainCwd: string;
-    handCwd: string;
+    serverHomeDir: string;
+    clientHomeDir?: string;
+    serverCwd: string;
+    clientCwd: string;
   }
 ): string {
-  if (filePath === options.brainCwd || filePath.startsWith(`${options.brainCwd}${path.sep}`)) {
-    return `${options.handCwd}${filePath.slice(options.brainCwd.length)}`;
+  if (filePath === options.serverCwd || filePath.startsWith(`${options.serverCwd}${path.sep}`)) {
+    return `${options.clientCwd}${filePath.slice(options.serverCwd.length)}`;
   }
 
-  if (options.handHomeDir && (filePath === options.brainHomeDir || filePath.startsWith(`${options.brainHomeDir}${path.sep}`))) {
-    return `${options.handHomeDir}${filePath.slice(options.brainHomeDir.length)}`;
+  if (options.clientHomeDir && (filePath === options.serverHomeDir || filePath.startsWith(`${options.serverHomeDir}${path.sep}`))) {
+    return `${options.clientHomeDir}${filePath.slice(options.serverHomeDir.length)}`;
   }
 
   return filePath;

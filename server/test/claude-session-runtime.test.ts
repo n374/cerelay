@@ -13,10 +13,10 @@ function restoreEnvVar(name: string, value: string | undefined): void {
 }
 
 test("createClaudeSessionRuntime preserves pre-created runtime files such as injected hook settings", async (t) => {
-  const originalMountNamespace = process.env.AXON_ENABLE_MOUNT_NAMESPACE;
-  process.env.AXON_ENABLE_MOUNT_NAMESPACE = "false";
+  const originalMountNamespace = process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
+  process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = "false";
   t.after(() => {
-    restoreEnvVar("AXON_ENABLE_MOUNT_NAMESPACE", originalMountNamespace);
+    restoreEnvVar("CERELAY_ENABLE_MOUNT_NAMESPACE", originalMountNamespace);
   });
 
   const sessionId = `runtime-preserve-${Date.now()}`;
@@ -24,7 +24,7 @@ test("createClaudeSessionRuntime preserves pre-created runtime files such as inj
   await rm(runtimeRoot, { recursive: true, force: true });
   await mkdir(path.join(runtimeRoot, "hooks"), { recursive: true });
   await writeFile(path.join(runtimeRoot, "settings.local.json"), '{"hooks":{"PreToolUse":[]}}', "utf8");
-  await writeFile(path.join(runtimeRoot, "hooks", "axon-pretooluse.mjs"), "console.log('ok')\n", "utf8");
+  await writeFile(path.join(runtimeRoot, "hooks", "cerelay-pretooluse.mjs"), "console.log('ok')\n", "utf8");
 
   const runtime = await createClaudeSessionRuntime({
     sessionId,
@@ -41,7 +41,7 @@ test("createClaudeSessionRuntime preserves pre-created runtime files such as inj
     '{"hooks":{"PreToolUse":[]}}'
   );
   assert.equal(
-    await readFile(path.join(runtimeRoot, "hooks", "axon-pretooluse.mjs"), "utf8"),
+    await readFile(path.join(runtimeRoot, "hooks", "cerelay-pretooluse.mjs"), "utf8"),
     "console.log('ok')\n"
   );
 });

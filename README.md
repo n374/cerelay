@@ -1,337 +1,178 @@
-# Axon
+# Cerelay
 
-Claude Code 的分体式架构：用户在 Hand 端交互，Hand 在本地执行工具，Server 端负责调用 Claude Agent SDK 进行推理，并通过 WebSocket 将工具调用转发回 Hand。
+**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端通过 Claude Agent SDK 驱动推理，Client 端在本地执行工具，两者通过 WebSocket 双向通信。
 
-Split architecture for Claude Code: users interact on Hand, Hand executes tools locally, and the Server uses the Claude Agent SDK for reasoning while forwarding tool calls back to Hand over WebSocket.
+**Cerelay** is a split-architecture implementation of Claude Code. The Server drives reasoning via the Claude Agent SDK, the Client executes tools locally, and they communicate over WebSocket.
 
-## 架构总览 / Architecture Overview
-
-```mermaid
-flowchart LR
-    H1[Hand CLI / TypeScript<br/>用户交互 + 工具执行]
-    HN[Hand N / Future]
-    S[Axon Server / TypeScript<br/>query() + SDK PreToolUse hooks]
-    C[Claude Code CLI<br/>spawned by SDK]
-
-    H1 <-->|WebSocket| S
-    HN -. optional .-> S
-    S -->|SDK query stream| C
-```
-
-当前主路径是：
-
-The primary path today is:
+## 架构 / Architecture
 
 ```text
-Hand (TypeScript) ←→ WebSocket ←→ Server (TypeScript) ←→ Claude Agent SDK query() ←→ claude CLI
+Client (TypeScript)  ←— WebSocket —→  Server (TypeScript)  ←→  Claude Agent SDK  ←→  claude CLI
+  ├─ 本地工具执行                        ├─ Session 管理
+  ├─ MCP Runtime                        ├─ Hook 拦截 + 工具转发
+  └─ 终端 UI / ACP                      └─ MCP 代理
 ```
-
-## 概念 / Concepts
-
-- **Hand 端 / Hand**：用户交互入口，也是 Claude 原生工具的执行环境。当前实现为 TypeScript CLI，支持 `Read`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Grep`、`Glob`。
-- **Server 端 / Server**：Brain 端，位于 [`server/src`](./server/src)。使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` 驱动 Claude Code，并通过 SDK `PreToolUse` hooks 拦截工具调用。
-- **通信 / Transport**：Server 与 Hand 之间通过 WebSocket 全双工通信，文本流和工具调用共用一条连接。
-- **Session Runtime**：每个 session 都有独立的 Claude runtime。Docker 默认开启 mount namespace 运行时，让 Claude 看到 Hand 上报的 `HOME` 与 `cwd`；不满足条件时回退到普通目录运行时。
-
-## 核心时序 / Core Sequence
 
 ```mermaid
 sequenceDiagram
-    participant H as Hand (TypeScript)
-    participant S as Server (TypeScript)
+    participant C as Client
+    participant S as Server
     participant SDK as Claude Agent SDK
-    participant C as claude CLI
 
-    H->>S: WS prompt
-    S->>S: create session runtime (cwd/home view)
-    S->>SDK: query({ prompt, cwd: session-runtime, hooks })
-    SDK->>C: run prompt
-    C-->>S: assistant text/thinking stream
-    S-->>H: text_chunk / thought_chunk
-    SDK->>S: PreToolUse callback
-    S-->>H: WS tool_call
-    H->>H: execute Read/Write/Edit/MultiEdit/Bash/Grep/Glob
-    H-->>S: WS tool_result
-    S-->>SDK: hook result (deny + additionalContext)
-    C-->>S: final result
-    S-->>H: session_end
+    C->>S: WebSocket prompt
+    S->>SDK: query({ prompt, hooks })
+    SDK-->>S: text / thinking stream
+    S-->>C: text_chunk / thought_chunk
+    SDK->>S: PreToolUse callback (tool_call)
+    S-->>C: tool_call (Read/Write/Bash/...)
+    C->>C: 本地执行工具
+    C-->>S: tool_result
+    S-->>SDK: hook result
+    SDK-->>S: session_end
+    S-->>C: session_end
 ```
 
-关键点：
+**核心设计 / Key Design**:
 
-Key points:
-
-- **SDK 直接集成 / Direct SDK integration**：不再通过 ACP bridge 把工具调用转换成 client-side methods，而是直接使用 `query()` 驱动 Claude Code。
-- **SDK Hook 拦截 / SDK hook interception**：Server 直接通过 SDK `PreToolUse` callback 接管工具调用，不修改项目内的 `.claude/settings.local.json`。
-- **Session Runtime / Session runtime**：Docker 默认给每个 session 建独立 Claude runtime；开启 mount namespace 时，Claude 看到的 `HOME` 与 `cwd` 会对齐 Hand 上报的本地路径。
-- **MCP 配置主权 / MCP config ownership**：Server 从 Claude 自己的配置文件读取 `mcpServers`，再把标准化后的 server 配置下发给 Hand；Hand 负责真正执行 `tools/list` / `tools/call`。
-- **Hand 执行 Claude 原生工具 / Hand executes Claude-native tools**：Hand 按 Claude 工具语义执行本地操作，而不是 ACP 方法名。
-
-## 项目结构 / Project Structure
-
-```text
-axon/
-├── package.json              # npm workspaces 根配置
-├── server/                   # TypeScript Axon Server（Claude Agent SDK）
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── src/
-│       ├── index.ts          # Server CLI 入口，解析 --port / --model
-│       ├── server.ts         # HTTP + WebSocket Server
-│       ├── session.ts        # query() 会话驱动 + Hand tool relay
-│       ├── claude-session-runtime.ts # Claude session runtime / mount namespace
-│       ├── relay.ts          # 工具调用 pending/result 管理
-│       └── protocol.ts       # 消息类型定义
-├── hand/                     # TypeScript Hand CLI
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── src/
-│       ├── index.ts          # Hand CLI 入口
-│       ├── client.ts         # WebSocket 客户端
-│       ├── executor.ts       # 工具分发器
-│       ├── protocol.ts       # 消息类型定义
-│       ├── ui.ts             # 终端 UI
-│       └── tools/
-│           ├── fs.ts         # Read / Write / Edit / MultiEdit
-│           ├── bash.ts       # Bash
-│           └── search.ts     # Grep / Glob
-└── proxy/                    # Phase 0 Hook 系统（bash，独立使用）
-```
-
-说明：
-
-Notes:
-
-- `server/` 与 `hand/` 是当前主实现，均为 TypeScript。
-- `proxy/` 仍保留，作为独立 Hook/审计能力沉淀。
+- **SDK Hook 拦截**：Server 通过 `PreToolUse` callback 接管工具调用，转发到 Client 执行
+- **Session Runtime**：Docker 下每个 session 有独立 mount namespace，Claude 看到的 `HOME`/`cwd` 对齐 Client 本地路径
+- **MCP 代理**：Server 读取 Claude 的 MCP 配置下发给 Client，Client 负责连接 MCP Server 并执行工具
+- **FUSE 文件代理**：容器内通过 FUSE 将文件读写请求转发到 Client 本地文件系统
 
 ## 快速开始 / Quick Start
 
-### 1. 安装依赖 / Install Dependencies
+### 安装 / Install
 
 ```bash
 npm install
 ```
 
-### 2. 启动 Brain Server（Docker） / Start the Brain Server (Docker)
+### 启动 Server（Docker） / Start the Server (Docker)
 
-默认不需要 `.env`。容器会：
-
-By default, no `.env` file is required. The container will:
-
-- 复用当前 shell / Claude Code 注入的环境变量
-- 默认挂载宿主机 `~/.claude` 到容器 `/home/node/.claude`
-- 默认挂载宿主机 `~/.claude.json` 到容器 `/home/node/.claude.json`
-- 默认启用 per-session mount namespace runtime
-
-然后直接启动：
-
-Then start directly:
+前置条件：Docker、`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
 
 ```bash
-npm run brain:up
+npm run server:up          # 启动容器
+npm run server:logs        # 查看日志
+npm run server:down        # 停止容器
 ```
 
-这个 compose 配置会给容器添加 `SYS_ADMIN`，并在镜像里安装 `util-linux`，用于 `unshare` / `nsenter` 形式的 session runtime。
+容器会自动挂载 `~/.claude/.credentials.json` 作为 Claude Code 登录态，并写入 onboarding 标记跳过首次向导。
 
-临时打开 debug 日志：
+也可通过环境变量覆盖：
 
 ```bash
-LOG_LEVEL=debug npm run brain:up
+cp .env.example .env       # 可选，按需修改
+LOG_LEVEL=debug npm run server:up
 ```
 
-默认会把宿主机的 `~/.claude` 挂载到容器内 `/home/node/.claude`，并把宿主机的 `~/.claude.json` 挂载到容器内 `/home/node/.claude.json`。
+### 启动 Client / Start the Client
 
-By default, the container bind-mounts the host `~/.claude` directory to `/home/node/.claude`, and the host `~/.claude.json` file to `/home/node/.claude.json`.
-
-如果你想覆盖默认挂载路径或端口，可以再创建 `.env`：
-
-If you want to override the default mount path or ports, you can still create a `.env` file:
+在新终端中：
 
 ```bash
-cp .env.example .env
+cd client && npm start -- --server localhost:8765 --cwd /path/to/project
 ```
 
-例如在 `.env` 中加入：
+连接后自动创建 PTY session，进入 Claude Code 终端。
 
-For example, add this to `.env`:
+查看 Client 日志：
 
 ```bash
-CLAUDE_CONFIG_DIR=/absolute/path/to/.claude
-CLAUDE_JSON_PATH=/absolute/path/to/.claude.json
-BRAIN_HOST_PORT=8765
-LOG_LEVEL=debug
-LOG_JSON=false
-CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
-AXON_ENABLE_MOUNT_NAMESPACE=true
-AXON_NAMESPACE_RUNTIME_ROOT=/opt/axon-runtime
+cd client && npm start -- logs
 ```
 
-例如：
-
-For example:
+### 启动 Web UI（可选） / Start the Web UI (Optional)
 
 ```bash
-CLAUDE_CONFIG_DIR=/Users/yourname/.claude
-CLAUDE_JSON_PATH=/Users/yourname/.claude.json
+cd web && npm start -- --port 8766 --server localhost:8765
 ```
 
-查看日志 / View logs:
+打开 http://localhost:8766。
 
-```bash
-npm run brain:logs
-```
+### 本地直跑 Server / Run Server Locally
 
-停止 / Stop:
-
-```bash
-npm run brain:down
-```
-
-前置条件 / Prerequisites：
-
-- 已安装 Docker / Docker Compose
-- 已配置 `ANTHROPIC_API_KEY`，或 `ANTHROPIC_AUTH_TOKEN`（如有需要可同时配置 `ANTHROPIC_BASE_URL`）
-
-默认情况下，Brain Server 会监听宿主机 `localhost:8765`，容器内已包含 `claude-code`。
-
-By default, the Brain Server listens on host `localhost:8765`, and the container already includes `claude-code`.
-
-挂载示例 / Mount examples:
-
-```yaml
-services:
-  axon-brain:
-    volumes:
-      - ${HOME}/.claude:/home/node/.claude
-      - ${HOME}/.claude.json:/home/node/.claude.json
-      # 或者 / Or:
-      # - /absolute/path/to/.claude:/home/node/.claude
-      # - /absolute/path/to/.claude.json:/home/node/.claude.json
-```
-
-### 3. 启动 Hand / Start the Hand
-
-在新终端中执行：
-
-Run in a new terminal:
-
-```bash
-cd hand && npm start -- --server localhost:8765 --cwd /path/to/project
-```
-
-查看 Hand 实时日志：
-
-```bash
-cd hand && npm start -- logs
-```
-
-这一步仍然在本机运行，因为 Hand 负责执行本地工具。
-
-Hand still runs on the local machine because it executes local tools.
-
-### 4. 启动 Web（可选） / Start the Web UI (Optional)
-
-如果你要用浏览器手动测试，再开一个终端：
-
-If you want to test from the browser, start the Web server in another terminal:
-
-```bash
-cd web && npm start -- --port 8766 --brain localhost:8765
-```
-
-打开 [http://localhost:8766](http://localhost:8766)，在设置里填：
-
-Open [http://localhost:8766](http://localhost:8766), then fill in:
-
-- Brain 地址 / Brain URL: `ws://localhost:8766/ws`
-- 工作目录 / CWD: 你的本地项目目录
-- 模型 / Model: `claude-sonnet-4-20250514`
-
-### 5. 交互 / Interact
-
-Hand CLI 连接成功后会自动创建 session。输入 prompt，Server 会通过 SDK 发起一次 `query()`；第一次 prompt 会创建 Claude Code 原生会话，后续 prompt 会自动 `resume` 同一个 Claude 会话，因此上下文会连续保留。当 Claude 调用工具时，Hand 在本地执行并把结果回传。
-
-After Hand connects, it creates a session automatically. Each prompt triggers one SDK `query()` call; the first prompt creates a native Claude Code session and later prompts automatically `resume` the same Claude session, preserving conversation context. When Claude requests a tool, Hand executes it locally and returns the result.
-
-## 本地直跑 Server（可选） / Running Server Locally (Optional)
-
-如果你不想用 Docker，也可以直接本地启动 Server：
-
-If you do not want Docker, you can still start the Server locally:
+不用 Docker 时，需本机已安装并认证 `claude` CLI：
 
 ```bash
 cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
 ```
 
-这种方式要求本机已安装并认证 `claude` CLI，且当前环境能使用 `@anthropic-ai/claude-agent-sdk`。
+## 鉴权 / Authentication
 
-This mode requires a locally installed and authenticated `claude` CLI, and a working `@anthropic-ai/claude-agent-sdk` environment.
+### CERELAY_KEY（简单共享密钥）
 
-## 组件说明 / Components
+Server 通过 `CERELAY_KEY` 环境变量设置共享密钥，Client 连接时需匹配：
 
-### TypeScript Server
+```bash
+# Server 端
+CERELAY_KEY=my-secret npm run server:up
 
-- 位于 [`server/src`](./server/src)
-- 使用 `@anthropic-ai/claude-agent-sdk`
-- 通过 `query()` 获取流式输出
-- 通过 SDK `PreToolUse` hooks 拦截工具调用
-- 通过 WebSocket 将 `tool_call` / `tool_result` 与 Hand 关联
-- 为每个 session 创建 Claude runtime；Docker 默认启用 mount namespace 模式
-- 默认监听 `/ws` 和 `/health`
+# Client 端
+CERELAY_KEY=my-secret npm start -- --server localhost:8765
+# 或
+npm start -- --server localhost:8765 --key my-secret
+```
 
-### Hand CLI
+### Claude Code 登录态
 
-- 位于 [`hand/src`](./hand/src)
-- 负责终端交互、Session 驱动和本地工具执行
-- 当前支持的 Claude 原生工具：
-  - `Read`
-  - `Write`
-  - `Edit`
-  - `MultiEdit`
-  - `Bash`
-  - `Grep`
-  - `Glob`
+容器内的 Claude Code 需要登录态才能工作。两种方式：
 
-### Proxy Hook 系统 / Proxy Hook System
+1. **文件挂载**（默认）：自动挂载 `~/.claude/.credentials.json` 到容器
+2. **环境变量**：通过 `CLAUDE_CREDENTIALS` 传入凭证 JSON
 
-- 位于 [`proxy/`](./proxy)
-- 包含 Phase 0 的安全过滤与审计能力
-- 独立可用，不是主路径
+```bash
+# 方式 2：环境变量
+CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
+```
 
-## 技术选择 / Technology Choices
+## 项目结构 / Project Structure
 
-| 组件 / Component | 当前方案 / Current Choice | 说明 / Notes |
+```text
+cerelay/
+├── server/                   # Server（Claude Agent SDK 集成）
+│   └── src/
+│       ├── server.ts         # HTTP + WebSocket + 工具转发
+│       ├── session.ts        # SDK query() 会话驱动
+│       ├── claude-session-runtime.ts  # Mount namespace 隔离
+│       └── pty-session.ts    # PTY 终端会话
+├── client/                   # Client（本地工具执行）
+│   └── src/
+│       ├── index.ts          # CLI 入口（默认 PTY 模式）
+│       ├── client.ts         # WebSocket 客户端
+│       ├── executor.ts       # 工具分发（Read/Write/Edit/Bash/Grep/Glob）
+│       └── acp/              # ACP 模式（编辑器集成）
+├── web/                      # 浏览器 UI（可选）
+├── docker-compose.yml
+├── Dockerfile
+└── docker-entrypoint.sh
+```
+
+## 测试 / Testing
+
+```bash
+npm test                      # 全部测试（smoke + workspaces）
+npm run test:smoke            # 烟测（Docker entrypoint）
+npm run test:workspaces       # 各 workspace 单元/集成测试
+
+# 单个 workspace
+cd server && npm test
+cd client && npm test
+cd web && npm test
+```
+
+## 环境变量 / Environment Variables
+
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| Brain Server | TypeScript + Node.js | 直接接入 Claude Agent SDK |
-| Hand CLI | TypeScript + Node.js | 轻量 CLI，本地执行 Claude 原生工具 |
-| Server ↔ Hand | WebSocket | 双向流式输出与工具回传 |
-| Tool interception | Claude Agent SDK `PreToolUse` hook | SDK callback，结果转发到 Hand |
-| Claude runtime | Session runtime | Docker 默认使用 mount namespace，对齐 Hand `HOME` / `cwd` |
-| Claude driver | `query()` | 官方 SDK 主接口 |
-
-## Roadmap
-
-| 阶段 / Phase | 内容 / Scope | 状态 / Status |
-|---|---|---|
-| Phase 0 | Proxy Hook 安全过滤系统 | ✅ 已完成 |
-| Phase 1 | SDK / ACP 可行性 POC | ✅ 已完成 |
-| Phase 2 | TypeScript Server + SDK hooks + TypeScript Hand | ✅ 已完成 |
-| Phase 3 | Brain 容器化（Docker） | ✅ 已完成 |
-| Phase 4 | Hand CLI ACP Server（编辑器集成） | ✅ 已完成 |
-| Phase 5 | Hand Web（浏览器端） | ✅ 已完成 |
-| Phase 6 | 生产化（TLS / 认证 / Multi-Hand） | 🚧 进行中 |
-
-当前未完成的高优先级项：
-
-- Web/Hand 断线后的 session 恢复，而不只是重连后新建 session
-- `query()` 权限策略从 `bypassPermissions` 收敛到更细粒度的 `canUseTool`
-- 指标与 tracing（Prometheus / OpenTelemetry）
-- 反向代理下的 TLS / 部署示例
-
-详细规划见 [`.claude/ROADMAP.md`](./.claude/ROADMAP.md)。
-
-See [`.claude/ROADMAP.md`](./.claude/ROADMAP.md) for the detailed plan.
+| `CERELAY_KEY` | — | Client 连接共享密钥 |
+| `SERVER_PORT` | `8765` | 容器内监听端口 |
+| `SERVER_HOST_PORT` | `8765` | 宿主机映射端口 |
+| `MODEL` | `claude-sonnet-4-20250514` | 默认 Claude 模型 |
+| `LOG_LEVEL` | `info` | 日志级别 |
+| `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 mount namespace 隔离 |
+| `CLAUDE_CREDENTIALS` | — | Claude Code 登录凭证 JSON（替代文件挂载） |
+| `ANTHROPIC_API_KEY` | — | Claude API Key |
 
 ## License
 

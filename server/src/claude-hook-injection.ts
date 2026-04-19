@@ -23,7 +23,7 @@ export async function prepareClaudeHookInjection(
   options: PrepareClaudeHookInjectionOptions
 ): Promise<PreparedClaudeHookInjection> {
   const hookDir = path.join(options.runtimeRoot, "hooks");
-  const scriptPath = path.join(hookDir, "axon-pretooluse.mjs");
+  const scriptPath = path.join(hookDir, "cerelay-pretooluse.mjs");
   const settingsPath = path.join(options.runtimeRoot, "settings.local.json");
   const command = `${shellQuote(process.execPath)} ${shellQuote(scriptPath)}`;
 
@@ -71,7 +71,7 @@ export function mergePreToolUseHook(
   return {
     ...parsed,
     // 容器内不启动 MCP 服务器 — 可执行文件不在容器中，会导致 Claude Code 卡在初始化阶段。
-    // 常规 session 的 MCP 工具通过 Brain mcp-proxy 代理；PTY session 通过 PreToolUse hook 转发。
+    // 常规 session 的 MCP 工具通过 Server mcp-proxy 代理；PTY session 通过 PreToolUse hook 转发。
     mcpServers: {},
     hooks: {
       ...existingHooks,
@@ -144,7 +144,7 @@ try {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-axon-hook-token": HOOK_TOKEN,
+      "x-cerelay-hook-token": HOOK_TOKEN,
     },
     body,
   });

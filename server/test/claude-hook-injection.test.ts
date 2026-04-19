@@ -25,7 +25,7 @@ test("mergePreToolUseHook prepends Axon hook while preserving existing settings"
         ],
       },
     }),
-    '"/usr/local/bin/node" "/opt/axon-runtime/session/hooks/axon-pretooluse.mjs"'
+    '"/usr/local/bin/node" "/opt/cerelay-runtime/session/hooks/cerelay-pretooluse.mjs"'
   );
 
   assert.deepEqual(merged.permissions, {
@@ -40,7 +40,7 @@ test("mergePreToolUseHook prepends Axon hook while preserving existing settings"
     hooks: [
       {
         type: "command",
-        command: '"/usr/local/bin/node" "/opt/axon-runtime/session/hooks/axon-pretooluse.mjs"',
+        command: '"/usr/local/bin/node" "/opt/cerelay-runtime/session/hooks/cerelay-pretooluse.mjs"',
       },
     ],
   });
@@ -116,7 +116,7 @@ test("mergePreToolUseHook tolerates invalid existing JSON", () => {
 });
 
 test("prepareClaudeHookInjection writes a project-level settings.local shadow so child agents can inherit the same hook config", async (t) => {
-  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "axon-hook-injection-"));
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cerelay-hook-injection-"));
   t.after(async () => {
     await rm(runtimeRoot, { recursive: true, force: true });
   });
@@ -140,7 +140,7 @@ test("prepareClaudeHookInjection writes a project-level settings.local shadow so
     hooks?: { PreToolUse?: unknown[] };
   };
   assert.equal(prepared.settingsPath, path.join(runtimeRoot, "settings.local.json"));
-  assert.equal(prepared.scriptPath, path.join(runtimeRoot, "hooks", "axon-pretooluse.mjs"));
+  assert.equal(prepared.scriptPath, path.join(runtimeRoot, "hooks", "cerelay-pretooluse.mjs"));
   assert.deepEqual(settings.agents, {
     Explore: {
       model: "haiku",

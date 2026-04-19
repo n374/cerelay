@@ -3,20 +3,20 @@ import { watch } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { Command } from "commander";
-import { HandClient } from "./client.js";
+import { CerelayClient } from "./client.js";
 import { runAcpServer } from "./acp/index.js";
 import { configureLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
 
 const program = new Command();
 
 program
-  .name("axon-hand")
-  .description("Axon Hand CLI — 用户交互端")
-  .option("--server <host:port>", "Axon Server 地址", "localhost:8765")
-  .option("--key <key>", "连接 Brain 的共享密钥（默认读取 AXON_KEY 环境变量）")
+  .name("cerelay")
+  .description("Cerelay Client — 用户交互端")
+  .option("--server <host:port>", "Cerelay Server 地址", "localhost:8765")
+  .option("--key <key>", "连接 Server 的共享密钥（默认读取 CERELAY_KEY 环境变量）")
   .option("--cwd <dir>", "工作目录（默认当前目录）")
   .option("--log-level <level>", "日志级别（debug/info/warn/error）", "info")
-  .option("--log-file <path>", "Hand 日志文件路径", resolveDefaultLogFilePath())
+  .option("--log-file <path>", "Client 日志文件路径", resolveDefaultLogFilePath())
   .action(async () => {
     const opts = program.opts<CommonOptions>();
     configureHandLogging(opts);
@@ -25,7 +25,7 @@ program
 
 program
   .command("logs")
-  .description("查看 Hand 实时日志")
+  .description("查看 Client 实时日志")
   .option("--lines <count>", "启动时先显示最后 N 行", "200")
   .option("--no-follow", "只输出当前日志，不持续跟随")
   .action(async (commandOptions: { lines?: string; follow?: boolean }) => {
@@ -63,7 +63,7 @@ interface CommonOptions {
 // ============================================================
 
 function resolveKey(cliKey?: string): string | undefined {
-  return cliKey?.trim() || process.env.AXON_KEY?.trim() || undefined;
+  return cliKey?.trim() || process.env.CERELAY_KEY?.trim() || undefined;
 }
 
 function buildServerURL(server: string, key?: string): string {
@@ -79,7 +79,7 @@ function buildServerURL(server: string, key?: string): string {
 async function runPtyMode(server: string, key: string | undefined, cwdOverride?: string): Promise<void> {
   const cwd = cwdOverride ?? process.cwd();
   const serverURL = buildServerURL(server, key);
-  const client = new HandClient(serverURL, cwd, { interactiveOutput: false });
+  const client = new CerelayClient(serverURL, cwd, { interactiveOutput: false });
 
   try {
     await client.connect();

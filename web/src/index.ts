@@ -1,20 +1,20 @@
 // ============================================================
-// Axon Web Server 入口
+// Cerelay Web Server 入口
 // 职责：
 //   - 提供 Web UI 静态文件服务
-//   - 代理浏览器 WebSocket 连接到 Axon Brain Server
+//   - 代理浏览器 WebSocket 连接到 Cerelay Server
 // ============================================================
 
 import process from "node:process";
 import { WebServer } from "./server.js";
 
 const DEFAULT_PORT = 8766;
-const DEFAULT_BRAIN = "localhost:8765";
+const DEFAULT_SERVER = "localhost:8765";
 
 async function main(): Promise<void> {
-  const { port, brain } = parseArgs(process.argv.slice(2));
+  const { port, server: serverAddr } = parseArgs(process.argv.slice(2));
 
-  const server = new WebServer({ port, brainAddress: brain });
+  const server = new WebServer({ port, serverAddress: serverAddr });
 
   const shutdown = async (): Promise<void> => {
     await server.shutdown();
@@ -29,14 +29,14 @@ async function main(): Promise<void> {
   });
 
   await server.start();
-  console.log(`[axon-web] 已启动`);
+  console.log(`[cerelay-web] 已启动`);
   console.log(`  Web UI: http://localhost:${port}`);
-  console.log(`  Brain:  ws://${brain}/ws`);
+  console.log(`  Server: ws://${serverAddr}/ws`);
 }
 
-function parseArgs(argv: string[]): { port: number; brain: string } {
+function parseArgs(argv: string[]): { port: number; server: string } {
   let port = DEFAULT_PORT;
-  let brain = DEFAULT_BRAIN;
+  let server = DEFAULT_SERVER;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -51,12 +51,12 @@ function parseArgs(argv: string[]): { port: number; brain: string } {
       continue;
     }
 
-    if (arg === "--brain") {
+    if (arg === "--server") {
       const value = argv[i + 1];
       if (!value) {
-        throw new Error("--brain 缺少值");
+        throw new Error("--server 缺少值");
       }
-      brain = value;
+      server = value;
       i += 1;
       continue;
     }
@@ -66,10 +66,10 @@ function parseArgs(argv: string[]): { port: number; brain: string } {
     throw new Error(`无效端口: ${port}`);
   }
 
-  return { port, brain };
+  return { port, server };
 }
 
 main().catch((error) => {
-  console.error("[axon-web] fatal:", error);
+  console.error("[cerelay-web] fatal:", error);
   process.exit(1);
 });

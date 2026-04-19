@@ -3,14 +3,14 @@
  * 嵌入模式与 pty-host-script.ts 完全一致：
  *   - 作为 TypeScript 字符串常量导出
  *   - 运行时写入临时文件后执行
- *   - 通过 stdin/stdout JSON line 与 Brain Node.js 通信
+ *   - 通过 stdin/stdout JSON line 与 Server Node.js 通信
  *   - 通过 fd 3 控制管道接收 shutdown 命令
  *
  * 环境变量：
- *   AXON_FUSE_MOUNT_POINT  — 挂载点目录
- *   AXON_FUSE_CONTROL_FD   — 控制管道 fd（默认 3）
- *   AXON_FUSE_ROOTS        — JSON 字符串，虚拟根映射 {"home-claude": "/real/path", ...}
- *   AXON_FUSE_READY_FILE   — 就绪标记文件路径
+ *   CERELAY_FUSE_MOUNT_POINT  — 挂载点目录
+ *   CERELAY_FUSE_CONTROL_FD   — 控制管道 fd（默认 3）
+ *   CERELAY_FUSE_ROOTS        — JSON 字符串，虚拟根映射 {"home-claude": "/real/path", ...}
+ *   CERELAY_FUSE_READY_FILE   — 就绪标记文件路径
  */
 export const PYTHON_FUSE_HOST_SCRIPT = String.raw`
 import base64
@@ -36,13 +36,13 @@ except ImportError:
 # 配置
 # ============================================================
 
-MOUNT_POINT = os.environ["AXON_FUSE_MOUNT_POINT"]
-CONTROL_FD = int(os.environ.get("AXON_FUSE_CONTROL_FD", "3"))
-ROOTS = json.loads(os.environ.get("AXON_FUSE_ROOTS", "{}"))
-READY_FILE = os.environ.get("AXON_FUSE_READY_FILE", "")
+MOUNT_POINT = os.environ["CERELAY_FUSE_MOUNT_POINT"]
+CONTROL_FD = int(os.environ.get("CERELAY_FUSE_CONTROL_FD", "3"))
+ROOTS = json.loads(os.environ.get("CERELAY_FUSE_ROOTS", "{}"))
+READY_FILE = os.environ.get("CERELAY_FUSE_READY_FILE", "")
 # Shadow files: FUSE 内路径 → 本地真实文件路径（如 hook injection 的 settings.local.json）
-# 这些文件由 FUSE daemon 直接从本地读取，不代理到 Hand
-SHADOW_FILES = json.loads(os.environ.get("AXON_FUSE_SHADOW_FILES", "{}"))
+# 这些文件由 FUSE daemon 直接从本地读取，不代理到 Client
+SHADOW_FILES = json.loads(os.environ.get("CERELAY_FUSE_SHADOW_FILES", "{}"))
 
 # reqId 计数器
 _req_counter = 0
@@ -619,7 +619,7 @@ control_thread = threading.Thread(target=handle_control, daemon=True)
 control_thread.start()
 
 # 从快照文件加载缓存（由 Brain 在启动 FUSE 前通过 Hand snapshot 请求收集）
-_snapshot_file = os.environ.get("AXON_FUSE_CACHE_SNAPSHOT", "")
+_snapshot_file = os.environ.get("CERELAY_FUSE_CACHE_SNAPSHOT", "")
 if _snapshot_file and os.path.isfile(_snapshot_file):
     try:
         with open(_snapshot_file, "r") as f:

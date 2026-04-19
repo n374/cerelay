@@ -14,7 +14,7 @@ import {
 } from "../src/executor.js";
 
 test("fs tools read, write, edit, and multi-edit files", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-fs-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-fs-"));
   const filePath = path.join(cwd, "demo.txt");
 
   await writeFile({ file_path: "demo.txt", content: "ab你好cd你好" }, cwd);
@@ -41,7 +41,7 @@ test("fs tools read, write, edit, and multi-edit files", async () => {
 });
 
 test("search tools find matches and globbed files", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-search-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-search-"));
   await fs.mkdir(path.join(cwd, "nested"));
   await fs.writeFile(path.join(cwd, "nested", "a.ts"), "alpha\nbeta target\n");
   await fs.writeFile(path.join(cwd, "nested", "b.js"), "target\n");
@@ -56,7 +56,7 @@ test("search tools find matches and globbed files", async () => {
 });
 
 test("bash tool executes commands and validates timeout", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-bash-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-bash-"));
   const result = await executeBash({ command: "printf 'ok'" }, cwd);
   assert.equal(result.stdout, "ok");
   assert.equal(result.exit_code, 0);
@@ -65,7 +65,7 @@ test("bash tool executes commands and validates timeout", async () => {
 });
 
 test("ToolExecutor dispatches tools and formats results", async () => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-executor-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-executor-"));
   await fs.writeFile(path.join(cwd, "note.txt"), "hello");
 
   const executor = new ToolExecutor(cwd);
@@ -84,8 +84,8 @@ test("ToolExecutor dispatches tools and formats results", async () => {
 });
 
 test("ToolExecutor discovers MCP tools from Brain-provided config and executes them through a generic MCP client", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-mcp-"));
-  const scriptDir = await fs.mkdtemp(path.join(process.cwd(), ".axon-hand-mcp-script-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-mcp-"));
+  const scriptDir = await fs.mkdtemp(path.join(process.cwd(), ".cerelay-client-mcp-script-"));
   const scriptPath = path.join(scriptDir, "demo-mcp.mjs");
 
   t.after(async () => {

@@ -7,7 +7,7 @@ import process from "node:process";
 import { loadClaudeMcpServerConfigs } from "../src/claude-mcp-config.js";
 
 test("loadClaudeMcpServerConfigs merges Claude global and local settings", async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "axon-claude-mcp-config-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "cerelay-claude-mcp-config-"));
   const homeDir = path.join(root, "home");
   const workspaceDir = path.join(root, "workspace");
   const claudeDir = path.join(homeDir, ".claude");

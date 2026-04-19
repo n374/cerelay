@@ -161,7 +161,7 @@ export function createLogger(component: string): Logger {
 }
 
 export function resolveDefaultLogFilePath(): string {
-  return path.join(tmpdir(), "axon-hand.log");
+  return path.join(tmpdir(), "cerelay-client.log");
 }
 
 export function getLogFilePath(): string | null {

@@ -7,10 +7,10 @@ import type { ClaudeSessionRuntime, SpawnOptions, SpawnedProcess } from "./claud
 import { createLogger, type Logger } from "./logger.js";
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
 import {
-  isHandRoutedToolName,
+  isClientRoutedToolName,
   renderToolResultForClaude,
   resolveClaudeCodeExecutable,
-  rewriteToolInputForHand,
+  rewriteToolInputForClient,
   type HookInput,
   type SyncHookJsonOutput,
 } from "./session.js";
@@ -36,8 +36,8 @@ export interface ClaudePtySessionOptions {
   colorTerm?: string;
   termProgram?: string;
   termProgramVersion?: string;
-  handHomeDir?: string;
-  shouldRouteToolToHand?: (toolName: string) => boolean;
+  clientHomeDir?: string;
+  shouldRouteToolToClient?: (toolName: string) => boolean;
 }
 
 export class ClaudePtySession {
@@ -51,8 +51,8 @@ export class ClaudePtySession {
   private readonly colorTerm?: string;
   private readonly termProgram?: string;
   private readonly termProgramVersion?: string;
-  private readonly handHomeDir?: string;
-  private readonly shouldRouteToolToHand: (toolName: string) => boolean;
+  private readonly clientHomeDir?: string;
+  private readonly shouldRouteToolToClient: (toolName: string) => boolean;
   private readonly relay = new ToolRelay();
   private readonly log: Logger;
   private child: ChildProcess | null = null;
@@ -72,8 +72,8 @@ export class ClaudePtySession {
     this.colorTerm = options.colorTerm;
     this.termProgram = options.termProgram;
     this.termProgramVersion = options.termProgramVersion;
-    this.handHomeDir = options.handHomeDir?.trim() || undefined;
-    this.shouldRouteToolToHand = options.shouldRouteToolToHand ?? ((toolName) => isHandRoutedToolName(toolName));
+    this.clientHomeDir = options.clientHomeDir?.trim() || undefined;
+    this.shouldRouteToolToClient = options.shouldRouteToolToClient ?? ((toolName) => isClientRoutedToolName(toolName));
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -110,9 +110,9 @@ export class ClaudePtySession {
         TERM_PROGRAM_VERSION: this.termProgramVersion || this.runtime.env.TERM_PROGRAM_VERSION,
         CLICOLOR_FORCE: "1",
         FORCE_COLOR: "3",
-        AXON_PTY_COLS: String(Math.max(cols, 1)),
-        AXON_PTY_ROWS: String(Math.max(rows, 1)),
-        AXON_PTY_CONTROL_FD: "3",
+        CERELAY_PTY_COLS: String(Math.max(cols, 1)),
+        CERELAY_PTY_ROWS: String(Math.max(rows, 1)),
+        CERELAY_PTY_CONTROL_FD: "3",
       },
       signal: this.abortController.signal,
       extraPipeCount: 1,
@@ -169,7 +169,7 @@ export class ClaudePtySession {
       this.log.warn("Claude PTY 会话异常", {
         error: error.message,
       });
-      void this.transport.sendOutput(this.id, Buffer.from(`\r\n[axon] PTY error: ${error.message}\r\n`, "utf8")).catch(() => undefined);
+      void this.transport.sendOutput(this.id, Buffer.from(`\r\n[cerelay] PTY error: ${error.message}\r\n`, "utf8")).catch(() => undefined);
     });
   }
 
@@ -224,8 +224,8 @@ export class ClaudePtySession {
       inputSummary: summarizeUnknown(input.tool_input),
     });
 
-    if (!this.shouldRouteToolToHand(input.tool_name)) {
-      this.log.info("PTY tool 未配置为通过 Hand 转发，直接放行", {
+    if (!this.shouldRouteToolToClient(input.tool_name)) {
+      this.log.info("PTY tool 未配置为通过 Client 转发，直接放行", {
         toolName: input.tool_name,
       });
       return {
@@ -237,7 +237,7 @@ export class ClaudePtySession {
       };
     }
 
-    const result = await this.executeToolViaHand(input.tool_name, input.tool_input, input.tool_use_id);
+    const result = await this.executeToolViaClient(input.tool_name, input.tool_input, input.tool_use_id);
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -253,7 +253,7 @@ export class ClaudePtySession {
       return path.join(this.helperDir, "pty_host.py");
     }
 
-    this.helperDir = await mkdtemp(path.join(tmpdir(), "axon-pty-host-"));
+    this.helperDir = await mkdtemp(path.join(tmpdir(), "cerelay-pty-host-"));
     const helperPath = path.join(this.helperDir, "pty_host.py");
     await writeFile(helperPath, PYTHON_PTY_HOST_SCRIPT, "utf8");
     await chmod(helperPath, 0o755);
@@ -271,21 +271,21 @@ export class ClaudePtySession {
     }
   }
 
-  private async executeToolViaHand(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
+  private async executeToolViaClient(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
     if (this.closed) {
       throw new Error("会话已关闭");
     }
 
-    const rewrittenInput = rewriteToolInputForHand(toolName, toolInput, {
-      brainHomeDir: this.runtime.env.HOME?.trim() || process.env.HOME || "/home/node",
-      handHomeDir: this.handHomeDir,
-      brainCwd: this.runtime.cwd,
-      handCwd: this.cwd,
+    const rewrittenInput = rewriteToolInputForClient(toolName, toolInput, {
+      serverHomeDir: this.runtime.env.HOME?.trim() || process.env.HOME || "/home/node",
+      clientHomeDir: this.clientHomeDir,
+      serverCwd: this.runtime.cwd,
+      clientCwd: this.cwd,
     });
     const requestId = `hook-${this.id}-${randomUUID()}`;
     const pending = this.relay.createPending(requestId, toolName);
 
-    this.log.info("PTY tool 准备转发到 Hand", {
+    this.log.info("PTY tool 准备转发到 Client", {
       requestId,
       toolName,
       toolUseId,
@@ -294,7 +294,7 @@ export class ClaudePtySession {
 
     await this.transport.sendToolCall(this.id, requestId, toolName, toolUseId, rewrittenInput);
     const result = await pending;
-    this.log.info("PTY tool 收到 Hand 结果", {
+    this.log.info("PTY tool 收到 Client 结果", {
       requestId,
       toolName,
       hasError: Boolean(result.error),
@@ -332,7 +332,7 @@ function defaultSpawnInRuntime(options: SpawnOptions): SpawnedProcess {
 }
 
 function buildClaudeCommandArgs(model: string | undefined): string[] {
-  const override = process.env.AXON_PTY_COMMAND?.trim();
+  const override = process.env.CERELAY_PTY_COMMAND?.trim();
   if (override) {
     return ["/bin/sh", "-lc", override];
   }

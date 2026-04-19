@@ -36,13 +36,13 @@ import type {
   ThoughtChunk,
 } from "./protocol.js";
 
-const log = createLogger("hand-client");
+const log = createLogger("client");
 
 // ============================================================
 // 回调接口：供 ACP Server 等非 UI 场景使用
 // ============================================================
 
-export interface HandClientCallbacks {
+export interface ClientCallbacks {
   onTextChunk?: (text: string) => void;
   onThoughtChunk?: (text: string) => void;
   onToolCall?: (toolName: string, requestId: string, input: unknown) => void;
@@ -50,7 +50,7 @@ export interface HandClientCallbacks {
   onToolResult?: (toolName: string, requestId: string, output: unknown, error?: string) => void;
 }
 
-export interface HandClientOptions {
+export interface ClientOptions {
   interactiveOutput?: boolean;
 }
 
@@ -61,10 +61,10 @@ export interface EnsureSessionOptions {
 }
 
 // ============================================================
-// HandClient：连接 Axon Server 并处理消息
+// CerelayClient：连接 Cerelay Server 并处理消息
 // ============================================================
 
-export class HandClient {
+export class CerelayClient {
   private readonly serverURL: string;
   private readonly initialCwd: string;
   private ws: WebSocket | null = null;
@@ -86,7 +86,7 @@ export class HandClient {
 
   // 最后一次 session_end 结果（供 ACP Server 查询）
   private lastResult: { result?: string; error?: string } = {};
-  private activeCallbacks: HandClientCallbacks | undefined;
+  private activeCallbacks: ClientCallbacks | undefined;
 
   // MCP 连接池：跨 session 复用已建立的 MCP 连接
   private sharedMcpRuntime: McpRuntime | null = null;
@@ -95,7 +95,7 @@ export class HandClient {
   // 写锁：用 Promise 链模拟互斥，确保并发写安全
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(serverURL: string, cwd: string, options: HandClientOptions = {}) {
+  constructor(serverURL: string, cwd: string, options: ClientOptions = {}) {
     this.serverURL = serverURL;
     this.initialCwd = cwd;
     this.currentCwd = cwd;
@@ -105,7 +105,7 @@ export class HandClient {
     this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
   }
 
-  // 连接到 Server
+  // 连接到 Cerelay Server
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
@@ -144,7 +144,7 @@ export class HandClient {
 
   // 关闭连接
   close(): void {
-    log.debug("关闭 HandClient", {
+    log.debug("关闭 CerelayClient", {
       sessionId: this.sessionId,
       connected: Boolean(this.ws),
     });
@@ -277,12 +277,12 @@ export class HandClient {
   }
 
   // 带回调的消息循环（供 ACP Server 使用，不依赖 UI）
-  runWithCallbacks(callbacks: HandClientCallbacks): Promise<void> {
+  runWithCallbacks(callbacks: ClientCallbacks): Promise<void> {
     return this.runInternal(callbacks);
   }
 
   // 内部统一消息循环实现
-  private runInternal(callbacks?: HandClientCallbacks): Promise<void> {
+  private runInternal(callbacks?: ClientCallbacks): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -466,7 +466,7 @@ export class HandClient {
 
   // 处理单条消息，返回 true 表示会话结束（session_end）
   // callbacks 为可选，有则通知回调方（ACP 场景），无则使用 UI 输出（CLI 场景）
-  private handleMessage(raw: string, callbacks?: HandClientCallbacks): boolean {
+  private handleMessage(raw: string, callbacks?: ClientCallbacks): boolean {
     let msg: ServerToHandMessage;
     try {
       msg = JSON.parse(raw) as ServerToHandMessage;
@@ -906,14 +906,14 @@ export class HandClient {
     let mcpToolCatalog: Record<string, McpServerCatalogEntry>;
     try {
       mcpToolCatalog = await this.executor.describeMcpServers();
-      log.debug("收集 Brain 下发 MCP tool catalog 完成", {
+      log.debug("收集 Server 下发 MCP tool catalog 完成", {
         cwd: this.currentCwd,
         sessionId,
         serverCount: Object.keys(mcpToolCatalog).length,
         servers: Object.keys(mcpToolCatalog),
       });
     } catch (error) {
-      log.error("收集 Brain 下发 MCP tool catalog 失败", {
+      log.error("收集 Server 下发 MCP tool catalog 失败", {
         cwd: this.currentCwd,
         sessionId,
         error: formatErrorForLog(error),

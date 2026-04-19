@@ -2,11 +2,11 @@ import os from "node:os";
 import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BrainSession } from "../src/session.js";
+import { ServerSession } from "../src/session.js";
 import type { ServerToHandMessage } from "../src/protocol.js";
 import { writeFakeClaude } from "./fixtures/fake-claude.js";
 
-test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {
+test("runPrompt 不透传 Client 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {
   const fake = await writeFakeClaude();
   const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
   process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
@@ -20,12 +20,12 @@ test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spaw
     await fake.cleanup();
   });
 
-  // 故意构造一个明显不存在的宿主机风格路径:如果 BrainSession 把它直接透传给 SDK,
+  // 故意构造一个明显不存在的宿主机风格路径:如果 ServerSession 把它直接透传给 SDK,
   // child_process.spawn 会因 cwd ENOENT 立刻失败 —— 这正是 fix 之前的 bug。
   const hostCwd = "/Users/nobody/does-not-exist-xxx-regression";
   let capturedCwd: unknown = "<unset>";
 
-  const session = BrainSession.createSession({
+  const session = ServerSession.createSession({
     id: "sess-flow-cwd-regression",
     cwd: hostCwd,
     model: "claude-test",
@@ -46,15 +46,15 @@ test("runPrompt 不透传 Hand 宿主机 cwd:使用系统临时目录避免 spaw
   assert.notEqual(capturedCwd, hostCwd);
   // 2. SDK 收到的是系统临时目录(方案 3 的承诺)
   assert.equal(capturedCwd, os.tmpdir());
-  // 3. BrainSession 仍把宿主机路径作为元信息保留(供 Hand / 日志使用)
+  // 3. ServerSession 仍把宿主机路径作为元信息保留(供 Client / 日志使用)
   assert.equal(session.info().cwd, hostCwd);
 });
 
-test("BrainSession relays tool calls through Hand and completes once tool_result arrives", async () => {
+test("ServerSession relays tool calls through Client and completes once tool_result arrives", async () => {
   const sent: ServerToHandMessage[] = [];
-  let session!: BrainSession;
+  let session!: ServerSession;
 
-  session = BrainSession.createSession({
+  session = ServerSession.createSession({
     id: "sess-flow-2",
     cwd: "/workspace/demo",
     model: "claude-test",
@@ -108,18 +108,18 @@ test("BrainSession relays tool calls through Hand and completes once tool_result
   });
 });
 
-test("BrainSession rewrites Claude-local file paths and injected cwd before handing tools to Hand", async () => {
+test("ServerSession rewrites Claude-local file paths and injected cwd before handing tools to Client", async () => {
   const sent: ServerToHandMessage[] = [];
-  let session!: BrainSession;
-  const sdkCwd = "/tmp/axon-claude-sess-123";
-  const handCwd = "/Users/n374/Documents/Code/axon";
-  const handHomeDir = "/Users/n374";
+  let session!: ServerSession;
+  const sdkCwd = "/tmp/cerelay-claude-sess-123";
+  const clientCwd = "/Users/n374/Documents/Code/axon";
+  const clientHomeDir = "/Users/n374";
 
-  session = BrainSession.createSession({
+  session = ServerSession.createSession({
     id: "sess-flow-path-rewrite",
     claudeHomeDir: "/home/node",
-    cwd: handCwd,
-    handHomeDir,
+    cwd: clientCwd,
+    clientHomeDir,
     model: "claude-test",
     sdkCwd,
     transport: {
@@ -152,9 +152,9 @@ test("BrainSession rewrites Claude-local file paths and injected cwd before hand
 
   const toolCalls = sent.filter((message): message is Extract<ServerToHandMessage, { type: "tool_call" }> => message.type === "tool_call");
   assert.equal(toolCalls.length, 2);
-  assert.deepEqual(toolCalls[0]?.input, { file_path: "/Users/n374/.claude/settings.json" });
+  assert.deepEqual(toolCalls[0]?.input, { file_path: `${clientHomeDir}/.claude/settings.json` });
   assert.deepEqual(toolCalls[1]?.input, {
-    command: "cd /Users/n374/Documents/Code/axon && cat /Users/n374/.claude.json && pwd",
+    command: `cd ${clientCwd} && cat ${clientHomeDir}/.claude.json && pwd`,
   });
 });
 

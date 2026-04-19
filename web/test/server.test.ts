@@ -6,7 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { WebServer } from "../src/server.js";
 
 test("WebServer serves health, static files, and security headers", async (t) => {
-  const server = new WebServer({ port: 0, brainAddress: "127.0.0.1:65534" });
+  const server = new WebServer({ port: 0, serverAddress: "127.0.0.1:65534" });
   registerWebServerCleanup(t, server);
   await server.start();
 
@@ -18,7 +18,7 @@ test("WebServer serves health, static files, and security headers", async (t) =>
 
   const home = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /Axon/);
+  assert.match(await home.text(), /Cerelay/);
   assert.match(home.headers.get("content-security-policy") ?? "", /default-src 'self'/);
 
   const fallback = await fetch(`http://127.0.0.1:${port}/missing-route`);
@@ -29,22 +29,22 @@ test("WebServer serves health, static files, and security headers", async (t) =>
   assert.equal(forbidden.status, 403);
 });
 
-test("WebServer proxies websocket traffic to brain", async (t) => {
-  const brainHttp = createServer();
-  const brainWs = new WebSocketServer({ server: brainHttp });
-  registerBrainCleanup(t, brainHttp, brainWs);
+test("WebServer proxies websocket traffic to server", async (t) => {
+  const serverHttp = createServer();
+  const serverWs = new WebSocketServer({ server: serverHttp });
+  registerServerCleanup(t, serverHttp, serverWs);
 
-  brainWs.on("connection", (socket) => {
+  serverWs.on("connection", (socket) => {
     socket.on("message", (data) => {
       socket.send(data.toString().toUpperCase());
     });
   });
 
-  brainHttp.listen(0);
-  await once(brainHttp, "listening");
-  const brainPort = (brainHttp.address() as import("node:net").AddressInfo).port;
+  serverHttp.listen(0);
+  await once(serverHttp, "listening");
+  const serverPort = (serverHttp.address() as import("node:net").AddressInfo).port;
 
-  const server = new WebServer({ port: 0, brainAddress: `127.0.0.1:${brainPort}` });
+  const server = new WebServer({ port: 0, serverAddress: `127.0.0.1:${serverPort}` });
   registerWebServerCleanup(t, server);
   await server.start();
 
@@ -112,17 +112,17 @@ function registerWebServerCleanup(t: TestContext, server: WebServer): void {
   });
 }
 
-function registerBrainCleanup(
+function registerServerCleanup(
   t: TestContext,
-  brainHttp: ReturnType<typeof createServer>,
-  brainWs: WebSocketServer
+  serverHttp: ReturnType<typeof createServer>,
+  serverWs: WebSocketServer
 ): void {
   t.after(async () => {
-    for (const client of brainWs.clients) {
+    for (const client of serverWs.clients) {
       client.close();
     }
-    await new Promise<void>((resolve) => brainWs.close(() => resolve()));
-    await new Promise<void>((resolve, reject) => brainHttp.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve) => serverWs.close(() => resolve()));
+    await new Promise<void>((resolve, reject) => serverHttp.close((error) => error ? reject(error) : resolve()));
   });
 }
 

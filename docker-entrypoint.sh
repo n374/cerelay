@@ -1,18 +1,18 @@
 #!/bin/sh
 # ============================================================
-# Axon Brain 容器入口脚本
+# Cerelay Server 容器入口脚本
 # 职责：
 #   1. 初始化 Claude Code 登录态
 #   2. 可选写入额外 claude CLI 配置
-#   3. 启动 axon-server
+#   3. 启动 cerelay-server
 # ============================================================
 
 set -e
 
 # --- 颜色输出 ---
-info()  { printf '\033[0;36m[axon-brain] %s\033[0m\n' "$*"; }
-warn()  { printf '\033[0;33m[axon-brain] WARNING: %s\033[0m\n' "$*"; }
-error() { printf '\033[0;31m[axon-brain] ERROR: %s\033[0m\n' "$*" >&2; }
+info()  { printf '\033[0;36m[cerelay-server] %s\033[0m\n' "$*"; }
+warn()  { printf '\033[0;33m[cerelay-server] WARNING: %s\033[0m\n' "$*"; }
+error() { printf '\033[0;31m[cerelay-server] ERROR: %s\033[0m\n' "$*" >&2; }
 
 # --- 参数配置 ---
 PORT="${PORT:-8765}"
@@ -20,13 +20,13 @@ MODEL="${MODEL:-claude-sonnet-4-20250514}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 LOG_JSON="${LOG_JSON:-false}"
 
-info "启动 Axon Brain Server"
+info "启动 Cerelay Server"
 info "  端口: ${PORT}"
 info "  模型: ${MODEL}"
 info "  日志级别: ${LOG_LEVEL}"
 info "  JSON 日志: ${LOG_JSON}"
-if [ -n "${AXON_KEY}" ]; then
-  info "  AXON_KEY: 已配置（Hand 连接需提供匹配的 key）"
+if [ -n "${CERELAY_KEY}" ]; then
+  info "  CERELAY_KEY: 已配置（Client 连接需提供匹配的 key）"
 fi
 
 # --- Claude Code 登录态初始化 ---
@@ -67,7 +67,7 @@ fi
 
 info "claude CLI 版本: $(claude --version 2>/dev/null || echo '未知')"
 
-# --- 启动 Axon Server ---
+# --- 启动 Cerelay Server ---
 set -- node /app/server/dist/index.js \
   --port "${PORT}" \
   --model "${MODEL}" \

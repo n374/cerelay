@@ -12,9 +12,9 @@ import termios
 import threading
 
 COMMAND = sys.argv[1:]
-CONTROL_FD = int(os.environ.get("AXON_PTY_CONTROL_FD", "3"))
-COLS = int(os.environ.get("AXON_PTY_COLS", "80"))
-ROWS = int(os.environ.get("AXON_PTY_ROWS", "24"))
+CONTROL_FD = int(os.environ.get("CERELAY_PTY_CONTROL_FD", "3"))
+COLS = int(os.environ.get("CERELAY_PTY_COLS", "80"))
+ROWS = int(os.environ.get("CERELAY_PTY_ROWS", "24"))
 
 master_fd, slave_fd = pty.openpty()
 

@@ -34,10 +34,10 @@ interface Deferred {
 
 export interface FileProxyManagerOptions {
   runtimeRoot: string;
-  handHomeDir: string;
-  handCwd: string;
-  /** 向 Hand 发送文件代理请求 */
-  sendToHand: (msg: FileProxyRequest) => Promise<void>;
+  clientHomeDir: string;
+  clientCwd: string;
+  /** 向 Client 发送文件代理请求 */
+  sendToClient: (msg: FileProxyRequest) => Promise<void>;
   /** 所属 session ID */
   sessionId: string;
   /** Shadow files: FUSE 内虚拟路径 → 本地真实文件路径（如 hook injection settings） */
@@ -46,14 +46,14 @@ export interface FileProxyManagerOptions {
 
 /**
  * 管理单个 session 的 FUSE daemon 生命周期。
- * FUSE daemon ←stdin/stdout→ FileProxyManager ←WebSocket→ Hand
+ * FUSE daemon ←stdin/stdout→ FileProxyManager ←WebSocket→ Client
  */
 export class FileProxyManager {
   private readonly runtimeRoot: string;
   private readonly sessionId: string;
-  private readonly handHomeDir: string;
-  private readonly handCwd: string;
-  private readonly sendToHand: (msg: FileProxyRequest) => Promise<void>;
+  private readonly clientHomeDir: string;
+  private readonly clientCwd: string;
+  private readonly sendToClient: (msg: FileProxyRequest) => Promise<void>;
 
   private fuseProcess: ChildProcess | null = null;
   private controlStream: NodeJS.WritableStream | null = null;
@@ -71,15 +71,15 @@ export class FileProxyManager {
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
     this.sessionId = options.sessionId;
-    this.handHomeDir = options.handHomeDir;
-    this.handCwd = options.handCwd;
-    this.sendToHand = options.sendToHand;
+    this.clientHomeDir = options.clientHomeDir;
+    this.clientCwd = options.clientCwd;
+    this.sendToClient = options.sendToClient;
     this.shadowFiles = options.shadowFiles ?? {};
 
     this.roots = {
-      "home-claude": path.join(this.handHomeDir, ".claude"),
-      "home-claude-json": path.join(this.handHomeDir, ".claude.json"),
-      "project-claude": path.join(this.handCwd, ".claude"),
+      "home-claude": path.join(this.clientHomeDir, ".claude"),
+      "home-claude-json": path.join(this.clientHomeDir, ".claude.json"),
+      "project-claude": path.join(this.clientCwd, ".claude"),
     };
   }
 
@@ -122,12 +122,12 @@ export class FileProxyManager {
       {
         env: {
           ...process.env,
-          AXON_FUSE_MOUNT_POINT: this._mountPoint,
-          AXON_FUSE_CONTROL_FD: "3",
-          AXON_FUSE_ROOTS: JSON.stringify(this.roots),
-          AXON_FUSE_READY_FILE: readyFile,
-          AXON_FUSE_SHADOW_FILES: JSON.stringify(this.shadowFiles),
-          AXON_FUSE_CACHE_SNAPSHOT: snapshotFile,
+          CERELAY_FUSE_MOUNT_POINT: this._mountPoint,
+          CERELAY_FUSE_CONTROL_FD: "3",
+          CERELAY_FUSE_ROOTS: JSON.stringify(this.roots),
+          CERELAY_FUSE_READY_FILE: readyFile,
+          CERELAY_FUSE_SHADOW_FILES: JSON.stringify(this.shadowFiles),
+          CERELAY_FUSE_CACHE_SNAPSHOT: snapshotFile,
         },
         stdio: ["pipe", "pipe", "pipe", "pipe"],
       }
@@ -179,7 +179,7 @@ export class FileProxyManager {
   }
 
   /**
-   * 向 Hand 发送 snapshot 请求，收集各 root 的完整目录树快照，
+   * 向 Client 发送 snapshot 请求，收集各 root 的完整目录树快照，
    * 写入临时文件供 FUSE daemon 启动时加载。
    * 一次 round-trip 替代原来 14k+ 次逐文件 FUSE 操作。
    */
@@ -188,9 +188,9 @@ export class FileProxyManager {
 
     // 并行对每个 root 发 snapshot 请求
     const results = await Promise.allSettled(
-      Object.entries(this.roots).map(async ([rootName, handPath]) => {
+      Object.entries(this.roots).map(async ([rootName, clientPath]) => {
         const reqId = `snapshot-${rootName}-${Date.now()}`;
-        const resp = await this.sendSnapshotRequest(reqId, rootName, handPath);
+        const resp = await this.sendSnapshotRequest(reqId, rootName, clientPath);
         return { rootName, entries: resp };
       })
     );
@@ -235,7 +235,7 @@ export class FileProxyManager {
   private sendSnapshotRequest(
     reqId: string,
     rootName: string,
-    handPath: string,
+    clientPath: string,
   ): Promise<import("./protocol.js").FileProxySnapshotEntry[] | undefined> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -252,12 +252,12 @@ export class FileProxyManager {
         timer,
       });
 
-      this.sendToHand({
+      this.sendToClient({
         type: "file_proxy_request",
         reqId,
         sessionId: this.sessionId,
         op: "snapshot",
-        path: handPath,
+        path: clientPath,
       }).catch(() => {
         this.pendingRequests.delete(reqId);
         clearTimeout(timer);
@@ -267,7 +267,7 @@ export class FileProxyManager {
   }
 
   /**
-   * 处理 Hand 返回的 file_proxy_response，dispatch 到等待中的 FUSE 请求。
+   * 处理 Client 返回的 file_proxy_response，dispatch 到等待中的 FUSE 请求。
    */
   resolveResponse(resp: FileProxyResponse): void {
     const deferred = this.pendingRequests.get(resp.reqId);
@@ -360,7 +360,7 @@ export class FileProxyManager {
 
   /**
    * 处理 FUSE daemon stdout 的一行 JSON。
-   * 将 FUSE 的虚拟根路径解析为 Hand 侧绝对路径，转发给 Hand。
+   * 将 FUSE 的虚拟根路径解析为 Client 侧绝对路径，转发给 Client。
    */
   private async handleFuseLine(line: string): Promise<void> {
     let req: FuseRequest;
@@ -371,8 +371,8 @@ export class FileProxyManager {
     }
 
     const { root, relPath, reqId } = req;
-    const handRoot = this.roots[root];
-    if (!handRoot) {
+    const clientRoot = this.roots[root];
+    if (!clientRoot) {
       // 未知 root，返回 ENOENT
       this.writeToDaemon({
         reqId,
@@ -381,16 +381,16 @@ export class FileProxyManager {
       return;
     }
 
-    // 构建 Hand 侧绝对路径
-    const handPath = relPath ? path.join(handRoot, relPath) : handRoot;
+    // 构建 Client 侧绝对路径
+    const clientPath = relPath ? path.join(clientRoot, relPath) : clientRoot;
 
-    // 构建发给 Hand 的 file_proxy_request
-    const handReq: FileProxyRequest = {
+    // 构建发给 Client 的 file_proxy_request
+    const clientReq: FileProxyRequest = {
       type: "file_proxy_request",
       reqId,
       sessionId: this.sessionId,
       op: req.op as FileProxyRequest["op"],
-      path: handPath,
+      path: clientPath,
       data: req.data,
       offset: req.offset,
       size: req.size,
@@ -398,22 +398,22 @@ export class FileProxyManager {
       atime: req.atime,
       mtime: req.mtime,
       newPath: req.op === "rename" && req.newRelPath !== undefined
-        ? path.join(this.roots[req.newRoot ?? root] ?? handRoot, req.newRelPath)
+        ? path.join(this.roots[req.newRoot ?? root] ?? clientRoot, req.newRelPath)
         : undefined,
     };
 
-    // 注册 pending，等待 Hand 响应
+    // 注册 pending，等待 Client 响应
     const deferred = this.createDeferred(reqId);
     this.pendingRequests.set(reqId, deferred);
 
     try {
-      await this.sendToHand(handReq);
+      await this.sendToClient(clientReq);
     } catch (err) {
       this.pendingRequests.delete(reqId);
       clearTimeout(deferred.timer);
       this.writeToDaemon({
         reqId,
-        error: { code: 5, message: `EIO: failed to send to Hand: ${err}` },
+        error: { code: 5, message: `EIO: failed to send to Client: ${err}` },
       });
     }
   }
@@ -432,7 +432,7 @@ export class FileProxyManager {
       this.pendingRequests.delete(reqId);
       this.writeToDaemon({
         reqId,
-        error: { code: 110, message: "ETIMEDOUT: Hand response timeout" },
+        error: { code: 110, message: "ETIMEDOUT: Client response timeout" },
       });
       reject(new Error("timeout"));
     }, 30_000);
@@ -462,7 +462,7 @@ export class FileProxyManager {
   private async ensureHelperScript(): Promise<string> {
     const scriptDir = path.join(this.runtimeRoot, "fuse-helper");
     await mkdir(scriptDir, { recursive: true });
-    const scriptPath = path.join(scriptDir, "axon-fuse-host.py");
+    const scriptPath = path.join(scriptDir, "cerelay-fuse-host.py");
     await writeFile(scriptPath, PYTHON_FUSE_HOST_SCRIPT, "utf8");
     await chmod(scriptPath, 0o755);
     return scriptPath;

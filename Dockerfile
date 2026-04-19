@@ -1,7 +1,7 @@
 # ============================================================
-# Axon Brain — Docker 镜像
+# Cerelay Server — Docker 镜像
 # 基础镜像：Node.js 22 LTS（slim 变体减小体积）
-# 内含：Node.js + claude CLI + axon-server TypeScript 依赖
+# 内含：Node.js + claude CLI + cerelay-server TypeScript 依赖
 # ============================================================
 
 # ---- 依赖阶段：解析 workspace 并安装编译所需依赖 ----
@@ -12,7 +12,7 @@ WORKDIR /app
 # 先复制 workspace 根配置，再复制各包 package.json，利用 Docker 层缓存
 COPY package.json package-lock.json ./
 COPY server/package.json ./server/
-COPY hand/package.json ./hand/
+COPY client/package.json ./client/
 COPY web/package.json ./web/
 
 # 安装所有依赖（包括 devDependencies 以便编译 TypeScript）
@@ -36,7 +36,7 @@ ENV HOME=/home/node
 # 运行阶段仍需完整 workspace 清单，否则 npm workspace 安装会失败
 COPY package.json package-lock.json ./
 COPY server/package.json ./server/
-COPY hand/package.json ./hand/
+COPY client/package.json ./client/
 COPY web/package.json ./web/
 
 RUN apt-get update \
@@ -50,9 +50,9 @@ COPY --from=builder /app/server/dist ./server/dist
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /opt/axon-runtime \
+  && mkdir -p /opt/cerelay-runtime \
   && mkdir -p /home/node/.claude \
-  && chown -R root:root /app /home/node /opt/axon-runtime
+  && chown -R root:root /app /home/node /opt/cerelay-runtime
 
 # 暴露 WebSocket 端口（默认 8765）
 EXPOSE 8765

@@ -7,14 +7,14 @@ import { dirname, resolve } from "node:path";
 
 const WORKDIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("package scripts keep brain:up on a force-recreate path", async () => {
+test("package scripts keep server:up on a force-recreate path", async () => {
   const packageJson = JSON.parse(await readFile(path.join(WORKDIR, "package.json"), "utf8"));
-  const brainUp = packageJson?.scripts?.["brain:up"];
+  const serverUp = packageJson?.scripts?.["server:up"];
 
-  assert.equal(typeof brainUp, "string");
-  assert.match(brainUp, /\bdocker compose up\b/);
-  assert.match(brainUp, /\s--build\b/);
-  assert.match(brainUp, /\s--force-recreate\b/);
-  assert.match(brainUp, /\s--remove-orphans\b/);
-  assert.match(brainUp, /\s-d\b/);
+  assert.equal(typeof serverUp, "string");
+  assert.match(serverUp, /\bdocker compose up\b/);
+  assert.match(serverUp, /\s--build\b/);
+  assert.match(serverUp, /\s--force-recreate\b/);
+  assert.match(serverUp, /\s--remove-orphans\b/);
+  assert.match(serverUp, /\s-d\b/);
 });

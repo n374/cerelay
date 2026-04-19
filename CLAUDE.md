@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述 / Project Overview
 
-**Axon** 是 Claude Code 的分体式架构实现。核心设计：用户在 Hand 端交互，Hand 在本地执行工具，Server 端负责通过 Claude Agent SDK 驱动推理，并通过 WebSocket 将工具调用转发回 Hand。
+**Cerelay** 是 Claude Code 的分体式架构实现。核心设计：用户在 Client 端交互，Hand 在本地执行工具，Server 端负责通过 Claude Agent SDK 驱动推理，并通过 WebSocket 将工具调用转发回 Client。
 
-**Axon** is a split-architecture implementation of Claude Code. Core design: users interact on the Hand side, Hand executes tools locally, and the Server uses the Claude Agent SDK for reasoning while forwarding tool calls back to Hand via WebSocket.
+**Cerelay** is a split-architecture implementation of Claude Code. Core design: users interact on the Client side, Client executes tools locally, and the Server uses the Claude Agent SDK for reasoning while forwarding tool calls back to Client via WebSocket.
 
 ## 架构 / Architecture
 
@@ -22,30 +22,30 @@ Hand (TypeScript CLI)     Server (TypeScript + SDK)    Claude Code CLI
 
 **核心路径 / Primary Path**:
 ```
-Hand CLI ←→ WebSocket ←→ Server ←→ SDK query() ←→ Claude Code CLI
+Client CLI ←→ WebSocket ←→ Server ←→ SDK query() ←→ Claude Code CLI
 ```
 
 ### 关键组件 / Key Components
 
 | 组件 / Component | 位置 / Location | 职责 / Responsibility |
 |---|---|---|
-| **Hand** | `hand/src/` | CLI 入口、本地工具执行 (Read/Write/Edit/Bash/Grep/Glob)、终端交互 |
+| **Hand** | `client/src/` | CLI 入口、本地工具执行 (Read/Write/Edit/Bash/Grep/Glob)、终端交互 |
 | **Server** | `server/src/` | HTTP/WebSocket 服务、SDK 集成、Session 管理、MCP 代理、PTY 运行时 |
 | **Web** | `web/src/` | 可选浏览器 UI |
 | **Session Runtime** | `server/src/claude-session-runtime.ts` | 为每个 Session 创建隔离运行环境（mount namespace） |
-| **Tool Relay** | `server/src/session.ts` | SDK Hook 拦截 + Hand 执行的工具回传管理 |
+| **Tool Relay** | `server/src/session.ts` | SDK Hook 拦截 + Client 执行的工具回传管理 |
 | **MCP Proxy** | `server/src/mcp-proxy.ts` | 代理 MCP Server 调用 |
 
 ### 通信流 / Communication Flow
 
 ```
-1. Hand 发起 prompt → Server (WebSocket)
+1. Client 发起 prompt → Server (WebSocket)
 2. Server 调用 SDK query()
 3. SDK 驱动 claude CLI 生成文本和工具调用
 4. Server 通过 PreToolUse hook 拦截工具调用
-5. Server 转发 tool_call → Hand (WebSocket)
-6. Hand 本地执行工具
-7. Hand 返回 tool_result → Server (WebSocket)
+5. Server 转发 tool_call → Client (WebSocket)
+6. Client 本地执行工具
+7. Client 返回 tool_result → Server (WebSocket)
 8. Server 通过 hook result 反馈给 SDK
 9. 循环直到 Session 结束
 ```
@@ -63,18 +63,18 @@ npm install
 #### 方式 A：Docker（推荐） / Docker (Recommended)
 
 ```bash
-npm run brain:up          # 启动 Axon Server 容器
-npm run brain:logs        # 查看日志
-npm run brain:down        # 停止容器
+npm run server:up          # 启动 Axon Server 容器
+npm run server:logs        # 查看日志
+npm run server:down        # 停止容器
 ```
 
 环境配置文件：`.env.example` → `.env`（可选，使用默认值则不需要）
 
 Key env vars:
 - `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`：Claude 认证
-- `BRAIN_HOST_PORT`：宿主机端口（默认 8765）
+- `SERVER_HOST_PORT`：宿主机端口（默认 8765）
 - `LOG_LEVEL`：日志级别（debug/info/warn/error）
-- `AXON_ENABLE_MOUNT_NAMESPACE`：是否启用隔离运行时（默认 true）
+- `CERELAY_ENABLE_MOUNT_NAMESPACE`：是否启用隔离运行时（默认 true）
 
 #### 方式 B：本地运行 / Local Run
 
@@ -84,18 +84,18 @@ Key env vars:
 cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
 ```
 
-### 启动 Hand / Start Hand
+### 启动 Client / Start Client
 
 在新终端中：
 
 ```bash
-cd hand && npm start -- --server localhost:8765 --cwd /path/to/project
+cd client && npm start -- --server localhost:8765 --cwd /path/to/project
 ```
 
 ### 启动 Web UI（可选） / Start Web UI (Optional)
 
 ```bash
-cd web && npm start -- --port 8766 --brain localhost:8765
+cd web && npm start -- --port 8766 --server localhost:8765
 ```
 
 然后打开 http://localhost:8766
@@ -110,7 +110,7 @@ npm run test:workspaces
 
 # 单个工作空间
 cd server && npm run build
-cd hand && npm run build
+cd client && npm run build
 cd web && npm run build
 ```
 
@@ -119,7 +119,7 @@ cd web && npm run build
 ```bash
 npm run typecheck          # 所有工作空间
 cd server && npm run typecheck
-cd hand && npm run typecheck
+cd client && npm run typecheck
 cd web && npm run typecheck
 ```
 
@@ -148,13 +148,13 @@ cd server && node --import tsx --test --test-concurrency=1 test/**/*.test.ts
 
 ```bash
 # 启用 debug 日志
-LOG_LEVEL=debug npm run brain:up
+LOG_LEVEL=debug npm run server:up
 
 # 查看实时日志
-npm run brain:logs
+npm run server:logs
 
 # 启用 JSON 日志
-LOG_JSON=true npm run brain:up
+LOG_JSON=true npm run server:up
 ```
 
 ## 项目结构 / Project Structure
@@ -176,9 +176,9 @@ axon/
 │   ├── test/                        # 集成和 e2e 测试
 │   ├── tsconfig.json
 │   └── package.json
-├── hand/                            # 用户交互 CLI + 工具执行
+├── client/                            # 用户交互 CLI + 工具执行
 │   ├── src/
-│   │   ├── index.ts                # Hand CLI 入口
+│   │   ├── index.ts                # Client CLI 入口
 │   │   ├── client.ts               # WebSocket 客户端
 │   │   ├── executor.ts             # 工具分发器
 │   │   ├── protocol.ts             # 消息类型定义
@@ -220,9 +220,9 @@ axon/
 
 **文件**: `server/src/claude-session-runtime.ts`, `server/src/pty-session.ts`
 
-- 默认启用（通过 `AXON_ENABLE_MOUNT_NAMESPACE=true`）
+- 默认启用（通过 `CERELAY_ENABLE_MOUNT_NAMESPACE=true`）
 - 为每个 Session 创建隔离的文件系统视图
-- Claude 看到的 `HOME` 和 `cwd` 对齐 Hand 上报的路径
+- Claude 看到的 `HOME` 和 `cwd` 对齐 Client 上报的路径
 - 使用 `unshare` / `nsenter` 实现
 
 ```typescript
@@ -238,15 +238,15 @@ const runtime = new ClaudeSessionRuntime({
 **文件**: `server/src/claude-hook-injection.ts`, `server/src/session.ts`
 
 - 通过 SDK `PreToolUse` callback 拦截工具调用
-- 将调用转发到 Hand 执行
-- 等待 Hand 返回结果后再反馈给 SDK
+- 将调用转发到 Client 执行
+- 等待 Client 返回结果后再反馈给 SDK
 
 ```typescript
 // sdk.query() 中的 hooks 参数
 hooks: {
   onPreToolUse: async (toolCall) => {
-    // 将 tool_call 转发到 Hand
-    // 等待 Hand tool_result
+    // 将 tool_call 转发到 Client
+    // 等待 Client tool_result
     // 返回 SDK 期望的格式
   }
 }
@@ -258,7 +258,7 @@ hooks: {
 
 - Server 从 Claude 自己的配置读取 `mcpServers`
 - 在 Server 侧代理 MCP 调用
-- Hand 不需要管理 MCP 连接
+- Client 不需要管理 MCP 连接
 
 ### 4. PTY/Shell 支持 / PTY/Shell Support
 
@@ -266,7 +266,7 @@ hooks: {
 
 - 为复杂 Shell 操作提供 PTY
 - 支持交互式命令（如 `git`, `npm` 交互式提示）
-- 通过 host script 与 Hand 交互
+- 通过 host script 与 Client 交互
 
 ## 依赖关系 / Dependencies
 
@@ -284,7 +284,7 @@ hooks: {
 - **mcp sdk**: 支持 MCP Server 集成
 - **ws**: WebSocket 库
 
-### Hand
+### Client
 
 ```json
 {
@@ -301,14 +301,14 @@ hooks: {
 
 ### 添加新工具 / Adding a New Tool
 
-1. **在 Hand 中实现工具** (`hand/src/tools/`)
+1. **在 Client 中实现工具** (`client/src/tools/`)
    - 遵循现有工具的接口（返回 `ToolResult`）
    - 例如：`fs.ts` (Read/Write/Edit), `bash.ts` (Bash), `search.ts` (Grep/Glob)
 
-2. **在 Executor 中注册** (`hand/src/executor.ts`)
+2. **在 Executor 中注册** (`client/src/executor.ts`)
    - 在 `executeToolCall()` 中添加路由
 
-3. **测试** (`hand/test/`)
+3. **测试** (`client/test/`)
    - 为新工具编写单元测试
 
 ### 修改会话流 / Modifying Session Flow
@@ -316,15 +316,15 @@ hooks: {
 **关键文件**: `server/src/session.ts`
 
 - `createQuery()`: 构建 SDK query 请求
-- `handleToolCall()`: 拦截 SDK 工具调用，转发到 Hand
-- `waitForToolResult()`: 等待 Hand 执行结果
+- `handleToolCall()`: 拦截 SDK 工具调用，转发到 Client
+- `waitForToolResult()`: 等待 Client 执行结果
 
 ### 调试 WebSocket 通信 / Debugging WebSocket Communication
 
 启用 debug 日志：
 
 ```bash
-LOG_LEVEL=debug npm run brain:up
+LOG_LEVEL=debug npm run server:up
 ```
 
 日志会显示：
@@ -344,7 +344,7 @@ LOG_LEVEL=debug npm run brain:up
 
 **文件**: `server/test/e2e-hand.test.ts`, `server/test/e2e-hand-mock-api.test.ts`
 
-- 启动真实 Server 和 Hand
+- 启动真实 Server 和 Client
 - 通过 WebSocket 交互
 - 验证完整的工具执行流程
 
@@ -365,10 +365,10 @@ npm run test:smoke
 2. `claude` CLI 是否已认证：`claude auth`
 3. Docker 容器是否正确挂载了 `~/.claude` 目录
 
-### Hand 无法连接 Server / Hand Cannot Connect to Server
+### Client 无法连接 Server / Client Cannot Connect to Server
 
 检查：
-1. Server 是否正在运行：`npm run brain:logs`
+1. Server 是否正在运行：`npm run server:logs`
 2. 端口是否正确（默认 8765）
 3. WebSocket 地址格式：`--server localhost:8765`
 
@@ -377,7 +377,7 @@ npm run test:smoke
 如果遇到 `unshare` 相关错误，可禁用隔离运行时：
 
 ```bash
-AXON_ENABLE_MOUNT_NAMESPACE=false npm run brain:up
+CERELAY_ENABLE_MOUNT_NAMESPACE=false npm run server:up
 ```
 
 或在容器的 Docker Compose 配置中移除 `cap_add: [SYS_ADMIN]`。
@@ -406,6 +406,6 @@ AXON_ENABLE_MOUNT_NAMESPACE=false npm run brain:up
 ## 重点提示 / Key Reminders
 
 1. **修改 SDK 集成**: 任何涉及 `query()` 或 Hook 的修改都应该先在 `server/test/` 中验证
-2. **WebSocket 协议**: Hand 和 Server 通过 `protocol.ts` 中定义的消息格式通信，修改时需同步两端
-3. **工具执行**: Hand 拥有完整的工具执行权，Server 不执行工具，只转发调用
+2. **WebSocket 协议**: Client 和 Server 通过 `protocol.ts` 中定义的消息格式通信，修改时需同步两端
+3. **工具执行**: Client 拥有完整的工具执行权，Server 不执行工具，只转发调用
 4. **环境变量**: 区分宿主机环境变量和容器内环境变量，特别是路径相关的配置

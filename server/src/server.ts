@@ -1,7 +1,7 @@
 // ============================================================
-// Axon Server：主服务器
+// Cerelay Server：主服务器
 // Phase 6 升级：
-//   - Multi-Hand 支持（HandRegistry）
+//   - Multi-Client 支持（ClientRegistry）
 //   - Token 认证（TokenStore）
 //   - 结构化日志（Logger）
 //   - 统计收集（StatsCollector）
@@ -31,9 +31,9 @@ import type {
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
-import { BrainSession } from "./session.js";
+import { ServerSession } from "./session.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
-import { HandRegistry } from "./hand-registry.js";
+import { ClientRegistry } from "./client-registry.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
@@ -60,8 +60,8 @@ export interface ServerOptions {
   authEnabled?: boolean;
   /** 初始 Token（启动时自动创建，打印到日志）*/
   initialToken?: string;
-  /** 简单共享密钥（通过 AXON_KEY 环境变量传入），Hand 连接时必须匹配 */
-  axonKey?: string;
+  /** 简单共享密钥（通过 CERELAY_KEY 环境变量传入），Client 连接时必须匹配 */
+  cerelayKey?: string;
   /** session 恢复窗口，默认 60 秒 */
   sessionResumeGraceMs?: number;
   /** detached session 清理轮询间隔，默认 15 秒 */
@@ -69,18 +69,18 @@ export interface ServerOptions {
 }
 
 // ============================================================
-// AxonServer
+// CerelayServer
 // ============================================================
 
-export class AxonServer {
+export class CerelayServer {
   private readonly defaultModel: string;
   private readonly port: number;
   private readonly sessionResumeGraceMs: number;
-  private readonly axonKey: string | undefined;
+  private readonly cerelayKey: string | undefined;
 
   // 组件
   private readonly auth: TokenStore;
-  private readonly hands = new HandRegistry();
+  private readonly clients = new ClientRegistry();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly ptySessions = new Map<string, PtySessionEntry>();
   /** sessionId → FileProxyManager，独立于 session entry 注册，确保 session 创建期间也能 dispatch */
@@ -100,11 +100,11 @@ export class AxonServer {
     this.defaultModel = options.model;
     this.port = options.port;
     this.sessionResumeGraceMs = options.sessionResumeGraceMs ?? SESSION_RESUME_GRACE_MS;
-    this.axonKey = options.axonKey || undefined;
+    this.cerelayKey = options.cerelayKey || undefined;
     this.auth = new TokenStore(options.authEnabled ?? false);
 
-    if (this.axonKey) {
-      log.info("AXON_KEY 已配置，Hand 连接需提供匹配的 key");
+    if (this.cerelayKey) {
+      log.info("CERELAY_KEY 已配置，Client 连接需提供匹配的 key");
     }
 
     const initialToken = options.initialToken?.trim();
@@ -155,7 +155,7 @@ export class AxonServer {
   private shouldStartFileProxy(): boolean {
     return (
       process.platform === "linux" &&
-      process.env.AXON_ENABLE_MOUNT_NAMESPACE === "true"
+      process.env.CERELAY_ENABLE_MOUNT_NAMESPACE === "true"
     );
   }
 
@@ -178,10 +178,10 @@ export class AxonServer {
       this.destroyPtySession(sessionId, entry, "服务器关闭");
     }
 
-    // 关闭所有 Hand 连接
-    for (const hand of this.hands.all()) {
-      if (hand.socket.readyState === WebSocket.OPEN) {
-        hand.socket.close();
+    // 关闭所有 Client 连接
+    for (const client of this.clients.all()) {
+      if (client.socket.readyState === WebSocket.OPEN) {
+        client.socket.close();
       }
     }
 
@@ -218,12 +218,12 @@ export class AxonServer {
     // 健康检查（无需认证）
     if (pathname === "/health") {
       requestLog.debug("返回健康检查结果", {
-        handsOnline: this.hands.count(),
+        clientsOnline: this.clients.count(),
       });
       this.sendJson(res, 200, {
         status: "ok",
         time: new Date().toISOString(),
-        handsOnline: this.hands.count(),
+        clientsOnline: this.clients.count(),
       });
       return;
     }
@@ -279,22 +279,22 @@ export class AxonServer {
     // 路由
     if (url === "/admin/stats" && req.method === "GET") {
       requestLog.debug("返回统计信息");
-      this.sendJson(res, 200, this.stats.snapshot(this.hands.count()));
+      this.sendJson(res, 200, this.stats.snapshot(this.clients.count()));
       return;
     }
 
-    if (url === "/admin/hands" && req.method === "GET") {
-      requestLog.debug("返回 Hand 列表");
-      this.sendJson(res, 200, { hands: this.hands.stats() });
+    if (url === "/admin/clients" && req.method === "GET") {
+      requestLog.debug("返回 Client 列表");
+      this.sendJson(res, 200, { clients: this.clients.stats() });
       return;
     }
 
     if (url === "/admin/sessions" && req.method === "GET") {
       requestLog.debug("返回 Session 列表", { sessionCount: this.sessions.size });
       this.sendJson(res, 200, {
-        sessions: Array.from(this.sessions.entries()).map(([id, { session, handId }]) => ({
+        sessions: Array.from(this.sessions.entries()).map(([id, { session, clientId }]) => ({
           ...session.info(),
-          handId,
+          clientId,
         })),
       });
       return;
@@ -419,18 +419,18 @@ export class AxonServer {
       return;
     }
 
-    // AXON_KEY 简单共享密钥校验
-    if (this.axonKey) {
+    // CERELAY_KEY 简单共享密钥校验
+    if (this.cerelayKey) {
       const clientKey = this.getQueryParam(request.url, "key");
-      if (clientKey !== this.axonKey) {
-        upgradeLog.warn("WebSocket 升级被拒绝：AXON_KEY 不匹配", {
+      if (clientKey !== this.cerelayKey) {
+        upgradeLog.warn("WebSocket 升级被拒绝：CERELAY_KEY 不匹配", {
           hasClientKey: Boolean(clientKey),
         });
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
-      upgradeLog.debug("AXON_KEY 校验通过");
+      upgradeLog.debug("CERELAY_KEY 校验通过");
     }
 
     // Token 认证校验（支持 Authorization header 和 ?token= query string）
@@ -463,82 +463,82 @@ export class AxonServer {
   }
 
   // ============================================================
-  // Hand 连接处理
+  // Client 连接处理
   // ============================================================
 
   private async handleConnection(socket: WebSocket, req: IncomingMessage): Promise<void> {
-    // 获取 token（用于关联 hand 记录）
+    // 获取 token（用于关联 client 记录）
     const headerToken = extractBearerToken(req.headers.authorization);
     const queryToken = extractQueryToken(req.url);
     const rawToken = headerToken ?? queryToken ?? "";
     const tokenId = this.auth.isEnabled() ? (this.auth.verify(rawToken) ?? "unknown") : "noauth";
     const tokenSource = headerToken ? "header" : queryToken ? "query" : "none";
 
-    const handId = `hand-${Date.now()}-${randomUUID().substring(0, 8)}`;
+    const clientId = `client-${Date.now()}-${randomUUID().substring(0, 8)}`;
     const remoteAddress =
       req.socket.remoteAddress ?? req.headers["x-forwarded-for"]?.toString() ?? "unknown";
-    const handLog = log.child({ handId, remoteAddress, tokenId });
+    const clientLog = log.child({ clientId, remoteAddress, tokenId });
 
-    const handInfo = this.hands.register(handId, socket, tokenId, remoteAddress);
+    const clientInfo = this.clients.register(clientId, socket, tokenId, remoteAddress);
     this.stats.onHandConnected();
-    log.info("Hand 已连接", { handId, remoteAddress, tokenId });
-    handLog.debug("Hand 连接上下文已建立", {
+    log.info("Client 已连接", { clientId, remoteAddress, tokenId });
+    clientLog.debug("Client 连接上下文已建立", {
       tokenSource,
       authEnabled: this.auth.isEnabled(),
     });
 
     // 发送 connected 通知
     try {
-      handLog.debug("发送 connected 通知");
-      await this.sendToHand(handId, { type: "connected" });
+      clientLog.debug("发送 connected 通知");
+      await this.sendToClient(clientId, { type: "connected" });
     } catch (err) {
-      log.error("发送 connected 通知失败", { handId, error: String(err) });
+      log.error("发送 connected 通知失败", { clientId, error: String(err) });
     }
 
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
-        handLog.debug("忽略二进制消息");
+        clientLog.debug("忽略二进制消息");
         return;
       }
       this.stats.onMessageReceived();
-      handLog.debug("收到 Hand 文本消息", {
+      clientLog.debug("收到 Client 文本消息", {
         bytes: data.toString().length,
       });
-      void this.handleMessage(handId, data.toString());
+      void this.handleMessage(clientId, data.toString());
     });
 
     socket.on("close", () => {
-      this.hands.unregister(handId);
+      this.clients.unregister(clientId);
       this.stats.onHandDisconnected();
-      log.info("Hand 已断开", { handId });
-      handLog.debug("开始处理 Hand 断开后的 session 状态", {
-        sessionCount: handInfo.sessionIds.size,
+      log.info("Client 已断开", { clientId });
+      clientLog.debug("开始处理 Client 断开后的 session 状态", {
+        sessionCount: clientInfo.sessionIds.size,
       });
 
       // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
-      for (const sessionId of handInfo.sessionIds) {
+      for (const sessionId of clientInfo.sessionIds) {
         const ptyEntry = this.ptySessions.get(sessionId);
         if (ptyEntry) {
-          handLog.debug("Hand 断开时销毁 PTY session", { sessionId });
-          this.destroyPtySession(sessionId, ptyEntry, "Hand 断开");
+          clientLog.debug("Client 断开时销毁 PTY session", { sessionId });
+          this.destroyPtySession(sessionId, ptyEntry, "Client 断开");
           continue;
         }
 
         const entry = this.sessions.get(sessionId);
         if (entry) {
           if (entry.session.info().status === "active") {
-            handLog.debug("Hand 断开时销毁活跃 session", { sessionId });
-            this.destroySession(sessionId, entry, "Hand 断开时 session 仍在运行");
+            clientLog.debug("Client 断开时销毁活跃 session", { sessionId });
+            this.destroySession(sessionId, entry, "Client 断开时 session 仍在运行");
             continue;
           }
 
-          entry.handId = null;
+          entry.clientId = null;
           entry.resumableUntil = Date.now() + this.sessionResumeGraceMs;
           log.info("Session 进入可恢复窗口", {
             sessionId,
             resumableUntil: new Date(entry.resumableUntil).toISOString(),
           });
-          handLog.debug("Session 已标记为可恢复", {
+          clientLog.debug("Session 已标记为可恢复", {
             sessionId,
             resumableUntil: entry.resumableUntil,
           });
@@ -547,7 +547,7 @@ export class AxonServer {
     });
 
     socket.on("error", (error) => {
-      log.error("Hand WebSocket 错误", { handId, error: error.message });
+      log.error("Client WebSocket 错误", { clientId, error: error.message });
       this.stats.onError();
     });
   }
@@ -556,66 +556,66 @@ export class AxonServer {
   // 消息路由
   // ============================================================
 
-  private async handleMessage(handId: string, raw: string): Promise<void> {
+  private async handleMessage(clientId: string, raw: string): Promise<void> {
     let envelope: Envelope;
     const messageLog = log.child({
-      handId,
+      clientId,
       bytes: raw.length,
     });
 
     try {
       envelope = JSON.parse(raw) as Envelope;
     } catch (error) {
-      messageLog.warn("Hand 消息 JSON 解析失败", { error: asError(error).message });
-      await this.sendErrorToHand(handId, asError(error).message);
+      messageLog.warn("Client 消息 JSON 解析失败", { error: asError(error).message });
+      await this.sendErrorToClient(clientId, asError(error).message);
       return;
     }
 
     const parsedMessageLog = messageLog.child(messageDebugFields(envelope));
-    parsedMessageLog.debug("Hand 消息解析完成");
+    parsedMessageLog.debug("Client 消息解析完成");
 
     try {
       switch (envelope.type) {
         case "create_session":
-          await this.handleCreateSession(handId, JSON.parse(raw) as CreateSession);
+          await this.handleCreateSession(clientId, JSON.parse(raw) as CreateSession);
           return;
         case "create_pty_session":
-          await this.handleCreatePtySession(handId, JSON.parse(raw) as CreatePtySession);
+          await this.handleCreatePtySession(clientId, JSON.parse(raw) as CreatePtySession);
           return;
         case "prompt":
-          await this.handlePrompt(handId, JSON.parse(raw) as Prompt);
+          await this.handlePrompt(clientId, JSON.parse(raw) as Prompt);
           return;
         case "restore_session":
-          await this.handleRestoreSession(handId, JSON.parse(raw) as RestoreSession);
+          await this.handleRestoreSession(clientId, JSON.parse(raw) as RestoreSession);
           return;
         case "tool_result":
-          await this.handleToolResult(handId, JSON.parse(raw) as ToolResult);
+          await this.handleToolResult(clientId, JSON.parse(raw) as ToolResult);
           return;
         case "file_proxy_response":
-          this.handleFileProxyResponse(handId, JSON.parse(raw) as FileProxyResponse);
+          this.handleFileProxyResponse(clientId, JSON.parse(raw) as FileProxyResponse);
           return;
         case "pty_input":
-          await this.handlePtyInput(handId, JSON.parse(raw) as PtyInput);
+          await this.handlePtyInput(clientId, JSON.parse(raw) as PtyInput);
           return;
         case "pty_resize":
-          await this.handlePtyResize(handId, JSON.parse(raw) as PtyResize);
+          await this.handlePtyResize(clientId, JSON.parse(raw) as PtyResize);
           return;
         case "session_mcp_catalog":
-          await this.handleSessionMcpCatalog(handId, JSON.parse(raw) as SessionMcpCatalog);
+          await this.handleSessionMcpCatalog(clientId, JSON.parse(raw) as SessionMcpCatalog);
           return;
         case "list_sessions":
-          await this.handleListSessions(handId, JSON.parse(raw) as ListSessions);
+          await this.handleListSessions(clientId, JSON.parse(raw) as ListSessions);
           return;
         case "close_session":
-          await this.handleCloseSession(handId, JSON.parse(raw) as CloseSession);
+          await this.handleCloseSession(clientId, JSON.parse(raw) as CloseSession);
           return;
         default:
           throw new Error(`未知消息类型: ${envelope.type}`);
       }
     } catch (error) {
-      parsedMessageLog.error("处理 Hand 消息失败", { error: asError(error).message });
+      parsedMessageLog.error("处理 Client 消息失败", { error: asError(error).message });
       this.stats.onError();
-      await this.sendErrorToHand(handId, asError(error).message);
+      await this.sendErrorToClient(clientId, asError(error).message);
     }
   }
 
@@ -623,7 +623,7 @@ export class AxonServer {
   // File Proxy 响应分发
   // ============================================================
 
-  private handleFileProxyResponse(_handId: string, resp: FileProxyResponse): void {
+  private handleFileProxyResponse(_clientId: string, resp: FileProxyResponse): void {
     const proxy = this.fileProxies.get(resp.sessionId);
     if (proxy) {
       proxy.resolveResponse(resp);
@@ -640,9 +640,9 @@ export class AxonServer {
   // Session 创建
   // ============================================================
 
-  private async handleCreateSession(handId: string, message: CreateSession): Promise<void> {
+  private async handleCreateSession(clientId: string, message: CreateSession): Promise<void> {
     log.debug("收到创建 Session 请求", {
-      handId,
+      clientId,
       cwd: message.cwd || ".",
       model: message.model || this.defaultModel,
     });
@@ -654,11 +654,11 @@ export class AxonServer {
     if (this.shouldStartFileProxy()) {
       fileProxy = new FileProxyManager({
         runtimeRoot,
-        handHomeDir: message.homeDir || process.env.HOME || "/home/node",
-        handCwd: message.cwd || ".",
+        clientHomeDir: message.homeDir || process.env.HOME || "/home/node",
+        clientCwd: message.cwd || ".",
         sessionId,
-        sendToHand: async (msg) => {
-          await this.sendToHand(handId, msg);
+        sendToClient: async (msg) => {
+          await this.sendToClient(clientId, msg);
         },
       });
       this.fileProxies.set(sessionId, fileProxy);
@@ -670,7 +670,7 @@ export class AxonServer {
       runtime = await createClaudeSessionRuntime({
         sessionId,
         cwd: message.cwd || ".",
-        handHomeDir: message.homeDir,
+        clientHomeDir: message.homeDir,
         fuseRootDir: fileProxy?.mountPoint,
       });
     } catch (err) {
@@ -685,27 +685,27 @@ export class AxonServer {
       cwd: message.cwd || ".",
     });
 
-    let session!: BrainSession;
-    session = BrainSession.createSession({
+    let session!: ServerSession;
+    session = ServerSession.createSession({
       id: sessionId,
       cwd: message.cwd || ".",
       claudeEnv: runtime.env,
       claudeHomeDir: runtime.env.HOME,
-      handHomeDir: message.homeDir,
+      clientHomeDir: message.homeDir,
       model: message.model || this.defaultModel,
       sdkCwd: runtime.cwd,
       spawnClaudeCodeProcess: runtime.spawnClaudeCodeProcess,
       onClose: runtime.cleanup,
-      shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
+      shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
       transport: {
         send: async (payload) => {
           const currentEntry = this.sessions.get(sessionId);
-          if (!currentEntry?.handId) {
-            throw new Error(`Session ${sessionId} 当前未绑定可用 Hand`);
+          if (!currentEntry?.clientId) {
+            throw new Error(`Session ${sessionId} 当前未绑定可用 Client`);
           }
-          log.debug("转发 Session 消息到 Hand", {
+          log.debug("转发 Session 消息到 Client", {
             sessionId,
-            handId: currentEntry.handId,
+            clientId: currentEntry.clientId,
             ...messageDebugFields(payload),
           });
           // tool_call 时记录工具调用统计
@@ -713,32 +713,32 @@ export class AxonServer {
             const tc = payload as import("./protocol.js").ToolCall;
             this.stats.onToolCall(tc.toolName);
           }
-          await this.sendToHand(currentEntry.handId, payload);
+          await this.sendToClient(currentEntry.clientId, payload);
         },
       },
     });
 
     this.sessions.set(sessionId, {
       session,
-      handId,
+      clientId,
       resumableUntil: null,
       fileProxy,
     });
-    this.hands.bindSession(handId, sessionId);
+    this.clients.bindSession(clientId, sessionId);
     this.stats.onSessionCreated();
 
-    log.info("Session 已创建", { sessionId, handId, cwd: message.cwd, model: message.model });
+    log.info("Session 已创建", { sessionId, clientId, cwd: message.cwd, model: message.model });
 
-    await this.sendToHand(handId, {
+    await this.sendToClient(clientId, {
       type: "session_created",
       sessionId,
       mcpServerConfigs: claudeMcpConfigs,
     });
   }
 
-  private async handleCreatePtySession(handId: string, message: CreatePtySession): Promise<void> {
+  private async handleCreatePtySession(clientId: string, message: CreatePtySession): Promise<void> {
     log.debug("收到创建 PTY Session 请求", {
-      handId,
+      clientId,
       cwd: message.cwd || ".",
       model: message.model || this.defaultModel,
       cols: message.cols,
@@ -767,16 +767,16 @@ export class AxonServer {
       }
       fileProxy = new FileProxyManager({
         runtimeRoot,
-        handHomeDir: message.homeDir || process.env.HOME || "/home/node",
-        handCwd: message.cwd || ".",
+        clientHomeDir: message.homeDir || process.env.HOME || "/home/node",
+        clientCwd: message.cwd || ".",
         sessionId,
         shadowFiles,
-        sendToHand: async (msg) => {
-          await this.sendToHand(handId, msg);
+        sendToClient: async (msg) => {
+          await this.sendToClient(clientId, msg);
         },
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
-      // 发出的 file_proxy_request → Hand 响应 file_proxy_response 时，
+      // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，
       // handleFileProxyResponse 找不到 FileProxyManager，响应被丢弃导致 FUSE 请求超时。
       this.fileProxies.set(sessionId, fileProxy);
       await fileProxy.start();
@@ -787,7 +787,7 @@ export class AxonServer {
       runtime = await createClaudeSessionRuntime({
         sessionId,
         cwd: message.cwd || ".",
-        handHomeDir: message.homeDir,
+        clientHomeDir: message.homeDir,
         // FUSE 模式下 settings.local.json 由 FUSE shadow file 提供，不需要 bind mount
         projectSettingsLocalShadowPath: fileProxy ? undefined : hookInjection.settingsPath,
         fuseRootDir: fileProxy?.mountPoint,
@@ -805,7 +805,7 @@ export class AxonServer {
 
     log.info("PTY Session runtime 与 hook 已准备完成", {
       sessionId,
-      handId,
+      clientId,
       runtimeRoot: runtime.rootDir,
       runtimeCwd: runtime.cwd,
       runtimeHome: runtime.env.HOME,
@@ -822,10 +822,10 @@ export class AxonServer {
       transport: {
         sendOutput: async (targetSessionId, data) => {
           const currentEntry = this.ptySessions.get(targetSessionId);
-          if (!currentEntry?.handId) {
-            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          if (!currentEntry?.clientId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Client`);
           }
-          await this.sendToHand(currentEntry.handId, {
+          await this.sendToClient(currentEntry.clientId, {
             type: "pty_output",
             sessionId: targetSessionId,
             data: data.toString("base64"),
@@ -833,10 +833,10 @@ export class AxonServer {
         },
         sendExit: async (targetSessionId, exitCode, signal) => {
           const currentEntry = this.ptySessions.get(targetSessionId);
-          if (!currentEntry?.handId) {
+          if (!currentEntry?.clientId) {
             return;
           }
-          await this.sendToHand(currentEntry.handId, {
+          await this.sendToClient(currentEntry.clientId, {
             type: "pty_exit",
             sessionId: targetSessionId,
             exitCode,
@@ -846,11 +846,11 @@ export class AxonServer {
         },
         sendToolCall: async (targetSessionId, requestId, toolName, toolUseId, input) => {
           const currentEntry = this.ptySessions.get(targetSessionId);
-          if (!currentEntry?.handId) {
-            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          if (!currentEntry?.clientId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Client`);
           }
           this.stats.onToolCall(toolName);
-          await this.sendToHand(currentEntry.handId, {
+          await this.sendToClient(currentEntry.clientId, {
             type: "tool_call",
             sessionId: targetSessionId,
             requestId,
@@ -861,10 +861,10 @@ export class AxonServer {
         },
         sendToolCallComplete: async (targetSessionId, requestId, toolName) => {
           const currentEntry = this.ptySessions.get(targetSessionId);
-          if (!currentEntry?.handId) {
-            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Hand`);
+          if (!currentEntry?.clientId) {
+            throw new Error(`PTY session ${targetSessionId} 当前未绑定可用 Client`);
           }
-          await this.sendToHand(currentEntry.handId, {
+          await this.sendToClient(currentEntry.clientId, {
             type: "tool_call_complete",
             sessionId: targetSessionId,
             requestId,
@@ -876,65 +876,65 @@ export class AxonServer {
       colorTerm: message.colorTerm,
       termProgram: message.termProgram,
       termProgramVersion: message.termProgramVersion,
-      handHomeDir: message.homeDir,
-      shouldRouteToolToHand: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
+      clientHomeDir: message.homeDir,
+      shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
     });
 
     this.ptySessions.set(sessionId, {
       session,
-      handId,
+      clientId,
       hookToken,
       fileProxy,
     });
-    this.hands.bindSession(handId, sessionId);
+    this.clients.bindSession(clientId, sessionId);
     this.stats.onSessionCreated();
     await session.start(message.cols ?? 80, message.rows ?? 24);
-    await this.sendToHand(handId, {
+    await this.sendToClient(clientId, {
       type: "pty_session_created",
       sessionId,
     });
 
-    log.info("PTY Session 已创建", { sessionId, handId, cwd: message.cwd, model: message.model });
+    log.info("PTY Session 已创建", { sessionId, clientId, cwd: message.cwd, model: message.model });
   }
 
-  private async handleSessionMcpCatalog(handId: string, message: SessionMcpCatalog): Promise<void> {
+  private async handleSessionMcpCatalog(clientId: string, message: SessionMcpCatalog): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
-    if (entry.handId !== handId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+    if (entry.clientId !== clientId) {
+      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
     }
 
     entry.session.setMcpServers(
       createMcpProxyServers(
         message.mcpToolCatalog,
-        (toolName, input) => entry.session.executeToolViaHand(toolName, input)
+        (toolName, input) => entry.session.executeToolViaClient(toolName, input)
       )
     );
 
-    log.debug("已应用 Hand 返回的 MCP tool catalog", {
+    log.debug("已应用 Client 返回的 MCP tool catalog", {
       sessionId: message.sessionId,
-      handId,
+      clientId,
       serverCount: Object.keys(message.mcpToolCatalog).length,
       servers: Object.keys(message.mcpToolCatalog),
     });
 
-    await this.sendToHand(handId, {
+    await this.sendToClient(clientId, {
       type: "session_mcp_catalog_applied",
       sessionId: message.sessionId,
     });
   }
 
-  private async handleRestoreSession(handId: string, message: RestoreSession): Promise<void> {
+  private async handleRestoreSession(clientId: string, message: RestoreSession): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
     log.debug("收到恢复 Session 请求", {
       sessionId: message.sessionId,
-      handId,
-      currentHandId: entry.handId,
+      clientId,
+      currentClientId: entry.clientId,
       resumableUntil: entry.resumableUntil,
       status: entry.session.info().status,
     });
 
-    if (entry.handId) {
-      throw new Error(`Session ${message.sessionId} 当前已绑定到其他 Hand`);
+    if (entry.clientId) {
+      throw new Error(`Session ${message.sessionId} 当前已绑定到其他 Client`);
     }
 
     if (entry.resumableUntil !== null && entry.resumableUntil < Date.now()) {
@@ -942,29 +942,29 @@ export class AxonServer {
       throw new Error(`Session ${message.sessionId} 已过期，无法恢复`);
     }
 
-    entry.handId = handId;
+    entry.clientId = clientId;
     entry.resumableUntil = null;
-    this.hands.bindSession(handId, message.sessionId);
+    this.clients.bindSession(clientId, message.sessionId);
 
-    log.info("Session 已恢复", { sessionId: message.sessionId, handId });
+    log.info("Session 已恢复", { sessionId: message.sessionId, clientId });
 
-    await this.sendToHand(handId, {
+    await this.sendToClient(clientId, {
       type: "session_restored",
       sessionId: message.sessionId,
     });
   }
 
-  private async handlePrompt(handId: string, message: Prompt): Promise<void> {
+  private async handlePrompt(clientId: string, message: Prompt): Promise<void> {
     const entry = this.getSessionEntry(message.sessionId);
 
-    if (entry.handId !== handId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+    if (entry.clientId !== clientId) {
+      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
     }
 
-    log.debug("收到 prompt", { sessionId: message.sessionId, handId });
-    log.debug("开始派发 prompt 到 BrainSession", {
+    log.debug("收到 prompt", { sessionId: message.sessionId, clientId });
+    log.debug("开始派发 prompt 到 ServerSession", {
       sessionId: message.sessionId,
-      handId,
+      clientId,
       textLength: message.text.length,
       preview: previewText(message.text),
     });
@@ -972,13 +972,13 @@ export class AxonServer {
     void entry.session.prompt(message.text).catch((error) => {
       log.error("prompt 执行失败", { sessionId: message.sessionId, error: String(error) });
       this.stats.onError();
-      void this.sendErrorToHand(handId, asError(error).message, message.sessionId);
+      void this.sendErrorToClient(clientId, asError(error).message, message.sessionId);
     });
   }
 
-  private async handleToolResult(handId: string, message: ToolResult): Promise<void> {
+  private async handleToolResult(clientId: string, message: ToolResult): Promise<void> {
     log.debug("收到工具结果", {
-      handId,
+      clientId,
       sessionId: message.sessionId,
       requestId: message.requestId,
       hasError: Boolean(message.error),
@@ -996,83 +996,83 @@ export class AxonServer {
 
     const sessionEntry = this.sessions.get(message.sessionId);
     if (sessionEntry) {
-      if (sessionEntry.handId !== handId) {
-        throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+      if (sessionEntry.clientId !== clientId) {
+        throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
       }
       sessionEntry.session.resolveToolResult(message.requestId, result);
       return;
     }
 
     const ptyEntry = this.getPtySessionEntry(message.sessionId);
-    if (ptyEntry.handId !== handId) {
-      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    if (ptyEntry.clientId !== clientId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
     }
     ptyEntry.session.resolveToolResult(message.requestId, result);
   }
 
-  private async handlePtyInput(handId: string, message: PtyInput): Promise<void> {
+  private async handlePtyInput(clientId: string, message: PtyInput): Promise<void> {
     const entry = this.getPtySessionEntry(message.sessionId);
-    if (entry.handId !== handId) {
-      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    if (entry.clientId !== clientId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
     }
     entry.session.write(Buffer.from(message.data, "base64"));
   }
 
-  private async handlePtyResize(handId: string, message: PtyResize): Promise<void> {
+  private async handlePtyResize(clientId: string, message: PtyResize): Promise<void> {
     const entry = this.getPtySessionEntry(message.sessionId);
-    if (entry.handId !== handId) {
-      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+    if (entry.clientId !== clientId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
     }
     entry.session.resize(message.cols, message.rows);
   }
 
-  private async handleListSessions(handId: string, _: ListSessions): Promise<void> {
-    // 只列出属于该 hand 的 session
-    const handInfo = this.hands.get(handId);
-    const sessionIds = handInfo ? handInfo.sessionIds : new Set<string>();
+  private async handleListSessions(clientId: string, _: ListSessions): Promise<void> {
+    // 只列出属于该 client 的 session
+    const clientInfo = this.clients.get(clientId);
+    const sessionIds = clientInfo ? clientInfo.sessionIds : new Set<string>();
 
     const sessionList = Array.from(sessionIds)
       .map((id) => this.sessions.get(id))
       .filter(Boolean)
       .map((entry) => entry!.session.info());
 
-    log.debug("返回 Hand 的 Session 列表", {
-      handId,
+    log.debug("返回 Client 的 Session 列表", {
+      clientId,
       sessionCount: sessionList.length,
     });
 
-    await this.sendToHand(handId, {
+    await this.sendToClient(clientId, {
       type: "session_list",
       sessions: sessionList,
     });
   }
 
-  private async handleCloseSession(handId: string, message: CloseSession): Promise<void> {
+  private async handleCloseSession(clientId: string, message: CloseSession): Promise<void> {
     const ptyEntry = this.ptySessions.get(message.sessionId);
     if (ptyEntry) {
-      if (ptyEntry.handId !== handId) {
-        throw new Error(`PTY Session ${message.sessionId} 不属于当前 Hand`);
+      if (ptyEntry.clientId !== clientId) {
+        throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
       }
       this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
-      log.info("PTY Session 已关闭", { sessionId: message.sessionId, handId });
+      log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
       return;
     }
 
     const entry = this.getSessionEntry(message.sessionId);
 
-    if (entry.handId !== handId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Hand`);
+    if (entry.clientId !== clientId) {
+      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
     }
 
     log.debug("收到关闭 Session 请求", {
-      handId,
+      clientId,
       sessionId: message.sessionId,
       status: entry.session.info().status,
     });
     entry.session.close();
     this.destroySession(message.sessionId, entry, "客户端主动关闭");
 
-    log.info("Session 已关闭", { sessionId: message.sessionId, handId });
+    log.info("Session 已关闭", { sessionId: message.sessionId, clientId });
   }
 
   // ============================================================
@@ -1095,15 +1095,15 @@ export class AxonServer {
     return entry;
   }
 
-  private async sendToHand(handId: string, message: ServerToHandMessage | Connected): Promise<void> {
-    log.debug("发送消息到 Hand", {
-      handId,
+  private async sendToClient(clientId: string, message: ServerToHandMessage | Connected): Promise<void> {
+    log.debug("发送消息到 Client", {
+      clientId,
       ...messageDebugFields(message),
     });
-    await this.hands.sendTo(handId, message);
+    await this.clients.sendTo(clientId, message);
   }
 
-  private async sendErrorToHand(handId: string, message: string, sessionId?: string): Promise<void> {
+  private async sendErrorToClient(clientId: string, message: string, sessionId?: string): Promise<void> {
     const payload: ServerError = {
       type: "error",
       sessionId,
@@ -1111,14 +1111,14 @@ export class AxonServer {
     };
 
     try {
-      log.debug("发送错误消息到 Hand", {
-        handId,
+      log.debug("发送错误消息到 Client", {
+        clientId,
         sessionId,
         message,
       });
-      await this.hands.sendTo(handId, payload);
+      await this.clients.sendTo(clientId, payload);
     } catch (err) {
-      log.error("发送错误消息失败", { handId, error: String(err), originalMessage: message });
+      log.error("发送错误消息失败", { clientId, error: String(err), originalMessage: message });
     }
   }
 
@@ -1147,7 +1147,7 @@ export class AxonServer {
     let expiredCount = 0;
 
     for (const [sessionId, entry] of this.sessions.entries()) {
-      if (entry.handId !== null || entry.resumableUntil === null || entry.resumableUntil > now) {
+      if (entry.clientId !== null || entry.resumableUntil === null || entry.resumableUntil > now) {
         continue;
       }
 
@@ -1161,33 +1161,33 @@ export class AxonServer {
   }
 
   private destroySession(sessionId: string, entry: SessionEntry, reason: string): void {
-    const boundHandId = entry.handId;
+    const boundClientId = entry.clientId;
     entry.session.close();
     if (entry.fileProxy) {
       this.fileProxies.delete(sessionId);
       void entry.fileProxy.shutdown().catch(() => undefined);
     }
     this.sessions.delete(sessionId);
-    if (boundHandId) {
-      this.hands.unbindSession(boundHandId, sessionId);
+    if (boundClientId) {
+      this.clients.unbindSession(boundClientId, sessionId);
     }
     this.stats.onSessionEnded();
-    log.info("Session 已销毁", { sessionId, handId: boundHandId, reason });
+    log.info("Session 已销毁", { sessionId, clientId: boundClientId, reason });
   }
 
   private destroyPtySession(sessionId: string, entry: PtySessionEntry, reason: string): void {
-    const boundHandId = entry.handId;
+    const boundClientId = entry.clientId;
     void entry.session.close().catch(() => undefined);
     if (entry.fileProxy) {
       this.fileProxies.delete(sessionId);
       void entry.fileProxy.shutdown().catch(() => undefined);
     }
     this.ptySessions.delete(sessionId);
-    if (boundHandId) {
-      this.hands.unbindSession(boundHandId, sessionId);
+    if (boundClientId) {
+      this.clients.unbindSession(boundClientId, sessionId);
     }
     this.stats.onSessionEnded();
-    log.info("PTY Session 已销毁", { sessionId, handId: boundHandId, reason });
+    log.info("PTY Session 已销毁", { sessionId, clientId: boundClientId, reason });
   }
 
   private async handleInjectedPreToolUseRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1202,7 +1202,7 @@ export class AxonServer {
       return;
     }
 
-    const token = req.headers["x-axon-hook-token"];
+    const token = req.headers["x-cerelay-hook-token"];
     const sessionEntry = this.sessions.get(sessionId);
     const ptyEntry = this.ptySessions.get(sessionId);
     const expectedToken = sessionEntry?.hookToken ?? ptyEntry?.hookToken;
@@ -1292,7 +1292,7 @@ async function verifyPtyHookVisibleInRuntime(
   runtime: import("./claude-session-runtime.js").ClaudeSessionRuntime,
   cwd: string
 ): Promise<void> {
-  if (process.platform !== "linux" || process.env.AXON_ENABLE_MOUNT_NAMESPACE !== "true") {
+  if (process.platform !== "linux" || process.env.CERELAY_ENABLE_MOUNT_NAMESPACE !== "true") {
     return;
   }
 
@@ -1308,12 +1308,12 @@ async function verifyPtyHookVisibleInRuntime(
       "-lc",
       [
         'if [ -f ".claude/settings.local.json" ]; then',
-        '  echo "__AXON_HOOK_OK__";',
+        '  echo "__CERELAY_HOOK_OK__";',
         "else",
-        '  echo "__AXON_HOOK_MISSING__";',
+        '  echo "__CERELAY_HOOK_MISSING__";',
         '  pwd;',
         '  ls -la;',
-        '  if [ -d ".claude" ]; then ls -la .claude; else echo "__AXON_NO_DOT_CLAUDE_DIR__"; fi;',
+        '  if [ -d ".claude" ]; then ls -la .claude; else echo "__CERELAY_NO_DOT_CLAUDE_DIR__"; fi;',
         "fi",
       ].join(" "),
     ],
@@ -1336,7 +1336,7 @@ async function verifyPtyHookVisibleInRuntime(
 
   const stdoutText = Buffer.concat(stdoutChunks).toString("utf8").trim();
   const stderrText = Buffer.concat(stderrChunks).toString("utf8").trim();
-  if (exitCode === 0 && stdoutText.includes("__AXON_HOOK_OK__")) {
+  if (exitCode === 0 && stdoutText.includes("__CERELAY_HOOK_OK__")) {
     log.info("PTY session hook 配置已出现在 Claude 项目目录", {
       runtimeCwd: cwd,
       runtimeRoot: runtime.rootDir,
@@ -1358,8 +1358,8 @@ async function verifyPtyHookVisibleInRuntime(
 }
 
 interface SessionEntry {
-  session: BrainSession;
-  handId: string | null;
+  session: ServerSession;
+  clientId: string | null;
   resumableUntil: number | null;
   hookToken?: string;
   fileProxy?: FileProxyManager;
@@ -1367,7 +1367,7 @@ interface SessionEntry {
 
 interface PtySessionEntry {
   session: ClaudePtySession;
-  handId: string | null;
+  clientId: string | null;
   hookToken: string;
   fileProxy?: FileProxyManager;
 }

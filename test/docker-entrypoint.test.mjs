@@ -27,7 +27,7 @@ test("docker entrypoint forwards startup flags and preserves Claude executable e
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.match(result.stdout, /启动 Axon Brain Server/);
+  assert.match(result.stdout, /启动 Cerelay Server/);
   assert.match(result.stdout, /claude CLI 版本: 9\.9\.9-test/);
   assert.match(
     result.stdout,

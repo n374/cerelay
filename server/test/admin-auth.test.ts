@@ -2,13 +2,13 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import WebSocket from "ws";
-import { AxonServer } from "../src/server.js";
+import { CerelayServer } from "../src/server.js";
 
 const ADMIN_TOKEN = "axon_admin_auth_test_token_0123456789abcdef";
 const WS_TOKEN = "axon_ws_auth_test_token_0123456789abcdef";
 
 test("admin APIs require a valid token and expose token management", async (t) => {
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     authEnabled: false,
@@ -106,7 +106,7 @@ test("admin APIs require a valid token and expose token management", async (t) =
 });
 
 test("websocket auth rejects missing tokens and accepts valid query/header tokens", async (t) => {
-  const server = new AxonServer({
+  const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
     authEnabled: true,
@@ -143,7 +143,7 @@ test("websocket auth rejects missing tokens and accepts valid query/header token
   await closeSocket(headerSocket);
 });
 
-function registerServerCleanup(t: TestContext, server: AxonServer): void {
+function registerServerCleanup(t: TestContext, server: CerelayServer): void {
   t.after(async () => {
     await server.shutdown();
   });

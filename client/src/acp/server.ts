@@ -5,7 +5,7 @@
 // ============================================================
 
 import * as readline from "node:readline";
-import { HandClient } from "../client.js";
+import { CerelayClient } from "../client.js";
 import type {
   JsonRpcRequest,
   JsonRpcResponse,
@@ -28,7 +28,7 @@ const ACP_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "2024-11-05";
 
 export interface AcpServerOptions {
-  /** Axon Brain WebSocket 地址，例如 ws://localhost:8765/ws */
+  /** Cerelay Server WebSocket 地址，例如 ws://localhost:8765/ws */
   serverURL: string;
   /** 默认工作目录 */
   cwd: string;
@@ -42,7 +42,7 @@ export class AcpServer {
   private readonly serverURL: string;
   private readonly defaultCwd: string;
 
-  // 每个 ACP session 对应一个独立的 HandClient 连接
+  // 每个 ACP session 对应一个独立的 CerelayClient 连接
   // key: ACP sessionId（由编辑器提供或自动生成）
   private readonly sessions = new Map<string, AcpSession>();
 
@@ -179,7 +179,7 @@ export class AcpServer {
     const result: InitializeResult = {
       protocolVersion: PROTOCOL_VERSION,
       serverInfo: {
-        name: "axon-hand",
+        name: "cerelay-client",
         version: ACP_VERSION,
       },
       capabilities: {
@@ -199,8 +199,8 @@ export class AcpServer {
     const params = request.params as SessionNewParams | undefined;
     const cwd = params?.cwd ?? this.defaultCwd;
 
-    // 创建新的 HandClient 并连接到 Brain
-    const client = new HandClient(this.serverURL, cwd, {
+    // 创建新的 CerelayClient 并连接到 Server
+    const client = new CerelayClient(this.serverURL, cwd, {
       interactiveOutput: false,
     });
 
@@ -208,17 +208,17 @@ export class AcpServer {
       await client.connect();
     } catch (err) {
       throw new Error(
-        `连接 Brain 失败: ${err instanceof Error ? err.message : String(err)}`
+        `连接 Server 失败: ${err instanceof Error ? err.message : String(err)}`
       );
     }
 
-    // 让 HandClient 创建 Brain session，获取 sessionId
+    // 让 CerelayClient 创建 Server session，获取 sessionId
     await client.sendCreateSession(cwd, params?.model);
     const sessionId = client.getSessionId();
 
     if (!sessionId) {
       client.close();
-      throw new Error("Brain 未返回 sessionId");
+      throw new Error("Server 未返回 sessionId");
     }
 
     // 存储 session
@@ -472,7 +472,7 @@ export class AcpServer {
 
   // 调试日志写入 stderr（不污染 stdout 的 JSON-RPC 流）
   private log(message: string): void {
-    process.stderr.write(`[axon-acp] ${message}\n`);
+    process.stderr.write(`[cerelay-acp] ${message}\n`);
   }
 
   private async ensureSessionConnected(session: AcpSession): Promise<void> {
@@ -545,7 +545,7 @@ interface AcpSession {
   id: string;
   cwd: string;
   model?: string;
-  client: HandClient;
+  client: CerelayClient;
   busy: boolean;
   closing: boolean;
   promptState: AcpPromptState | null;

@@ -8,10 +8,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 
-const HAND_WORKDIR = "/Users/n374/Documents/Code/axon/hand";
+const CLIENT_WORKDIR = "/Users/n374/Documents/Code/axon/client";
 
 test("ACP mode returns clean JSON-RPC responses and notifications", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-acp-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-acp-"));
   const brain = await startFakeBrain();
   registerBrainCleanup(t, brain);
 
@@ -50,7 +50,7 @@ test("ACP mode returns clean JSON-RPC responses and notifications", async (t) =>
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "acp"],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -118,7 +118,7 @@ test("ACP mode returns clean JSON-RPC responses and notifications", async (t) =>
 });
 
 test("ACP mode restores the existing session before the next prompt", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-acp-restore-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-acp-restore-"));
   const brain = await startFakeBrain();
   registerBrainCleanup(t, brain);
   let connectionCount = 0;
@@ -168,7 +168,7 @@ test("ACP mode restores the existing session before the next prompt", async (t) 
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "acp"],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -233,7 +233,7 @@ test("ACP mode restores the existing session before the next prompt", async (t) 
 });
 
 test("PTY mode executes remote tool calls while terminal passthrough is active", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-pty-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-pty-"));
   const brain = await startFakeBrain();
   registerBrainCleanup(t, brain);
   let sawToolResult = false;
@@ -287,7 +287,7 @@ test("PTY mode executes remote tool calls while terminal passthrough is active",
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -344,7 +344,7 @@ test("PTY mode displays output arriving immediately after pty_session_created", 
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -399,7 +399,7 @@ test("PTY mode preserves early pty_output arriving before pty_session_created", 
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -439,7 +439,7 @@ test("PTY mode rejects when server closes before pty_session_created", async (t)
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -460,7 +460,7 @@ test("PTY mode rejects when server closes before pty_session_created", async (t)
 // ============================================================
 
 test("PTY mode handles file_proxy_request write operations during passthrough", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-fuse-write-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-fuse-write-"));
   // FileProxyHandler 限制路径必须在 {cwd}/.claude/ 内
   const claudeDir = path.join(cwd, ".claude");
   await fs.mkdir(claudeDir, { recursive: true });
@@ -536,7 +536,7 @@ test("PTY mode handles file_proxy_request write operations during passthrough", 
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -567,7 +567,7 @@ test("PTY mode handles file_proxy_request write operations during passthrough", 
 });
 
 test("PTY mode handles file_proxy_request snapshot operation", async (t) => {
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-hand-snapshot-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-snapshot-"));
 
   // FileProxyHandler 限制路径必须在 {cwd}/.claude/ 内
   const claudeDir = path.join(cwd, ".claude");
@@ -617,7 +617,7 @@ test("PTY mode handles file_proxy_request snapshot operation", async (t) => {
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -652,7 +652,7 @@ test("PTY mode handles file_proxy_request snapshot operation", async (t) => {
 
 test("MCP E2E: tool call flows from Brain through Hand to MCP server and back", async (t) => {
   // 1. 写入 Python MCP HTTP Server 脚本
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "axon-mcp-e2e-"));
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-mcp-e2e-"));
   const mcpScript = path.join(tmpDir, "mcp_server.py");
   await fs.writeFile(mcpScript, `#!/usr/bin/env python3
 import json, sys
@@ -713,7 +713,7 @@ srv.serve_forever()
   const mcpPort = Number.parseInt(mcpStdout.match(/READY:(\d+)/)![1], 10);
 
   // 3. 启动 fake Brain
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "axon-mcp-e2e-cwd-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-mcp-e2e-cwd-"));
   const brain = await startFakeBrain();
   registerBrainCleanup(t, brain);
 
@@ -789,7 +789,7 @@ srv.serve_forever()
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--server", `127.0.0.1:${brain.port}`, "--cwd", cwd, "acp"],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
@@ -926,7 +926,7 @@ test("precompiled dist produces identical PTY behavior to tsx source", async (t)
     process.execPath,
     ["dist/index.js", "--server", `127.0.0.1:${brain.port}`],
     {
-      cwd: HAND_WORKDIR,
+      cwd: CLIENT_WORKDIR,
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
