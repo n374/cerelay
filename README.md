@@ -66,9 +66,41 @@ cp .env.example .env       # 可选，按需修改
 LOG_LEVEL=debug npm run server:up
 ```
 
+### 安装 Client CLI / Install the Client CLI
+
+安装 `cerelay` 命令到 `~/.local/bin`，之后可在任意目录直接使用：
+
+Install the `cerelay` command to `~/.local/bin` for use from any directory:
+
+```bash
+cd client && npm run install:global
+```
+
+确保 `~/.local/bin` 在你的 `PATH` 中。如未配置，在 `~/.zshrc` 或 `~/.bashrc` 中添加：
+
+Make sure `~/.local/bin` is in your `PATH`. If not, add to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+卸载 / Uninstall:
+
+```bash
+cd client && npm run uninstall:global
+```
+
 ### 启动 Client / Start the Client
 
-在新终端中：
+安装后可在任意目录直接启动，`--cwd` 默认为当前目录：
+
+After installation, run from any directory (`--cwd` defaults to current directory):
+
+```bash
+cerelay --server localhost:8765
+```
+
+也可从源码启动 / Or run from source:
 
 ```bash
 cd client && npm start -- --server localhost:8765 --cwd /path/to/project
@@ -79,6 +111,8 @@ cd client && npm start -- --server localhost:8765 --cwd /path/to/project
 查看 Client 日志：
 
 ```bash
+cerelay logs
+# 或 / or
 cd client && npm start -- logs
 ```
 
@@ -108,10 +142,13 @@ Server 通过 `CERELAY_KEY` 环境变量设置共享密钥，Client 连接时需
 # Server 端
 CERELAY_KEY=my-secret npm run server:up
 
-# Client 端
+# Client 端（安装后） / Client (after install)
+CERELAY_KEY=my-secret cerelay --server localhost:8765
+# 或 / or
+cerelay --server localhost:8765 --key my-secret
+
+# 从源码启动 / From source
 CERELAY_KEY=my-secret npm start -- --server localhost:8765
-# 或
-npm start -- --server localhost:8765 --key my-secret
 ```
 
 ### Claude Code 登录态

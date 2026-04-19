@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { mkdir, open } from "node:fs/promises";
 import { watch } from "node:fs";
 import path from "node:path";
