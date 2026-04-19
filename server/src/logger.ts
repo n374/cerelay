@@ -32,13 +32,9 @@ const LEVEL_VALUES: Record<LogLevel, number> = {
 
 export class Logger {
   private readonly component: string;
-  private readonly minLevel: LogLevel;
-  private readonly jsonMode: boolean;
 
-  constructor(component: string, minLevel: LogLevel = "info", jsonMode = false) {
+  constructor(component: string) {
     this.component = component;
-    this.minLevel = minLevel;
-    this.jsonMode = jsonMode;
   }
 
   debug(message: string, fields?: LogFields): void {
@@ -59,11 +55,12 @@ export class Logger {
 
   /** 创建带有额外固定字段的子 Logger */
   child(fields: LogFields): Logger {
-    return new ChildLogger(this.component, this.minLevel, this.jsonMode, fields);
+    return new ChildLogger(this.component, fields);
   }
 
   protected log(level: LogLevel, message: string, fields?: LogFields): void {
-    if (LEVEL_VALUES[level] < LEVEL_VALUES[this.minLevel]) {
+    // 运行时引用全局配置，确保 configureLogger 后生效
+    if (LEVEL_VALUES[level] < LEVEL_VALUES[globalMinLevel]) {
       return;
     }
 
@@ -75,7 +72,7 @@ export class Logger {
       ...fields,
     };
 
-    if (this.jsonMode) {
+    if (globalJsonMode) {
       const output = level === "error" ? process.stderr : process.stdout;
       output.write(JSON.stringify(entry) + "\n");
     } else {
@@ -121,8 +118,8 @@ export class Logger {
 class ChildLogger extends Logger {
   private readonly fixedFields: LogFields;
 
-  constructor(component: string, minLevel: LogLevel, jsonMode: boolean, fixedFields: LogFields) {
-    super(component, minLevel, jsonMode);
+  constructor(component: string, fixedFields: LogFields) {
+    super(component);
     this.fixedFields = fixedFields;
   }
 
@@ -148,5 +145,5 @@ export function configureLogger(options: { minLevel?: LogLevel; json?: boolean }
 }
 
 export function createLogger(component: string): Logger {
-  return new Logger(component, globalMinLevel, globalJsonMode);
+  return new Logger(component);
 }
