@@ -41,10 +41,8 @@ test("docker entrypoint forwards startup flags and preserves Claude executable e
   assert.equal(writtenConfig, configJson);
 });
 
-test("docker entrypoint can reuse mounted claude config without API key", async () => {
+test("docker entrypoint warns when no API key or auth token is set", async () => {
   const sandbox = await createSandbox();
-  await mkdir(path.join(sandbox.homeDir, ".claude"), { recursive: true });
-  await writeFile(path.join(sandbox.homeDir, ".claude", "credentials.json"), "{\"ok\":true}\n", "utf8");
 
   const result = await runEntrypoint(sandbox, {
     PORT: "8765",
@@ -57,7 +55,7 @@ test("docker entrypoint can reuse mounted claude config without API key", async 
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.match(result.stdout, /检测到挂载的 ~\/\.claude 配置，将复用本机 Claude Code 凭证/);
+  assert.match(result.stdout, /未检测到 ANTHROPIC_API_KEY \/ ANTHROPIC_AUTH_TOKEN，Claude CLI 可能无法工作/);
   assert.match(
     result.stdout,
     /NODE_ARGS:\/app\/server\/dist\/index\.js --port 8765 --model claude-sonnet-4 --log-level info/

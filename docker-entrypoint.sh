@@ -2,7 +2,7 @@
 # ============================================================
 # Axon Brain 容器入口脚本
 # 职责：
-#   1. 复用挂载的 ~/.claude 与当前环境变量
+#   1. 复用环境变量中的 Claude 认证信息
 #   2. 可选写入额外 claude CLI 配置
 #   3. 启动 axon-server
 # ============================================================
@@ -29,8 +29,7 @@ if [ -n "${AXON_KEY}" ]; then
   info "  AXON_KEY: 已配置（Hand 连接需提供匹配的 key）"
 fi
 
-# --- 设置 claude CLI 认证 ---
-# claude CLI 读取 ~/.claude/ 目录下的凭证
+# --- 设置 claude CLI 配置 ---
 CLAUDE_CONFIG_DIR="${HOME}/.claude"
 mkdir -p "${CLAUDE_CONFIG_DIR}"
 
@@ -40,16 +39,13 @@ if [ -n "${CLAUDE_CONFIG}" ]; then
   printf '%s' "${CLAUDE_CONFIG}" > "${CLAUDE_CONFIG_DIR}/claude_config.json"
 fi
 
-# claude CLI 可使用 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 等环境变量
-# 但如果未显式传入，也允许直接复用挂载的 ~/.claude 认证状态
+# claude CLI 认证通过环境变量传入（FUSE 文件代理处理配置文件访问）
 if [ -n "${ANTHROPIC_API_KEY}" ]; then
   info "检测到 ANTHROPIC_API_KEY 环境变量"
 elif [ -n "${ANTHROPIC_AUTH_TOKEN}" ]; then
   info "检测到 ANTHROPIC_AUTH_TOKEN 环境变量"
-elif find "${CLAUDE_CONFIG_DIR}" -mindepth 1 -maxdepth 2 -print -quit | grep -q .; then
-  info "检测到挂载的 ~/.claude 配置，将复用本机 Claude Code 凭证"
 else
-  warn "未检测到 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN，也未发现现有 ~/.claude 配置，Claude CLI 可能无法工作"
+  warn "未检测到 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN，Claude CLI 可能无法工作"
 fi
 
 # 验证 claude CLI 可用
