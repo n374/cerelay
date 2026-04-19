@@ -60,6 +60,8 @@ export interface ServerOptions {
   authEnabled?: boolean;
   /** 初始 Token（启动时自动创建，打印到日志）*/
   initialToken?: string;
+  /** 简单共享密钥（通过 AXON_KEY 环境变量传入），Hand 连接时必须匹配 */
+  axonKey?: string;
   /** session 恢复窗口，默认 60 秒 */
   sessionResumeGraceMs?: number;
   /** detached session 清理轮询间隔，默认 15 秒 */
@@ -74,6 +76,7 @@ export class AxonServer {
   private readonly defaultModel: string;
   private readonly port: number;
   private readonly sessionResumeGraceMs: number;
+  private readonly axonKey: string | undefined;
 
   // 组件
   private readonly auth: TokenStore;
@@ -97,7 +100,12 @@ export class AxonServer {
     this.defaultModel = options.model;
     this.port = options.port;
     this.sessionResumeGraceMs = options.sessionResumeGraceMs ?? SESSION_RESUME_GRACE_MS;
+    this.axonKey = options.axonKey || undefined;
     this.auth = new TokenStore(options.authEnabled ?? false);
+
+    if (this.axonKey) {
+      log.info("AXON_KEY 已配置，Hand 连接需提供匹配的 key");
+    }
 
     const initialToken = options.initialToken?.trim();
     const seededToken = initialToken
@@ -411,7 +419,21 @@ export class AxonServer {
       return;
     }
 
-    // 认证校验（支持 Authorization header 和 ?token= query string）
+    // AXON_KEY 简单共享密钥校验
+    if (this.axonKey) {
+      const clientKey = this.getQueryParam(request.url, "key");
+      if (clientKey !== this.axonKey) {
+        upgradeLog.warn("WebSocket 升级被拒绝：AXON_KEY 不匹配", {
+          hasClientKey: Boolean(clientKey),
+        });
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      upgradeLog.debug("AXON_KEY 校验通过");
+    }
+
+    // Token 认证校验（支持 Authorization header 和 ?token= query string）
     if (this.auth.isEnabled()) {
       const headerToken = extractBearerToken(request.headers.authorization);
       const queryToken = extractQueryToken(request.url);

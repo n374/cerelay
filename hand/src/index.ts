@@ -4,7 +4,6 @@ import path from "node:path";
 import process from "node:process";
 import { Command } from "commander";
 import { HandClient } from "./client.js";
-import { UI, EOFError } from "./ui.js";
 import { runAcpServer } from "./acp/index.js";
 import { configureLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
 
@@ -14,22 +13,14 @@ program
   .name("axon-hand")
   .description("Axon Hand CLI — 用户交互端")
   .option("--server <host:port>", "Axon Server 地址", "localhost:8765")
+  .option("--key <key>", "连接 Brain 的共享密钥（默认读取 AXON_KEY 环境变量）")
   .option("--cwd <dir>", "工作目录（默认当前目录）")
   .option("--log-level <level>", "日志级别（debug/info/warn/error）", "info")
   .option("--log-file <path>", "Hand 日志文件路径", resolveDefaultLogFilePath())
   .action(async () => {
     const opts = program.opts<CommonOptions>();
     configureHandLogging(opts);
-    await runCliMode(opts.server, opts.cwd);
-  });
-
-program
-  .command("pty")
-  .description("以 PTY passthrough 模式连接远端 Claude Code 终端")
-  .action(async () => {
-    const opts = program.opts<CommonOptions>();
-    configureHandLogging(opts);
-    await runPtyMode(opts.server, opts.cwd);
+    await runPtyMode(opts.server, resolveKey(opts.key), opts.cwd);
   });
 
 program
@@ -52,7 +43,7 @@ program
     const opts = program.opts<CommonOptions>();
     configureHandLogging(opts);
     await runAcpServer({
-      server: opts.server,
+      serverURL: buildServerURL(opts.server, resolveKey(opts.key)),
       cwd: opts.cwd ?? process.cwd(),
     });
   });
@@ -61,114 +52,33 @@ await program.parseAsync(process.argv);
 
 interface CommonOptions {
   server: string;
+  key?: string;
   cwd?: string;
   logLevel?: string;
   logFile?: string;
 }
 
 // ============================================================
-// 默认 CLI 交互模式
+// 辅助：构造 WebSocket URL
 // ============================================================
 
-async function runCliMode(server: string, cwdOverride?: string): Promise<void> {
-  const cwd = cwdOverride ?? process.cwd();
-  const serverURL = `ws://${server}/ws`;
-
-  // --- 建立连接 ---
-  const client = new HandClient(serverURL, cwd);
-  const ui = new UI();
-
-  const ensureSession = async (allowCreateOnRestoreFailure: boolean): Promise<boolean> => {
-    try {
-      await client.ensureSession({
-        cwd,
-        allowCreateOnRestoreFailure,
-      });
-      return true;
-    } catch (err) {
-      ui.printError(`连接或恢复 Session 失败: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
-    }
-  };
-
-  if (!(await ensureSession(false))) {
-    process.exit(1);
-  }
-
-  // --- 捕获 Ctrl+C ---
-  process.on("SIGINT", () => {
-    console.log("\n\x1b[90m已退出\x1b[0m");
-    client.close();
-    process.exit(0);
-  });
-
-  process.on("SIGTERM", () => {
-    client.close();
-    process.exit(0);
-  });
-
-  console.log("\x1b[1m\x1b[36mAxon Hand CLI\x1b[0m — 输入 /quit 退出");
-  const logFilePath = getLogFilePath();
-  if (logFilePath) {
-    console.log(`\x1b[90m日志文件: ${logFilePath} （查看: npm start -- logs）\x1b[0m`);
-  }
-  console.log();
-
-  const executePrompt = async (text: string): Promise<boolean> => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (!(await ensureSession(true))) {
-        return false;
-      }
-
-      try {
-        await client.sendPrompt(text);
-        console.log();
-        await client.run();
-        console.log();
-        return true;
-      } catch (err) {
-        ui.printError(`消息发送或执行失败: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    return false;
-  };
-
-  // --- 交互循环 ---
-  while (true) {
-    let input: string;
-    try {
-      input = await ui.readInput("你>");
-    } catch (err) {
-      if (err instanceof EOFError) {
-        console.log();
-        break;
-      }
-      ui.printError(`读取输入失败: ${err instanceof Error ? err.message : String(err)}`);
-      break;
-    }
-
-    input = input.trim();
-    if (!input) {
-      continue;
-    }
-
-    if (input === "/quit" || input === "/exit") {
-      console.log("\x1b[90m再见！\x1b[0m");
-      break;
-    }
-
-    if (!(await executePrompt(input))) {
-      break;
-    }
-  }
-
-  client.close();
+function resolveKey(cliKey?: string): string | undefined {
+  return cliKey?.trim() || process.env.AXON_KEY?.trim() || undefined;
 }
 
-async function runPtyMode(server: string, cwdOverride?: string): Promise<void> {
+function buildServerURL(server: string, key?: string): string {
+  const base = `ws://${server}/ws`;
+  if (!key) return base;
+  return `${base}?key=${encodeURIComponent(key)}`;
+}
+
+// ============================================================
+// 默认 PTY 模式
+// ============================================================
+
+async function runPtyMode(server: string, key: string | undefined, cwdOverride?: string): Promise<void> {
   const cwd = cwdOverride ?? process.cwd();
-  const serverURL = `ws://${server}/ws`;
+  const serverURL = buildServerURL(server, key);
   const client = new HandClient(serverURL, cwd, { interactiveOutput: false });
 
   try {

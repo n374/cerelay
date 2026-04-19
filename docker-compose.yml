@@ -32,6 +32,8 @@ services:
       - CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE:-/usr/local/bin/claude}
       # 可选：传入 claude CLI 额外配置（JSON 字符串）
       - CLAUDE_CONFIG=${CLAUDE_CONFIG-}
+      # 可选：Hand 连接共享密钥（未设置则不校验）
+      - AXON_KEY=${AXON_KEY-}
       # Claude session 运行在独立 mount namespace 中
       - AXON_ENABLE_MOUNT_NAMESPACE=${AXON_ENABLE_MOUNT_NAMESPACE:-true}
       - AXON_NAMESPACE_RUNTIME_ROOT=${AXON_NAMESPACE_RUNTIME_ROOT:-/opt/axon-runtime}

@@ -26,10 +26,13 @@ async function main(): Promise<void> {
 
   const log = createLogger("main");
 
+  const axonKey = process.env.AXON_KEY?.trim() || undefined;
+
   const server = new AxonServer({
     port: opts.port,
     model: opts.model,
     authEnabled: opts.auth,
+    axonKey,
   });
 
   const shutdown = async (): Promise<void> => {

@@ -25,6 +25,9 @@ info "  端口: ${PORT}"
 info "  模型: ${MODEL}"
 info "  日志级别: ${LOG_LEVEL}"
 info "  JSON 日志: ${LOG_JSON}"
+if [ -n "${AXON_KEY}" ]; then
+  info "  AXON_KEY: 已配置（Hand 连接需提供匹配的 key）"
+fi
 
 # --- 设置 claude CLI 认证 ---
 # claude CLI 读取 ~/.claude/ 目录下的凭证

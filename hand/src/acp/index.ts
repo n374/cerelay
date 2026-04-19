@@ -8,16 +8,15 @@ import process from "node:process";
 import { AcpServer } from "./server.js";
 
 export interface AcpCommandOptions {
-  /** Axon Brain WebSocket 地址 */
-  server: string;
+  /** 完整的 WebSocket URL（含 key query string） */
+  serverURL: string;
   /** 默认工作目录 */
   cwd: string;
 }
 
 export async function runAcpServer(options: AcpCommandOptions): Promise<void> {
-  const serverURL = `ws://${options.server}/ws`;
   const acpServer = new AcpServer({
-    serverURL,
+    serverURL: options.serverURL,
     cwd: options.cwd,
   });
 
