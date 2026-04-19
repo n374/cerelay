@@ -41,7 +41,7 @@ test("docker entrypoint forwards startup flags and preserves Claude executable e
   assert.equal(writtenConfig, configJson);
 });
 
-test("docker entrypoint warns when no API key or auth token is set", async () => {
+test("docker entrypoint warns when no credentials file is found", async () => {
   const sandbox = await createSandbox();
 
   const result = await runEntrypoint(sandbox, {
@@ -55,12 +55,50 @@ test("docker entrypoint warns when no API key or auth token is set", async () =>
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.match(result.stdout, /未检测到 ANTHROPIC_API_KEY \/ ANTHROPIC_AUTH_TOKEN，Claude CLI 可能无法工作/);
+  assert.match(result.stdout, /未找到 Claude Code 登录凭证/);
   assert.match(
     result.stdout,
     /NODE_ARGS:\/app\/server\/dist\/index\.js --port 8765 --model claude-sonnet-4 --log-level info/
   );
   assert.doesNotMatch(result.stdout, /--log-json/);
+});
+
+test("docker entrypoint writes credentials from CLAUDE_CREDENTIALS env var", async () => {
+  const sandbox = await createSandbox();
+  const credentials = '{"claudeAiOauth":{"accessToken":"test-token"}}';
+
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    CLAUDE_CREDENTIALS: credentials,
+    ANTHROPIC_API_KEY: "key",
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.match(result.stdout, /已通过 CLAUDE_CREDENTIALS 环境变量写入登录凭证/);
+
+  const written = await readFile(path.join(sandbox.homeDir, ".claude", ".credentials.json"), "utf8");
+  assert.equal(written.trim(), credentials);
+});
+
+test("docker entrypoint detects mounted credentials file", async () => {
+  const sandbox = await createSandbox();
+  // 模拟已挂载的 credentials 文件
+  await mkdir(path.join(sandbox.homeDir, ".claude"), { recursive: true });
+  await writeFile(path.join(sandbox.homeDir, ".claude", ".credentials.json"), '{"ok":true}\n', "utf8");
+
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.match(result.stdout, /检测到已挂载的 Claude Code 登录凭证/);
 });
 
 async function createSandbox() {

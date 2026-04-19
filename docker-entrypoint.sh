@@ -2,7 +2,7 @@
 # ============================================================
 # Axon Brain 容器入口脚本
 # 职责：
-#   1. 复用环境变量中的 Claude 认证信息
+#   1. 初始化 Claude Code 登录态
 #   2. 可选写入额外 claude CLI 配置
 #   3. 启动 axon-server
 # ============================================================
@@ -29,23 +29,34 @@ if [ -n "${AXON_KEY}" ]; then
   info "  AXON_KEY: 已配置（Hand 连接需提供匹配的 key）"
 fi
 
-# --- 设置 claude CLI 配置 ---
+# --- Claude Code 登录态初始化 ---
 CLAUDE_CONFIG_DIR="${HOME}/.claude"
 mkdir -p "${CLAUDE_CONFIG_DIR}"
 
+# 写入 onboarding 标记，防止 Claude Code 进入首次安装向导
+printf '{"hasCompletedOnboarding":true,"installMethod":"native"}\n' > "${HOME}/.claude.json"
+
+# 登录凭证：优先通过 CLAUDE_CREDENTIALS 环境变量注入，否则依赖 bind mount
+if [ -n "${CLAUDE_CREDENTIALS}" ]; then
+  printf '%s\n' "${CLAUDE_CREDENTIALS}" > "${CLAUDE_CONFIG_DIR}/.credentials.json"
+  info "已通过 CLAUDE_CREDENTIALS 环境变量写入登录凭证"
+elif [ -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
+  info "检测到已挂载的 Claude Code 登录凭证"
+else
+  warn "未找到 Claude Code 登录凭证（~/.claude/.credentials.json），Claude CLI 可能无法认证"
+fi
+
 # 如果提供了 CLAUDE_CONFIG（JSON 字符串），写入配置文件
 if [ -n "${CLAUDE_CONFIG}" ]; then
-  info "写入 claude CLI 配置..."
+  info "写入 claude CLI 额外配置..."
   printf '%s' "${CLAUDE_CONFIG}" > "${CLAUDE_CONFIG_DIR}/claude_config.json"
 fi
 
-# claude CLI 认证通过环境变量传入（FUSE 文件代理处理配置文件访问）
+# API Key 检测（与 credentials 互补，均可用于认证）
 if [ -n "${ANTHROPIC_API_KEY}" ]; then
   info "检测到 ANTHROPIC_API_KEY 环境变量"
 elif [ -n "${ANTHROPIC_AUTH_TOKEN}" ]; then
   info "检测到 ANTHROPIC_AUTH_TOKEN 环境变量"
-else
-  warn "未检测到 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN，Claude CLI 可能无法工作"
 fi
 
 # 验证 claude CLI 可用
