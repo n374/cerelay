@@ -47,10 +47,19 @@ export class ToolExecutor {
   // 会话工作目录，影响相对路径解析和 Bash 的 CWD
   private readonly cwd: string;
   private readonly mcpRuntime: McpRuntime;
+  private readonly ownsMcpRuntime: boolean;
 
-  constructor(cwd: string, mcpServerConfigs?: Record<string, McpServerConfig>) {
+  constructor(cwd: string, mcpServerConfigs?: Record<string, McpServerConfig>);
+  constructor(cwd: string, mcpRuntime: McpRuntime);
+  constructor(cwd: string, configsOrRuntime?: Record<string, McpServerConfig> | McpRuntime) {
     this.cwd = cwd;
-    this.mcpRuntime = new McpRuntime(cwd, mcpServerConfigs);
+    if (configsOrRuntime instanceof McpRuntime) {
+      this.mcpRuntime = configsOrRuntime;
+      this.ownsMcpRuntime = false;
+    } else {
+      this.mcpRuntime = new McpRuntime(cwd, configsOrRuntime);
+      this.ownsMcpRuntime = true;
+    }
   }
 
   // 根据工具名分发，与 Go Executor.Execute 完全对齐
@@ -126,7 +135,10 @@ export class ToolExecutor {
   }
 
   async close(): Promise<void> {
-    await this.mcpRuntime.close();
+    // 仅关闭自建的 McpRuntime；外部传入的由调用方管理生命周期
+    if (this.ownsMcpRuntime) {
+      await this.mcpRuntime.close();
+    }
   }
 }
 

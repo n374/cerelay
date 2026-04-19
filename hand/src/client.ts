@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import WebSocket from "ws";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
+import { McpRuntime } from "./mcp/runtime.js";
 import { FileProxyHandler } from "./file-proxy.js";
 import { UI } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
@@ -80,9 +81,16 @@ export class HandClient {
   private sessionId = "";
   private ptySessionId = "";
 
+  // MCP 后台初始化 Promise，sendPrompt 发送前 await 此 Promise 确保 catalog 已就绪
+  private mcpReadyPromise: Promise<void> = Promise.resolve();
+
   // 最后一次 session_end 结果（供 ACP Server 查询）
   private lastResult: { result?: string; error?: string } = {};
   private activeCallbacks: HandClientCallbacks | undefined;
+
+  // MCP 连接池：跨 session 复用已建立的 MCP 连接
+  private sharedMcpRuntime: McpRuntime | null = null;
+  private lastMcpConfigFingerprint = "";
 
   // 写锁：用 Promise 链模拟互斥，确保并发写安全
   private writeChain: Promise<void> = Promise.resolve();
@@ -145,9 +153,14 @@ export class HandClient {
       this.ws = null;
     }
     void this.executor.close().catch(() => undefined);
+    // 关闭共享 MCP 连接池
+    void this.sharedMcpRuntime?.close().catch(() => undefined);
+    this.sharedMcpRuntime = null;
+    this.lastMcpConfigFingerprint = "";
   }
 
   // 发送 create_session 并等待 session_created 响应
+  // MCP catalog 收集和上报在后台异步完成，不阻塞用户交互
   async sendCreateSession(cwd: string, model?: string): Promise<void> {
     this.currentCwd = cwd;
     await this.resetExecutor(cwd);
@@ -161,7 +174,16 @@ export class HandClient {
     await this.writeJSON(msg);
 
     const response = await this.waitForSessionReady("session_created") as CreateSessionResponse;
-    await this.applySessionMcpConfig(response.sessionId, response.mcpServerConfigs);
+
+    // MCP 初始化后台执行，sendPrompt 发送前会 await mcpReadyPromise
+    this.mcpReadyPromise = this.applySessionMcpConfig(response.sessionId, response.mcpServerConfigs)
+      .catch((error) => {
+        log.error("后台 MCP 初始化失败", {
+          sessionId: response.sessionId,
+          error: formatErrorForLog(error),
+        });
+        // 不抛出 — MCP 不可用不阻塞 session，仅影响 MCP 工具调用
+      });
   }
 
   async sendRestoreSession(sessionId: string): Promise<void> {
@@ -236,8 +258,11 @@ export class HandClient {
     return "created";
   }
 
-  // 发送用户 prompt
+  // 发送用户 prompt（首次发送前自动等待 MCP catalog 就绪）
   async sendPrompt(text: string): Promise<void> {
+    // 确保后台 MCP 初始化已完成，catalog 已送达 server
+    await this.mcpReadyPromise;
+
     const msg: Prompt = {
       type: "prompt",
       sessionId: this.sessionId,
@@ -839,11 +864,36 @@ export class HandClient {
     mcpServerConfigs: Record<string, McpServerConfig> | undefined
   ): Promise<void> {
     await this.executor.close().catch(() => undefined);
-    this.executor = new ToolExecutor(cwd, mcpServerConfigs);
+
+    // 配置指纹：配置不变时复用已有 MCP 连接，避免重复 connect + listTools
+    const fingerprint = mcpServerConfigs
+      ? JSON.stringify(Object.keys(mcpServerConfigs).sort())
+      : "";
+    const configChanged = fingerprint !== this.lastMcpConfigFingerprint;
+
+    if (configChanged || !this.sharedMcpRuntime) {
+      // 配置变化或首次创建，关闭旧连接池，新建 McpRuntime
+      await this.sharedMcpRuntime?.close().catch(() => undefined);
+      this.sharedMcpRuntime = new McpRuntime(cwd, mcpServerConfigs);
+      this.lastMcpConfigFingerprint = fingerprint;
+      log.debug("MCP 连接池已创建", {
+        cwd,
+        mcpServers: Object.keys(mcpServerConfigs ?? {}),
+        reason: configChanged ? "配置变化" : "首次创建",
+      });
+    } else {
+      log.debug("MCP 配置未变，复用已有连接池", {
+        cwd,
+        mcpServers: Object.keys(mcpServerConfigs ?? {}),
+      });
+    }
+
+    this.executor = new ToolExecutor(cwd, this.sharedMcpRuntime);
     log.debug("重建 ToolExecutor", {
       cwd,
       mcpServerCount: Object.keys(mcpServerConfigs ?? {}).length,
       mcpServers: Object.keys(mcpServerConfigs ?? {}),
+      mcpRuntimeReused: !configChanged,
     });
   }
 

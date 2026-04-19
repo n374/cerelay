@@ -38,9 +38,9 @@ export class McpRuntime {
       return {};
     }
 
-    const catalog: Record<string, McpServerCatalogEntry> = {};
-    for (const [serverName] of entries) {
-      try {
+    // 并行连接所有 MCP server 并 listTools，从 N×T 降到 max(T)
+    const results = await Promise.allSettled(
+      entries.map(async ([serverName]) => {
         const client = await this.getClient(serverName);
         const tools = await client.listTools();
         log.debug("MCP server tools/list 成功", {
@@ -49,14 +49,22 @@ export class McpRuntime {
           toolCount: tools.tools.length,
           tools: tools.tools.map((tool) => tool.name),
         });
-        catalog[serverName] = {
-          tools: tools.tools.map(normalizeToolDescriptor),
-        };
-      } catch (error) {
+        return [serverName, { tools: tools.tools.map(normalizeToolDescriptor) }] as const;
+      })
+    );
+
+    const catalog: Record<string, McpServerCatalogEntry> = {};
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      if (result.status === "fulfilled") {
+        const [serverName, entry] = result.value;
+        catalog[serverName] = entry;
+      } else {
+        const serverName = entries[i][0];
         log.warn("MCP server tools/list 失败，已跳过", {
           cwd: this.cwd,
           serverName,
-          error: formatErrorForLog(error),
+          error: formatErrorForLog(result.reason),
         });
         // 跳过当前不可用的 MCP server；真实执行时仍会在 callTool 路径上报错。
       }
