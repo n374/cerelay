@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import type { Agent } from "node:http";
 import WebSocket from "ws";
+import { HttpProxyAgent } from "http-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { McpRuntime } from "./mcp/runtime.js";
 import { FileProxyHandler } from "./file-proxy.js";
@@ -116,7 +119,8 @@ export class CerelayClient {
       this.ws = null;
       this.pendingMessages = [];
       this.activeMessageConsumer = null;
-      const ws = new WebSocket(this.serverURL);
+      const agent = resolveProxyAgent(this.serverURL);
+      const ws = new WebSocket(this.serverURL, agent ? { agent } : undefined);
 
       ws.on("open", () => {
         this.ws = ws;
@@ -1059,4 +1063,52 @@ function formatErrorForLog(error: unknown): string {
     return `${error.name}: ${error.message}`;
   }
   return String(error);
+}
+
+// ============================================================
+// HTTP(S) Proxy 支持
+// 读取 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量，
+// 检查 NO_PROXY 排除匹配目标，为 ws 连接提供 agent。
+// ============================================================
+
+function resolveProxyAgent(serverURL: string): Agent | undefined {
+  const url = new URL(serverURL);
+  const isSecure = url.protocol === "wss:";
+
+  if (matchesNoProxy(url.hostname, url.port)) {
+    return undefined;
+  }
+
+  const env = process.env;
+  const proxyURL = isSecure
+    ? (env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy)
+    : (env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy);
+
+  if (!proxyURL) {
+    return undefined;
+  }
+
+  return isSecure
+    ? new HttpsProxyAgent(proxyURL)
+    : new HttpProxyAgent(proxyURL);
+}
+
+function matchesNoProxy(hostname: string, port: string): boolean {
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+  if (!noProxy) return false;
+
+  const entries = noProxy.split(",").map((s) => s.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (entry === "*") return true;
+
+    // 分离可选的端口部分
+    const [hostPattern, portPattern] = entry.split(":");
+    if (portPattern && portPattern !== port) continue;
+
+    // 精确匹配或后缀匹配（.example.com 匹配 foo.example.com）
+    if (hostname === hostPattern) return true;
+    if (hostPattern.startsWith(".") && hostname.endsWith(hostPattern)) return true;
+    if (!hostPattern.startsWith(".") && hostname.endsWith(`.${hostPattern}`)) return true;
+  }
+  return false;
 }

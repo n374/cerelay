@@ -147,6 +147,24 @@ cd client && npm start -- --server localhost:8765 --cwd /path/to/project
 cerelay logs
 ```
 
+### 通过代理连接 / Connecting Through a Proxy
+
+Client 支持 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量，兼容 Caddy Forward Proxy 等 CONNECT 代理：
+
+Client supports `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables, compatible with Caddy Forward Proxy and other CONNECT proxies:
+
+```bash
+# 通过 HTTP 代理连接 Server
+HTTPS_PROXY=http://proxy.internal:8080 cerelay --server https://remote-server.example.com
+
+# 跳过代理（直连）
+NO_PROXY=localhost,127.0.0.1 cerelay --server localhost:8765
+```
+
+- `https://` 目标使用 `HTTPS_PROXY`，`http://` 目标使用 `HTTP_PROXY`
+- `ALL_PROXY` 作为通用回退
+- `NO_PROXY` 支持精确匹配、后缀匹配（`.example.com`）、端口匹配（`host:port`）和通配符（`*`）
+
 ### 启动 Web UI（可选） / Start the Web UI (Optional)
 
 ```bash
@@ -252,6 +270,10 @@ cd web && npm test
 | `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 mount namespace 隔离 |
 | `CLAUDE_CREDENTIALS` | — | Claude Code 登录凭证 JSON（替代文件挂载） |
 | `ANTHROPIC_API_KEY` | — | Claude API Key |
+| `HTTP_PROXY` | — | Client 连接 ws:// 目标时使用的代理 |
+| `HTTPS_PROXY` | — | Client 连接 wss:// 目标时使用的代理 |
+| `ALL_PROXY` | — | 代理通用回退（优先级低于上面两个） |
+| `NO_PROXY` | — | 不走代理的地址列表（逗号分隔） |
 
 ## License
 
