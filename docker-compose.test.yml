@@ -1,0 +1,41 @@
+# ============================================================
+# Cerelay — 容器化测试编排
+# 使用方式：
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+#   或通过 npm: npm run test:container
+# ============================================================
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: cerelay-test:latest
+    container_name: cerelay-test
+
+    # Mount namespace 测试需要 SYS_ADMIN 能力
+    cap_add:
+      - SYS_ADMIN
+
+    # 放行 seccomp/AppArmor，与生产容器保持一致
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+
+    # FUSE 设备
+    devices:
+      - /dev/fuse:/dev/fuse
+
+    environment:
+      - NODE_ENV=test
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=true
+      - CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
+      # E2E mock-api 测试用的 claude 可执行文件
+      - CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+
+    # 临时文件系统：测试产物不持久化
+    tmpfs:
+      - /tmp:exec,size=512M
+
+    # 不自动重启——跑完就退出
+    restart: "no"

@@ -1,0 +1,54 @@
+# ============================================================
+# Cerelay — 容器化测试镜像
+# 提供隔离的 Linux 环境运行全部测试套件，包括需要
+# SYS_ADMIN (mount namespace) 和 FUSE 的集成测试。
+# 覆盖场景：
+#   - mount namespace bootstrap（--rbind 递归挂载凭证文件）
+#   - FUSE shadow file 凭证注入
+#   - docker-entrypoint .claude.json 安全合并
+# ============================================================
+
+FROM node:22-slim
+
+WORKDIR /app
+
+# 系统依赖：
+#   util-linux  → unshare / nsenter（mount namespace 测试）
+#   fuse3       → FUSE 设备支持
+#   python3     → fusepy 依赖
+#   procps      → 调试用 ps
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+       util-linux fuse3 libfuse2 python3 python3-pip procps \
+  && pip3 install --break-system-packages fusepy \
+  && rm -rf /var/lib/apt/lists/*
+
+# 安装 claude CLI（E2E mock-api 测试需要真实可执行文件）
+RUN npm install -g @anthropic-ai/claude-code
+
+# 先复制 package 清单利用 Docker 层缓存
+COPY package.json package-lock.json ./
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+COPY web/package.json ./web/
+
+# 安装所有依赖（含 devDependencies）
+RUN npm ci
+
+# 复制全部源码和测试
+COPY server/ ./server/
+COPY client/ ./client/
+COPY web/ ./web/
+COPY test/ ./test/
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
+
+# 确保 mount namespace runtime 目录存在
+RUN mkdir -p /opt/cerelay-runtime
+
+# 默认环境：禁用 mount namespace（需要 docker run --cap-add SYS_ADMIN 才启用）
+ENV CERELAY_ENABLE_MOUNT_NAMESPACE=true
+ENV CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
+ENV NODE_ENV=test
+
+# 入口：运行全部测试
+ENTRYPOINT ["npm", "test"]

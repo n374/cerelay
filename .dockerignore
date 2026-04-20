@@ -5,10 +5,10 @@
 !.env.example
 node_modules
 server/node_modules
-hand/node_modules
+client/node_modules
 web/node_modules
 server/dist
-hand/dist
+client/dist
 web/dist
 npm-debug.log*
 docker-compose*.yml
