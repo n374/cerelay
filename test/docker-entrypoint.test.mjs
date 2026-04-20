@@ -101,6 +101,51 @@ test("docker entrypoint detects mounted credentials file", async () => {
   assert.match(result.stdout, /检测到已挂载的 Claude Code 登录凭证/);
 });
 
+test("docker entrypoint merges .claude.json preserving existing fields", async () => {
+  const sandbox = await createSandbox();
+
+  // 模拟已有 .claude.json（例如用户的自定义配置已通过 bind mount 注入）
+  const existing = { customField: "keep-me", permissions: { allow: ["Read"] } };
+  await writeFile(path.join(sandbox.homeDir, ".claude.json"), JSON.stringify(existing), "utf8");
+
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
+
+  const merged = JSON.parse(await readFile(path.join(sandbox.homeDir, ".claude.json"), "utf8"));
+  // 新字段被写入
+  assert.equal(merged.hasCompletedOnboarding, true);
+  assert.equal(merged.installMethod, "native");
+  // 已有字段被保留
+  assert.equal(merged.customField, "keep-me");
+  assert.deepEqual(merged.permissions, { allow: ["Read"] });
+});
+
+test("docker entrypoint creates .claude.json when it does not exist", async () => {
+  const sandbox = await createSandbox();
+  // 不预创建 .claude.json
+
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
+
+  const created = JSON.parse(await readFile(path.join(sandbox.homeDir, ".claude.json"), "utf8"));
+  assert.equal(created.hasCompletedOnboarding, true);
+  assert.equal(created.installMethod, "native");
+});
+
 async function createSandbox() {
   const rootDir = await mkdtemp(path.join(tmpdir(), "axon-entrypoint-"));
   const binDir = path.join(rootDir, "bin");
@@ -121,9 +166,15 @@ exit 1
 `
   );
 
+  // fake node: -e 参数透传给真实 node（docker-entrypoint 的合并脚本需要真正执行），
+  // 其余（如启动 server）只打印参数
+  const realNode = process.execPath;
   await writeExecutable(
     path.join(binDir, "node"),
     `#!/bin/sh
+if [ "$1" = "-e" ]; then
+  exec "${realNode}" "$@"
+fi
 printf 'NODE_ARGS:%s\\n' "$*"
 printf 'CLAUDE_CODE_EXECUTABLE_ENV:%s\\n' "$CLAUDE_CODE_EXECUTABLE"
 printf 'ANTHROPIC_AUTH_TOKEN_ENV:%s\\n' "$ANTHROPIC_AUTH_TOKEN"

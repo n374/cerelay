@@ -236,7 +236,8 @@ function topLevelName(filePath: string): string | null {
   return parts[0] ?? null;
 }
 
-function renderNamespaceBootstrapScript(): string {
+/** @internal exported for testing */
+export function renderNamespaceBootstrapScript(): string {
   return `#!/bin/sh
 set -eu
 
