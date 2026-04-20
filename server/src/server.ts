@@ -12,6 +12,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
@@ -652,11 +653,18 @@ export class CerelayServer {
     // 启动 FUSE 文件代理（mount namespace 模式下）
     let fileProxy: FileProxyManager | undefined;
     if (this.shouldStartFileProxy()) {
+      // 容器内凭证文件作为 shadow file 注入 FUSE，确保 namespace 内可见
+      const shadowFiles: Record<string, string> = {};
+      const containerCredPath = (process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude") + "/.credentials.json";
+      if (existsSync(containerCredPath)) {
+        shadowFiles["home-claude/.credentials.json"] = containerCredPath;
+      }
       fileProxy = new FileProxyManager({
         runtimeRoot,
         clientHomeDir: message.homeDir || process.env.HOME || "/home/node",
         clientCwd: message.cwd || ".",
         sessionId,
+        shadowFiles,
         sendToClient: async (msg) => {
           await this.sendToClient(clientId, msg);
         },
@@ -764,6 +772,11 @@ export class CerelayServer {
       const shadowFiles: Record<string, string> = {};
       if (hookInjection.settingsPath) {
         shadowFiles["project-claude/settings.local.json"] = hookInjection.settingsPath;
+      }
+      // 容器内凭证文件作为 shadow file 注入 FUSE，确保 namespace 内可见
+      const containerCredPath = (process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude") + "/.credentials.json";
+      if (existsSync(containerCredPath)) {
+        shadowFiles["home-claude/.credentials.json"] = containerCredPath;
       }
       fileProxy = new FileProxyManager({
         runtimeRoot,

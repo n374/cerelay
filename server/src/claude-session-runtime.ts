@@ -119,6 +119,13 @@ async function createMountNamespaceRuntime(
   const stderrChunks: Buffer[] = [];
   anchor.stderr?.on("data", (chunk: Buffer) => {
     stderrChunks.push(Buffer.from(chunk));
+    // 实时输出 bootstrap stderr 到服务器日志，便于运维排查
+    const text = chunk.toString("utf8").trim();
+    if (text) {
+      for (const line of text.split("\n")) {
+        log.debug(line.trim(), { source: "bootstrap", sessionId: options.sessionId });
+      }
+    }
   });
 
   try {
