@@ -52,6 +52,11 @@ services:
     cap_add:
       - SYS_ADMIN
 
+    # 放行 seccomp/AppArmor：默认 profile 在部分内核版本下会间歇性阻断 FUSE mount 系统调用
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+
     # FUSE 设备：供 Client 侧文件代理使用
     devices:
       - /dev/fuse:/dev/fuse

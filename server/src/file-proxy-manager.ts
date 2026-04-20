@@ -87,13 +87,15 @@ export class FileProxyManager {
     return this._mountPoint;
   }
 
+  private static readonly FUSE_MAX_RETRIES = 3;
+  private static readonly FUSE_RETRY_DELAY_MS = 1000;
+
   /**
-   * 启动 FUSE daemon 并等待就绪。
+   * 启动 FUSE daemon 并等待就绪（含重试）。
    * 必须在 namespace bootstrap 之前调用。
    */
   async start(): Promise<void> {
     this._mountPoint = path.join(this.runtimeRoot, "fuse");
-    const readyFile = path.join(this.runtimeRoot, "fuse-ready");
 
     await mkdir(this._mountPoint, { recursive: true });
 
@@ -109,6 +111,54 @@ export class FileProxyManager {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= FileProxyManager.FUSE_MAX_RETRIES; attempt++) {
+      try {
+        await this.tryStartDaemon(snapshotFile);
+        return; // 成功
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        log.warn("FUSE daemon 启动失败，准备重试", {
+          sessionId: this.sessionId,
+          attempt,
+          maxRetries: FileProxyManager.FUSE_MAX_RETRIES,
+          error: lastError.message,
+        });
+        // 清理残留 mount point 和进程
+        await this.cleanupFailedDaemon();
+        if (attempt < FileProxyManager.FUSE_MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, FileProxyManager.FUSE_RETRY_DELAY_MS));
+        }
+      }
+    }
+    throw new Error(`FUSE daemon 启动失败（${FileProxyManager.FUSE_MAX_RETRIES} 次重试后放弃）: ${lastError?.message}`);
+  }
+
+  /** 清理失败的 FUSE daemon 残留 */
+  private async cleanupFailedDaemon(): Promise<void> {
+    if (this.fuseProcess && this.fuseProcess.exitCode === null) {
+      this.fuseProcess.kill("SIGKILL");
+      await new Promise<void>((resolve) => {
+        this.fuseProcess!.once("exit", () => resolve());
+        setTimeout(resolve, 2000);
+      });
+    }
+    this.fuseProcess = null;
+    this.controlStream = null;
+    this.readline?.close();
+    this.readline = null;
+    // 清理可能的 stale mount
+    try {
+      execSync(`fusermount -u "${this._mountPoint}" 2>/dev/null || umount "${this._mountPoint}" 2>/dev/null || true`);
+    } catch { /* ignore */ }
+  }
+
+  /** 单次尝试启动 FUSE daemon */
+  private async tryStartDaemon(snapshotFile: string): Promise<void> {
+    const readyFile = path.join(this.runtimeRoot, "fuse-ready");
+    // 清除上次重试可能残留的 ready file
+    await rm(readyFile, { force: true }).catch(() => undefined);
 
     log.info("启动 FUSE daemon", {
       sessionId: this.sessionId,
@@ -146,16 +196,20 @@ export class FileProxyManager {
       }
     });
 
-    child.on("exit", (code, signal) => {
-      if (!this.destroyed) {
-        log.error("FUSE daemon 异常退出", {
-          sessionId: this.sessionId,
-          code,
-          signal,
-          stderr: stderrChunks.join("\n"),
-        });
-      }
-      this.rejectAllPending(new Error(`FUSE daemon exited (code=${code}, stderr=${stderrChunks.join(" | ")})`));
+    // 监听提前退出（mount 失败会导致进程立即退出）
+    const earlyExitPromise = new Promise<never>((_, reject) => {
+      child.once("exit", (code, signal) => {
+        if (!this.destroyed) {
+          log.error("FUSE daemon 异常退出", {
+            sessionId: this.sessionId,
+            code,
+            signal,
+            stderr: stderrChunks.join("\n"),
+          });
+        }
+        this.rejectAllPending(new Error(`FUSE daemon exited (code=${code}, stderr=${stderrChunks.join(" | ")})`));
+        reject(new Error(`FUSE daemon 启动失败，exitCode=${code}`));
+      });
     });
 
     // 从 stdout 读取 FUSE daemon 的请求
@@ -169,8 +223,11 @@ export class FileProxyManager {
       });
     });
 
-    // 等待 FUSE mount 就绪（ready file 由 FUSE init() 回调写入，保证 mount 已生效）
-    await this.waitForReady(readyFile, 15_000);
+    // 等待 FUSE mount 就绪，或进程提前退出
+    await Promise.race([
+      this.waitForReady(readyFile, 15_000),
+      earlyExitPromise,
+    ]);
 
     log.info("FUSE daemon 已就绪", {
       sessionId: this.sessionId,
