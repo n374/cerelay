@@ -34,7 +34,16 @@ CLAUDE_CONFIG_DIR="${HOME}/.claude"
 mkdir -p "${CLAUDE_CONFIG_DIR}"
 
 # 写入 onboarding 标记，防止 Claude Code 进入首次安装向导
-printf '{"hasCompletedOnboarding":true,"installMethod":"native"}\n' > "${HOME}/.claude.json"
+# 使用 node 合并而非覆盖，保留已有字段
+node -e "
+const fs = require('fs');
+const p = process.env.HOME + '/.claude.json';
+let obj = {};
+try { obj = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+obj.hasCompletedOnboarding = true;
+obj.installMethod = 'native';
+fs.writeFileSync(p, JSON.stringify(obj) + '\n');
+"
 
 # 登录凭证：优先通过 CLAUDE_CREDENTIALS 环境变量注入，否则依赖 bind mount
 if [ -n "${CLAUDE_CREDENTIALS}" ]; then

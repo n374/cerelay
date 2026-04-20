@@ -240,7 +240,7 @@ mkdir -p "$CERELAY_RUNTIME_ROOT/views" "$CERELAY_RUNTIME_ROOT/staged"
 echo "[bootstrap] staging shared claude" >&2
 if [ -d "$CERELAY_SHARED_CLAUDE_DIR" ]; then
   mkdir -p "$CERELAY_RUNTIME_ROOT/staged/claude"
-  mount --bind "$CERELAY_SHARED_CLAUDE_DIR" "$CERELAY_RUNTIME_ROOT/staged/claude"
+  mount --rbind "$CERELAY_SHARED_CLAUDE_DIR" "$CERELAY_RUNTIME_ROOT/staged/claude"
 fi
 
 if [ -f "$CERELAY_SHARED_CLAUDE_JSON" ]; then
