@@ -119,6 +119,13 @@ async function createMountNamespaceRuntime(
   const stderrChunks: Buffer[] = [];
   anchor.stderr?.on("data", (chunk: Buffer) => {
     stderrChunks.push(Buffer.from(chunk));
+    // DEBUG: 实时输出 bootstrap stderr 到服务器日志
+    const text = chunk.toString("utf8").trim();
+    if (text) {
+      for (const line of text.split("\n")) {
+        log.info(line.trim(), { source: "bootstrap", sessionId: options.sessionId });
+      }
+    }
   });
 
   try {
@@ -242,29 +249,35 @@ echo "[bootstrap] CERELAY_SHARED_CLAUDE_DIR=$CERELAY_SHARED_CLAUDE_DIR" >&2
 echo "[bootstrap] CERELAY_SHARED_CLAUDE_JSON=$CERELAY_SHARED_CLAUDE_JSON" >&2
 
 echo "[bootstrap] === 源文件状态（容器级） ===" >&2
-ls -la "$CERELAY_SHARED_CLAUDE_DIR/" >&2 2>&1 || echo "[bootstrap] ls SHARED_CLAUDE_DIR failed" >&2
-ls -la "$CERELAY_SHARED_CLAUDE_JSON" >&2 2>&1 || echo "[bootstrap] ls SHARED_CLAUDE_JSON failed" >&2
+ls -la "$CERELAY_SHARED_CLAUDE_DIR/" 1>&2 || echo "[bootstrap] ls SHARED_CLAUDE_DIR failed" >&2
+ls -la "$CERELAY_SHARED_CLAUDE_JSON" 1>&2 || echo "[bootstrap] ls SHARED_CLAUDE_JSON failed" >&2
+echo "[bootstrap] .credentials.json wc:" >&2
+wc -c < "$CERELAY_SHARED_CLAUDE_DIR/.credentials.json" 1>&2 || echo "[bootstrap] wc failed" >&2
 echo "[bootstrap] .credentials.json 内容（前200字符）:" >&2
-head -c 200 "$CERELAY_SHARED_CLAUDE_DIR/.credentials.json" >&2 2>&1 || echo "[bootstrap] .credentials.json 不存在或无法读取" >&2
-echo "" >&2
+_cred=$(head -c 200 "$CERELAY_SHARED_CLAUDE_DIR/.credentials.json" 2>/dev/null) || true
+echo "[bootstrap]   \${_cred:-<empty>}" >&2
 echo "[bootstrap] .claude.json 内容:" >&2
-cat "$CERELAY_SHARED_CLAUDE_JSON" >&2 2>&1 || echo "[bootstrap] .claude.json 不存在或无法读取" >&2
+_cjson=$(cat "$CERELAY_SHARED_CLAUDE_JSON" 2>/dev/null) || true
+echo "[bootstrap]   \${_cjson:-<empty>}" >&2
 
 if [ -d "$CERELAY_SHARED_CLAUDE_DIR" ]; then
   mkdir -p "$CERELAY_RUNTIME_ROOT/staged/claude"
   mount --rbind "$CERELAY_SHARED_CLAUDE_DIR" "$CERELAY_RUNTIME_ROOT/staged/claude"
   echo "[bootstrap] === staged 后状态 ===" >&2
-  ls -la "$CERELAY_RUNTIME_ROOT/staged/claude/" >&2 2>&1 || true
+  ls -la "$CERELAY_RUNTIME_ROOT/staged/claude/" 1>&2 || true
+  echo "[bootstrap] staged .credentials.json wc:" >&2
+  wc -c < "$CERELAY_RUNTIME_ROOT/staged/claude/.credentials.json" 1>&2 || echo "[bootstrap] staged .credentials.json 不存在" >&2
   echo "[bootstrap] staged .credentials.json 内容（前200字符）:" >&2
-  head -c 200 "$CERELAY_RUNTIME_ROOT/staged/claude/.credentials.json" >&2 2>&1 || echo "[bootstrap] staged .credentials.json 不存在" >&2
-  echo "" >&2
+  _staged_cred=$(head -c 200 "$CERELAY_RUNTIME_ROOT/staged/claude/.credentials.json" 2>/dev/null) || true
+  echo "[bootstrap]   \${_staged_cred:-<empty>}" >&2
 fi
 
 if [ -f "$CERELAY_SHARED_CLAUDE_JSON" ]; then
   : > "$CERELAY_RUNTIME_ROOT/staged/claude.json"
   mount --bind "$CERELAY_SHARED_CLAUDE_JSON" "$CERELAY_RUNTIME_ROOT/staged/claude.json"
   echo "[bootstrap] staged claude.json 内容:" >&2
-  cat "$CERELAY_RUNTIME_ROOT/staged/claude.json" >&2 2>&1 || true
+  _staged_cjson=$(cat "$CERELAY_RUNTIME_ROOT/staged/claude.json" 2>/dev/null) || true
+  echo "[bootstrap]   \${_staged_cjson:-<empty>}" >&2
 fi
 
 echo "[bootstrap] mounting view roots: $CERELAY_VIEW_ROOTS" >&2
@@ -313,14 +326,17 @@ fi
 
 echo "[bootstrap] === namespace 内最终文件状态 ===" >&2
 echo "[bootstrap] HOME_DIR=$CERELAY_HOME_DIR" >&2
-ls -la "$CERELAY_HOME_DIR/.claude/" >&2 2>&1 || echo "[bootstrap] $CERELAY_HOME_DIR/.claude/ 不存在" >&2
+ls -la "$CERELAY_HOME_DIR/.claude/" 1>&2 || echo "[bootstrap] $CERELAY_HOME_DIR/.claude/ 不存在" >&2
+echo "[bootstrap] namespace .credentials.json wc:" >&2
+wc -c < "$CERELAY_HOME_DIR/.claude/.credentials.json" 1>&2 || echo "[bootstrap] namespace .credentials.json 不存在" >&2
 echo "[bootstrap] namespace .credentials.json 内容（前200字符）:" >&2
-head -c 200 "$CERELAY_HOME_DIR/.claude/.credentials.json" >&2 2>&1 || echo "[bootstrap] namespace .credentials.json 不存在或无法读取" >&2
-echo "" >&2
+_ns_cred=$(head -c 200 "$CERELAY_HOME_DIR/.claude/.credentials.json" 2>/dev/null) || true
+echo "[bootstrap]   \${_ns_cred:-<empty>}" >&2
 echo "[bootstrap] namespace .claude.json 内容:" >&2
-cat "$CERELAY_HOME_DIR/.claude.json" >&2 2>&1 || echo "[bootstrap] namespace .claude.json 不存在或无法读取" >&2
-echo "[bootstrap] === mount 信息 ===" >&2
-cat /proc/self/mountinfo | grep -E "(claude|credentials)" >&2 2>&1 || echo "[bootstrap] 无 claude 相关 mount" >&2
+_ns_cjson=$(cat "$CERELAY_HOME_DIR/.claude.json" 2>/dev/null) || true
+echo "[bootstrap]   \${_ns_cjson:-<empty>}" >&2
+echo "[bootstrap] === mount 信息（claude 相关） ===" >&2
+grep -E "(claude|credentials)" /proc/self/mountinfo 1>&2 || echo "[bootstrap] 无 claude 相关 mount" >&2
 
 echo "[bootstrap] hook injection check" >&2
 # Hook injection overlay

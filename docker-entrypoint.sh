@@ -63,13 +63,15 @@ info ".credentials.json 大小与权限:"
 ls -la "${CLAUDE_CONFIG_DIR}/.credentials.json" 2>&1 | while IFS= read -r line; do info "  $line"; done
 info ".credentials.json 内容（前200字符，脱敏）:"
 if [ -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
-  head -c 200 "${CLAUDE_CONFIG_DIR}/.credentials.json" | sed 's/"[a-zA-Z0-9_-]\{20,\}"/"***REDACTED***"/g' | while IFS= read -r line; do info "  $line"; done
+  cred_preview=$(head -c 200 "${CLAUDE_CONFIG_DIR}/.credentials.json" | sed 's/"[a-zA-Z0-9_-]\{20,\}"/"***REDACTED***"/g')
+  info "  ${cred_preview}"
 else
   info "  文件不存在"
 fi
 info ".claude.json 内容:"
 if [ -f "${HOME}/.claude.json" ]; then
-  cat "${HOME}/.claude.json" | while IFS= read -r line; do info "  $line"; done
+  claude_json=$(cat "${HOME}/.claude.json")
+  info "  ${claude_json}"
 else
   info "  文件不存在"
 fi
