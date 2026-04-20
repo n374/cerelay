@@ -55,6 +55,26 @@ else
   warn "未找到 Claude Code 登录凭证（~/.claude/.credentials.json），Claude CLI 可能无法认证"
 fi
 
+# --- DEBUG: 容器级文件诊断 ---
+info "=== [DEBUG] 容器级凭证文件诊断 ==="
+info ".claude/ 目录内容:"
+ls -la "${CLAUDE_CONFIG_DIR}/" 2>&1 | while IFS= read -r line; do info "  $line"; done
+info ".credentials.json 大小与权限:"
+ls -la "${CLAUDE_CONFIG_DIR}/.credentials.json" 2>&1 | while IFS= read -r line; do info "  $line"; done
+info ".credentials.json 内容（前200字符，脱敏）:"
+if [ -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
+  head -c 200 "${CLAUDE_CONFIG_DIR}/.credentials.json" | sed 's/"[a-zA-Z0-9_-]\{20,\}"/"***REDACTED***"/g' | while IFS= read -r line; do info "  $line"; done
+else
+  info "  文件不存在"
+fi
+info ".claude.json 内容:"
+if [ -f "${HOME}/.claude.json" ]; then
+  cat "${HOME}/.claude.json" | while IFS= read -r line; do info "  $line"; done
+else
+  info "  文件不存在"
+fi
+info "=== [DEBUG] 容器级凭证诊断结束 ==="
+
 # 如果提供了 CLAUDE_CONFIG（JSON 字符串），写入配置文件
 if [ -n "${CLAUDE_CONFIG}" ]; then
   info "写入 claude CLI 额外配置..."
