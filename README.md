@@ -41,10 +41,49 @@ sequenceDiagram
 
 ## 前置条件 / Prerequisites
 
-- **Node.js** >= 18
-- **TypeScript**：编译依赖 `tsc`，已包含在 `devDependencies` 中，`npm install` 后即可用
-- **Docker**（仅 Server 容器模式需要）
-- **Claude CLI**（仅 Server 本地直跑模式需要，需已认证：`claude auth`）
+### Client 侧 / Client Side
+
+Client 在用户本地机器运行，负责执行 Claude 的工具调用（Read/Write/Bash/Grep 等）。以下为 Client 侧的系统级依赖：
+
+The Client runs on the user's local machine and executes Claude's tool calls (Read/Write/Bash/Grep, etc.). System-level dependencies for the Client:
+
+| 依赖 / Dependency | 级别 / Level | 说明 / Description |
+|---|---|---|
+| **Node.js** >= 18 | 必须 / Required | 运行时环境，需要 `node` 和 `npm`。Node 18+ 内置 `fetch` API，供 WebFetch 工具使用 / Runtime, requires `node` and `npm`. Node 18+ provides built-in `fetch` API for WebFetch tool |
+| **bash** | 必须 / Required | Bash 工具硬编码使用 `/bin/bash` 执行命令 / Bash tool uses `/bin/bash` (hardcoded path) to execute commands |
+| **git** | 强烈推荐 / Strongly recommended | Claude Code 的大部分操作依赖 `git`（diff、blame、commit 等）/ Most Claude Code operations depend on `git` (diff, blame, commit, etc.) |
+| **grep** | 推荐 / Recommended | Grep 工具优先调用系统 `grep -rn`，不可用时回退到纯 Node.js 实现 / Grep tool prefers system `grep -rn`, falls back to pure Node.js implementation |
+
+> **编译工具链不是必须的 / Build toolchain is NOT required**：Client 的所有 npm 依赖（`ws`、`commander`、`@modelcontextprotocol/sdk`、`http-proxy-agent`、`https-proxy-agent`）均为纯 JavaScript 包，`npm install` 无需 `gcc`/`g++`/`make`/`python`。
+>
+> All npm dependencies are pure JavaScript — no native compilation toolchain (`gcc`/`g++`/`make`/`python`) is needed for `npm install`.
+
+**macOS 安装示例 / macOS example**：
+
+```bash
+# Node.js（通过 nvm 或 Homebrew）
+brew install node@20       # 或 nvm install 20
+
+# Git（macOS 通常自带 Xcode Command Line Tools 中的 git）
+xcode-select --install     # 如果还没装过 / if not installed yet
+```
+
+**Linux（Debian/Ubuntu）安装示例 / Linux (Debian/Ubuntu) example**：
+
+```bash
+# Node.js（通过 NodeSource）
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 系统依赖 / System dependencies
+sudo apt-get install -y git bash grep
+```
+
+### Server 侧 / Server Side
+
+- **Docker**（仅 Server 容器模式需要 / required only for Docker mode）
+- **Claude CLI**（仅 Server 本地直跑模式需要，需已认证：`claude auth` / required only for local mode, must be authenticated）
+- **TypeScript**：编译依赖 `tsc`，已包含在 `devDependencies` 中，`npm install` 后即可用 / Build dependency, included in `devDependencies`
 
 ## 快速开始 / Quick Start
 
@@ -94,9 +133,37 @@ cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
 
 ### 安装 Client CLI / Install the Client CLI
 
-将 `cerelay` 命令安装到 `~/.local/bin`，之后可在任意目录直接使用：
+#### 方式 A：单文件 Bundle（推荐） / Single-file Bundle (Recommended)
 
-Install the `cerelay` command to `~/.local/bin` for use from any directory:
+通过 Docker 构建一个自包含的单文件，产物仅依赖 Node.js >= 18，不需要 `node_modules`：
+
+Build a self-contained single file via Docker. The output only requires Node.js >= 18, no `node_modules` needed:
+
+```bash
+cd client && npm run bundle:docker
+```
+
+产物位于 `client/dist/cerelay-bundle.mjs`（约 1.2MB）。安装到系统：
+
+Output is at `client/dist/cerelay-bundle.mjs` (~1.2MB). Install system-wide:
+
+```bash
+mkdir -p ~/.local/bin
+cp client/dist/cerelay-bundle.mjs ~/.local/bin/cerelay.mjs
+printf '#!/bin/sh\nexec node "$HOME/.local/bin/cerelay.mjs" "$@"\n' > ~/.local/bin/cerelay
+chmod +x ~/.local/bin/cerelay
+```
+
+> 也可本地 bundle（需先 `npm install`）/ Local bundle (requires `npm install` first):
+> ```bash
+> cd client && npm run bundle
+> ```
+
+#### 方式 B：源码安装 / Source Install
+
+将 `cerelay` 命令安装到 `~/.local/bin`（包含 `dist/` + `node_modules/`）：
+
+Install the `cerelay` command to `~/.local/bin` (includes `dist/` + `node_modules/`):
 
 ```bash
 cd client && npm run install:global

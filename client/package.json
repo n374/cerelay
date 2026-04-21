@@ -11,6 +11,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --banner:js='import{createRequire}from\"module\";const require=createRequire(import.meta.url);' --outfile=dist/cerelay-bundle.mjs",
+    "bundle:docker": "bash scripts/bundle-docker.sh",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
     "install:global": "bash scripts/install-global.sh",
@@ -26,6 +28,7 @@
   "devDependencies": {
     "@types/node": "latest",
     "@types/ws": "latest",
+    "esbuild": "latest",
     "tsx": "latest",
     "typescript": "latest"
   }
