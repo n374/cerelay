@@ -74,6 +74,10 @@ export function isMcpToolName(toolName: string): boolean {
   return /^mcp__[A-Za-z0-9_-]+__.+$/.test(toolName);
 }
 
+export function isClientRoutedToolName(toolName: string): boolean {
+  return isBuiltinHandToolName(toolName) || isMcpToolName(toolName);
+}
+
 function normalizeNames(values: string[]): string[] {
   const deduped = new Set<string>();
   for (const value of values) {

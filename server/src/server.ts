@@ -27,7 +27,6 @@ import type {
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
-import type { HookInput } from "./session.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
 import { StatsCollector } from "./stats.js";
@@ -38,9 +37,9 @@ import { ClaudePtySession } from "./pty-session.js";
 import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
 import { FileProxyManager } from "./file-proxy-manager.js";
 import type { FileProxyResponse } from "./protocol.js";
+import type { HookInput } from "./claude-tool-bridge.js";
 
 const log = createLogger("server");
-const SESSION_RESUME_GRACE_MS = 60_000;
 
 // ============================================================
 // ServerOptions
@@ -55,10 +54,6 @@ export interface ServerOptions {
   initialToken?: string;
   /** 简单共享密钥（通过 CERELAY_KEY 环境变量传入），Client 连接时必须匹配 */
   cerelayKey?: string;
-  /** session 恢复窗口，默认 60 秒 */
-  sessionResumeGraceMs?: number;
-  /** detached session 清理轮询间隔，默认 15 秒 */
-  sessionCleanupIntervalMs?: number;
 }
 
 // ============================================================
@@ -68,15 +63,13 @@ export interface ServerOptions {
 export class CerelayServer {
   private readonly defaultModel: string;
   private readonly port: number;
-  /** @deprecated SDK session resume 已移除，保留字段兼容现有构造调用 */
-  private readonly sessionResumeGraceMs: number;
   private readonly cerelayKey: string | undefined;
 
   // 组件
   private readonly auth: TokenStore;
   private readonly clients = new ClientRegistry();
   private readonly ptySessions = new Map<string, PtySessionEntry>();
-  /** sessionId → FileProxyManager，独立于 session entry 注册，确保 session 创建期间也能 dispatch */
+  /** sessionId → FileProxyManager，独立于 PTY session entry 注册，确保 session 创建期间也能 dispatch */
   private readonly fileProxies = new Map<string, FileProxyManager>();
   private readonly stats = new StatsCollector();
   private readonly toolRouting = new ToolRoutingStore();
@@ -91,7 +84,6 @@ export class CerelayServer {
   constructor(options: ServerOptions) {
     this.defaultModel = options.model;
     this.port = options.port;
-    this.sessionResumeGraceMs = options.sessionResumeGraceMs ?? SESSION_RESUME_GRACE_MS;
     this.cerelayKey = options.cerelayKey || undefined;
     this.auth = new TokenStore(options.authEnabled ?? false);
 
@@ -155,8 +147,6 @@ export class CerelayServer {
     this.shuttingDown = true;
     log.info("开始优雅关闭...");
     clearInterval(this.tokenCleanupTimer);
-
-    // 关闭所有 session
     for (const [sessionId, entry] of Array.from(this.ptySessions.entries())) {
       this.destroyPtySession(sessionId, entry, "服务器关闭");
     }
@@ -269,6 +259,19 @@ export class CerelayServer {
     if (url === "/admin/clients" && req.method === "GET") {
       requestLog.debug("返回 Client 列表");
       this.sendJson(res, 200, { clients: this.clients.stats() });
+      return;
+    }
+
+    if (url === "/admin/sessions" && req.method === "GET") {
+      requestLog.debug("返回 PTY Session 列表", { sessionCount: this.ptySessions.size });
+      this.sendJson(res, 200, {
+        sessions: Array.from(this.ptySessions.entries()).map(([id, { session, clientId }]) => ({
+          sessionId: id,
+          cwd: session.cwd,
+          mode: "pty",
+          clientId,
+        })),
+      });
       return;
     }
 
@@ -487,6 +490,7 @@ export class CerelayServer {
         sessionCount: clientInfo.sessionIds.size,
       });
 
+      // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
       for (const sessionId of clientInfo.sessionIds) {
         const ptyEntry = this.ptySessions.get(sessionId);
         if (ptyEntry) {
@@ -570,10 +574,6 @@ export class CerelayServer {
       reqId: resp.reqId,
     });
   }
-
-  // ============================================================
-  // Session 创建
-  // ============================================================
 
   private async handleCreatePtySession(clientId: string, message: CreatePtySession): Promise<void> {
     log.debug("收到创建 PTY Session 请求", {
@@ -783,17 +783,16 @@ export class CerelayServer {
   }
 
   private async handleCloseSession(clientId: string, message: CloseSession): Promise<void> {
-    const ptyEntry = this.getPtySessionEntry(message.sessionId);
+    const ptyEntry = this.ptySessions.get(message.sessionId);
+    if (!ptyEntry) {
+      throw new Error(`PTY 会话不存在: ${message.sessionId}`);
+    }
     if (ptyEntry.clientId !== clientId) {
       throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
     }
     this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
     log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
   }
-
-  // ============================================================
-  // 辅助方法
-  // ============================================================
 
   private getPtySessionEntry(sessionId: string): PtySessionEntry {
     const entry = this.ptySessions.get(sessionId);
@@ -879,13 +878,12 @@ export class CerelayServer {
 
     const token = req.headers["x-cerelay-hook-token"];
     const ptyEntry = this.ptySessions.get(sessionId);
-    const expectedToken = ptyEntry?.hookToken;
-    if (!expectedToken) {
+    if (!ptyEntry?.hookToken) {
       this.sendJson(res, 404, { error: "session_not_found" });
       return;
     }
 
-    if (token !== expectedToken) {
+    if (token !== ptyEntry.hookToken) {
       this.sendJson(res, 403, { error: "forbidden" });
       return;
     }
@@ -913,10 +911,10 @@ export class CerelayServer {
         toolName: payload.tool_name,
         toolUseId: payload.tool_use_id,
         inputSummary: summarizeUnknown(payload.tool_input),
+        from: "pty-session",
       });
 
-      // PTY session: 命令行 Hook 期望顶层字段，不认 hookSpecificOutput 包装
-      const result = await ptyEntry!.session.handleInjectedPreToolUse(payload);
+      const result = await ptyEntry.session.handleInjectedPreToolUse(payload);
       this.sendJson(res, 200, result.hookSpecificOutput ?? result);
     } catch (error) {
       log.warn("处理内部 PreToolUse hook bridge 失败", {

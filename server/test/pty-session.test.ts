@@ -31,8 +31,6 @@ test("pty session can stream terminal bytes through WebSocket", async (t) => {
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
-    sessionCleanupIntervalMs: 20,
-    sessionResumeGraceMs: 500,
   });
   t.after(async () => {
     await server.shutdown();
@@ -94,8 +92,6 @@ test("pty session forwards process stdout as pty_output without user input", asy
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
-    sessionCleanupIntervalMs: 20,
-    sessionResumeGraceMs: 500,
   });
   t.after(async () => {
     await server.shutdown();
@@ -138,8 +134,6 @@ test("create_pty_session keeps injected hook files in the PTY runtime root", asy
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
-    sessionCleanupIntervalMs: 20,
-    sessionResumeGraceMs: 500,
   });
   t.after(async () => {
     await server.shutdown();
@@ -204,8 +198,6 @@ test("pty session delivers pty_exit after short-lived process terminates", async
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
-    sessionCleanupIntervalMs: 20,
-    sessionResumeGraceMs: 500,
   });
   t.after(async () => {
     await server.shutdown();
@@ -242,8 +234,6 @@ test("close_session terminates a running pty session", async (t) => {
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
-    sessionCleanupIntervalMs: 20,
-    sessionResumeGraceMs: 500,
   });
   t.after(async () => {
     await server.shutdown();

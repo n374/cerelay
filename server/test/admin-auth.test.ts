@@ -7,6 +7,14 @@ import { CerelayServer } from "../src/server.js";
 const ADMIN_TOKEN = "axon_admin_auth_test_token_0123456789abcdef";
 const WS_TOKEN = "axon_ws_auth_test_token_0123456789abcdef";
 
+function restoreEnvVar(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
 test("admin APIs require a valid token and expose token management", async (t) => {
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
@@ -106,14 +114,10 @@ test("admin APIs require a valid token and expose token management", async (t) =
 });
 
 test("websocket auth rejects missing tokens and accepts valid query/header tokens", async (t) => {
-  const originalMountNamespace = process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
-  process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = "false";
+  const originalPtyCommand = process.env.CERELAY_PTY_COMMAND;
+  process.env.CERELAY_PTY_COMMAND = "cat";
   t.after(() => {
-    if (originalMountNamespace === undefined) {
-      delete process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
-      return;
-    }
-    process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = originalMountNamespace;
+    restoreEnvVar("CERELAY_PTY_COMMAND", originalPtyCommand);
   });
 
   const server = new CerelayServer({
@@ -135,6 +139,8 @@ test("websocket auth rejects missing tokens and accepts valid query/header token
   querySocket.send(JSON.stringify({
     type: "create_pty_session",
     cwd: "/tmp",
+    cols: 80,
+    rows: 24,
   }));
   const queryCreated = await waitForMessageType(querySocket, "pty_session_created");
   assert.equal(typeof queryCreated.sessionId, "string");
@@ -147,6 +153,8 @@ test("websocket auth rejects missing tokens and accepts valid query/header token
   headerSocket.send(JSON.stringify({
     type: "create_pty_session",
     cwd: "/tmp",
+    cols: 80,
+    rows: 24,
   }));
   const created = await waitForMessageType(headerSocket, "pty_session_created");
   assert.equal(typeof created.sessionId, "string");

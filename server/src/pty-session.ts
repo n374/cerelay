@@ -6,16 +6,16 @@ import process from "node:process";
 import type { ClaudeSessionRuntime, SpawnOptions, SpawnedProcess } from "./claude-session-runtime.js";
 import { createLogger, type Logger } from "./logger.js";
 import { ToolRelay, type RemoteToolResult } from "./relay.js";
+import { randomUUID } from "node:crypto";
+import { PYTHON_PTY_HOST_SCRIPT } from "./pty-host-script.js";
 import {
-  isClientRoutedToolName,
   renderToolResultForClaude,
-  resolveClaudeCodeExecutable,
   rewriteToolInputForClient,
   type HookInput,
   type SyncHookJsonOutput,
-} from "./session.js";
-import { randomUUID } from "node:crypto";
-import { PYTHON_PTY_HOST_SCRIPT } from "./pty-host-script.js";
+} from "./claude-tool-bridge.js";
+import { resolveClaudeCodeExecutable } from "./claude-executable.js";
+import { isClientRoutedToolName } from "./tool-routing.js";
 
 const log = createLogger("pty-session");
 

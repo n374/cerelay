@@ -71,7 +71,7 @@ export function mergePreToolUseHook(
   return {
     ...parsed,
     // 容器内不启动 MCP 服务器 — 可执行文件不在容器中，会导致 Claude Code 卡在初始化阶段。
-    // PTY session 的 MCP 工具通过 PreToolUse hook 转发到 Client 执行。
+    // 常规 session 的 MCP 工具通过 Server mcp-proxy 代理；PTY session 通过 PreToolUse hook 转发。
     mcpServers: {},
     hooks: {
       ...existingHooks,
