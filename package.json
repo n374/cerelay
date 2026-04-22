@@ -2,13 +2,15 @@
   "name": "cerelay",
   "private": true,
   "scripts": {
+    "typecheck": "npm run typecheck:workspaces",
+    "typecheck:workspaces": "npm run typecheck --workspaces --if-present",
     "test:smoke": "node --test test/**/*.test.mjs",
     "test:workspaces": "npm run test --workspaces --if-present",
     "server:up": "docker compose up --build --force-recreate --remove-orphans -d",
     "server:down": "docker compose down",
     "server:logs": "docker compose logs -f cerelay-server",
     "test": "npm run test:smoke && npm run test:workspaces",
-    "test:container": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test"
+    "test:container": "sh ./test/run-container-tests.sh"
   },
   "workspaces": ["server", "client", "web"]
 }

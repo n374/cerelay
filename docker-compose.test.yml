@@ -11,7 +11,6 @@ services:
       context: .
       dockerfile: Dockerfile.test
     image: cerelay-test:latest
-    container_name: cerelay-test
 
     # Mount namespace 测试需要 SYS_ADMIN 能力
     cap_add:
@@ -28,14 +27,109 @@ services:
 
     environment:
       - NODE_ENV=test
-      - CERELAY_ENABLE_MOUNT_NAMESPACE=false
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=true
       - CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
+      - CERELAY_RUN_CONTAINER_SOCKS_TESTS=true
+      - CERELAY_SOCKS_TEST_BASE_URL=http://172.28.0.10:8765
+      - CERELAY_SOCKS_TEST_WS_URL=ws://172.28.0.10:8765/ws
+      - MOCK_SOCKS_ADMIN_URL=http://172.28.0.2:18080
+      - MOCK_DNS_IP=172.28.0.4
+      - EGRESS_PROBE_IP=203.0.113.10
       # E2E mock-api 测试用的 claude 可执行文件
       - CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+
+    depends_on:
+      - mock-socks
+      - mock-dns
+      - egress-probe
+      - cerelay-socks-test
 
     # 临时文件系统：测试产物不持久化
     tmpfs:
       - /tmp:exec,size=512M
 
+    networks:
+      cerelay-testnet:
+        ipv4_address: 172.28.0.20
+
     # 不自动重启——跑完就退出
     restart: "no"
+
+  mock-socks:
+    image: node:22-slim
+    working_dir: /fixtures
+    command: ["node", "/fixtures/mock-socks.mjs"]
+    environment:
+      - MOCK_SOCKS_CONNECT_MAP=203.0.113.10:8080=172.28.0.5:8080
+    volumes:
+      - ./test/container-fixtures:/fixtures:ro
+    networks:
+      cerelay-testnet:
+        ipv4_address: 172.28.0.2
+    restart: "no"
+
+  mock-dns:
+    image: node:22-slim
+    working_dir: /fixtures
+    command: ["node", "/fixtures/mock-dns.mjs"]
+    environment:
+      - MOCK_DNS_A_RECORD=203.0.113.10
+      - MOCK_DNS_NAME_SUFFIX=.test
+    volumes:
+      - ./test/container-fixtures:/fixtures:ro
+    networks:
+      cerelay-testnet:
+        ipv4_address: 172.28.0.4
+    restart: "no"
+
+  egress-probe:
+    image: node:22-slim
+    working_dir: /fixtures
+    command: ["node", "/fixtures/egress-probe.mjs"]
+    environment:
+      - EGRESS_PROBE_BODY=pong from egress-probe
+    volumes:
+      - ./test/container-fixtures:/fixtures:ro
+    networks:
+      cerelay-testnet:
+        ipv4_address: 172.28.0.5
+    restart: "no"
+
+  cerelay-socks-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cerelay-socks-test:latest
+    depends_on:
+      - mock-socks
+      - mock-dns
+      - egress-probe
+    environment:
+      - ANTHROPIC_API_KEY=test-key
+      - PORT=8765
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=false
+      - CERELAY_SOCKS_PROXY=socks5://172.28.0.2:1080
+      - CERELAY_SOCKS_DNS_SERVER=172.28.0.4
+      - CERELAY_SOCKS_UDP=block
+      - 'CERELAY_PTY_COMMAND=curl -fsS "http://echo-$(date +%s%N).test:8080/ping"'
+      - CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    tmpfs:
+      - /tmp:exec,size=512M
+    networks:
+      cerelay-testnet:
+        ipv4_address: 172.28.0.10
+    restart: "no"
+
+networks:
+  cerelay-testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

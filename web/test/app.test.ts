@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const APP_PATH = "/Users/n374/Documents/Code/axon/web/public/app.js";
+const APP_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public", "app.js");
 const STORAGE_KEY = "cerelay-web-config";
 const SESSION_STORAGE_KEY = "cerelay-web-session";
 

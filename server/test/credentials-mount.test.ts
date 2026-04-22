@@ -327,7 +327,7 @@ test("integration: mount namespace bootstrap exposes all files under shared clau
     unshare --mount --propagation private /bin/sh -c '
       mkdir -p "${runtimeRoot}/staged/claude"
       mount --rbind "${sharedClaudeDir}" "${runtimeRoot}/staged/claude"
-      ls -A "${runtimeRoot}/staged/claude/" | sort
+      ls -a "${runtimeRoot}/staged/claude/" | sort
       echo "---"
       cat "${runtimeRoot}/staged/claude/subdir/nested.txt"
     '

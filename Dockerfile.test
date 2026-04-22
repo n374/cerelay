@@ -46,8 +46,8 @@ COPY docker-entrypoint.sh ./docker-entrypoint.sh
 # 确保 mount namespace runtime 目录存在
 RUN mkdir -p /opt/cerelay-runtime
 
-# 默认环境：关闭 mount namespace；需要时由具体测试显式开启
-ENV CERELAY_ENABLE_MOUNT_NAMESPACE=false
+# 默认环境：禁用 mount namespace（需要 docker run --cap-add SYS_ADMIN 才启用）
+ENV CERELAY_ENABLE_MOUNT_NAMESPACE=true
 ENV CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
 ENV NODE_ENV=test
 
