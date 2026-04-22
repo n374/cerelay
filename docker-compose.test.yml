@@ -27,7 +27,9 @@ services:
 
     environment:
       - NODE_ENV=test
-      - CERELAY_ENABLE_MOUNT_NAMESPACE=true
+      - CERELAY_TEST_IN_CONTAINER=true
+      - CERELAY_EXPECT_MOUNT_NAMESPACE_TESTS=false
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=false
       - CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
       - CERELAY_RUN_CONTAINER_SOCKS_TESTS=true
       - CERELAY_SOCKS_TEST_BASE_URL=http://172.28.0.10:8765

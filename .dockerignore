@@ -12,4 +12,6 @@ client/dist
 web/dist
 npm-debug.log*
 docker-compose*.yml
+!docker-compose.yml
+!docker-compose.test.yml
 .DS_Store

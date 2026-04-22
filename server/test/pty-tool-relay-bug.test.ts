@@ -11,6 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -334,16 +335,21 @@ test("嫌疑3: view root 覆盖后顶层目录为空（用户文件被遮盖）"
 
 // Linux 集成测试：验证 namespace 内 cwd 确实为空
 const isLinux = process.platform === "linux";
+const expectMountNamespaceTests = process.env.CERELAY_EXPECT_MOUNT_NAMESPACE_TESTS === "true";
 const hasSysAdmin = (() => {
   if (!isLinux) return false;
   try {
-    const { execSync } = require("node:child_process");
     execSync("unshare --mount echo ok", { stdio: "pipe" });
     return true;
   } catch {
     return false;
   }
 })();
+
+if (expectMountNamespaceTests) {
+  assert.ok(isLinux, "容器测试环境应在 Linux 内运行 mount namespace 集成测试");
+  assert.ok(hasSysAdmin, "容器测试环境应提供 unshare --mount / SYS_ADMIN 能力");
+}
 
 test("嫌疑3-集成: namespace 内 cwd 只有 .claude/ 没有项目文件", { skip: !hasSysAdmin }, async (t) => {
   const { execSync } = await import("node:child_process");

@@ -306,6 +306,7 @@ fs.writeFileSync(p, JSON.stringify(obj) + '\\n');
 // ============================================================
 
 const isLinux = process.platform === "linux";
+const expectMountNamespaceTests = process.env.CERELAY_EXPECT_MOUNT_NAMESPACE_TESTS === "true";
 const hasSysAdmin = (() => {
   if (!isLinux) return false;
   try {
@@ -316,6 +317,11 @@ const hasSysAdmin = (() => {
     return false;
   }
 })();
+
+if (expectMountNamespaceTests) {
+  assert.ok(isLinux, "容器测试环境应在 Linux 内运行 mount namespace 集成测试");
+  assert.ok(hasSysAdmin, "容器测试环境应提供 unshare --mount / SYS_ADMIN 能力");
+}
 
 test("integration: mount namespace bootstrap makes credentials visible via --rbind", { skip: !hasSysAdmin }, async (t) => {
   const tempDir = await mkdir(path.join(tmpdir(), `ns-cred-${Date.now()}`), { recursive: true });
