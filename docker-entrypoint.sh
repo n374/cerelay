@@ -20,6 +20,7 @@ MODEL="${MODEL:-claude-sonnet-4-20250514}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 LOG_JSON="${LOG_JSON:-false}"
 CERELAY_SOCKS_PROXY="${CERELAY_SOCKS_PROXY:-}"
+CERELAY_SOCKS_UDP="${CERELAY_SOCKS_UDP:-forward}"
 CERELAY_SOCKS_DNS_SERVER="${CERELAY_SOCKS_DNS_SERVER:-1.1.1.1}"
 CERELAY_SOCKS_TUN_ADDRESS="${CERELAY_SOCKS_TUN_ADDRESS:-172.19.0.1/30}"
 CERELAY_SOCKS_TUN_MTU="${CERELAY_SOCKS_TUN_MTU:-9000}"
@@ -34,19 +35,6 @@ _MAIN_PID=""
 PROXY_HOST=""
 PROXY_PORT=""
 
-check_tcp_endpoint() {
-  node -e "
-    const net = require('node:net');
-    const host = process.argv[1];
-    const port = Number(process.argv[2]);
-    const timeout = Number(process.argv[3]);
-    const socket = net.createConnection({ host, port, timeout });
-    socket.on('connect', () => { socket.end(); process.exit(0); });
-    socket.on('timeout', () => { socket.destroy(); process.exit(1); });
-    socket.on('error', () => process.exit(1));
-  " "$1" "$2" "${CERELAY_SOCKS_CONNECT_TIMEOUT_MS}"
-}
-
 cleanup() {
   if [ -n "${_MONITOR_PID}" ] && kill -0 "${_MONITOR_PID}" 2>/dev/null; then
     kill "${_MONITOR_PID}" 2>/dev/null || true
@@ -59,6 +47,8 @@ cleanup() {
   fi
 }
 
+trap cleanup EXIT INT TERM
+
 start_socks_tun() {
   [ -n "${CERELAY_SOCKS_PROXY}" ] || return 0
 
@@ -66,22 +56,26 @@ start_socks_tun() {
     error "CERELAY_SOCKS_PROXY 已设置，但 sing-box 不可用"
     exit 1
   fi
-  if ! command -v ip > /dev/null 2>&1; then
-    error "CERELAY_SOCKS_PROXY 已设置，但 iproute2 不可用"
-    exit 1
-  fi
-
-  unset ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy
 
   endpoint="$(node "${CERELAY_SOCKS_CONFIG_SCRIPT}" endpoint "${CERELAY_SOCKS_PROXY}")" || exit 1
-  PROXY_HOST="$(printf '%s' "${endpoint}" | awk '{print $1}')"
-  PROXY_PORT="$(printf '%s' "${endpoint}" | awk '{print $2}')"
+  PROXY_HOST=$(printf '%s' "${endpoint}" | awk '{print $1}')
+  PROXY_PORT=$(printf '%s' "${endpoint}" | awk '{print $2}')
 
   info "启动容器级透明 SOCKS5 代理（fail-closed）"
   info "  代理: ${PROXY_HOST}:${PROXY_PORT}"
-  info "  DNS: ${CERELAY_SOCKS_DNS_SERVER}"
+  info "  SOCKS UDP 策略: ${CERELAY_SOCKS_UDP}"
+  info "  SOCKS DNS: ${CERELAY_SOCKS_DNS_SERVER}（默认 TCP）"
 
-  if ! check_tcp_endpoint "${PROXY_HOST}" "${PROXY_PORT}"; then
+  if ! node -e "
+    const net = require('node:net');
+    const host = process.argv[1];
+    const port = Number(process.argv[2]);
+    const timeout = Number(process.argv[3]);
+    const sock = net.createConnection({ host, port, timeout });
+    sock.on('connect', () => { sock.end(); process.exit(0); });
+    sock.on('timeout', () => { sock.destroy(); process.exit(1); });
+    sock.on('error', () => process.exit(1));
+  " "${PROXY_HOST}" "${PROXY_PORT}" "${CERELAY_SOCKS_CONNECT_TIMEOUT_MS}"; then
     error "SOCKS 代理预检查失败，拒绝启动容器"
     exit 1
   fi
@@ -90,13 +84,13 @@ start_socks_tun() {
   sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
 
   mkdir -p "${CERELAY_SOCKS_CONFIG_DIR}"
-  node "${CERELAY_SOCKS_CONFIG_SCRIPT}" config "${CERELAY_SOCKS_PROXY}" > "${CERELAY_SOCKS_CONFIG_DIR}/config.json"
+  node "${CERELAY_SOCKS_CONFIG_SCRIPT}" config > "${CERELAY_SOCKS_CONFIG_DIR}/config.json"
 
   sing-box run -c "${CERELAY_SOCKS_CONFIG_DIR}/config.json" &
   _SINGBOX_PID=$!
 
   i=0
-  while [ "${i}" -lt 150 ]; do
+  while [ "$i" -lt 150 ]; do
     if ip -o link show tun0 >/dev/null 2>&1; then
       break
     fi
@@ -132,19 +126,28 @@ start_proxy_monitor() {
         fi
         exit 0
       fi
-      if ! check_tcp_endpoint "${PROXY_HOST}" "${PROXY_PORT}"; then
-        error "SOCKS 代理端点不可达，终止主进程以保持 fail-closed"
-        if [ -n "${_MAIN_PID}" ] && kill -0 "${_MAIN_PID}" 2>/dev/null; then
-          kill -TERM "${_MAIN_PID}" 2>/dev/null || true
+      if [ -n "${PROXY_HOST}" ] && [ -n "${PROXY_PORT}" ]; then
+        if ! node -e "
+          const net = require('node:net');
+          const host = process.argv[1];
+          const port = Number(process.argv[2]);
+          const timeout = Number(process.argv[3]);
+          const sock = net.createConnection({ host, port, timeout });
+          sock.on('connect', () => { sock.end(); process.exit(0); });
+          sock.on('timeout', () => { sock.destroy(); process.exit(1); });
+          sock.on('error', () => process.exit(1));
+        " "${PROXY_HOST}" "${PROXY_PORT}" "${CERELAY_SOCKS_CONNECT_TIMEOUT_MS}"; then
+          error "SOCKS 代理端点不可达，终止主进程以保持 fail-closed"
+          if [ -n "${_MAIN_PID}" ] && kill -0 "${_MAIN_PID}" 2>/dev/null; then
+            kill -TERM "${_MAIN_PID}" 2>/dev/null || true
+          fi
+          exit 0
         fi
-        exit 0
       fi
     done
   ) &
   _MONITOR_PID=$!
 }
-
-trap cleanup EXIT INT TERM
 
 info "启动 Cerelay Server"
 info "  端口: ${PORT}"

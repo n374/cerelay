@@ -7,6 +7,35 @@ function fail(message) {
   process.exit(1);
 }
 
+function normalizeDnsServer(rawValue) {
+  const value = (rawValue || "").trim() || "1.1.1.1";
+
+  if (!value.includes("://")) {
+    return `tcp://${value}`;
+  }
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    fail(`Invalid DNS server URI: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (!["tcp:", "tls:", "https:"].includes(url.protocol)) {
+    fail(`Unsupported DNS protocol: ${url.protocol}. Only tcp://, tls://, and https:// are supported.`);
+  }
+
+  return value;
+}
+
+function parseUdpPolicy(rawValue) {
+  const value = (rawValue || "").trim() || "forward";
+  if (value !== "forward" && value !== "block") {
+    fail(`Invalid CERELAY_SOCKS_UDP value: ${value}. Expected forward or block.`);
+  }
+  return value;
+}
+
 function parseProxy(rawValue) {
   const value = (rawValue || "").trim();
   if (!value) {
@@ -20,14 +49,12 @@ function parseProxy(rawValue) {
     } catch (error) {
       fail(`Invalid SOCKS proxy URI: ${error instanceof Error ? error.message : String(error)}`);
     }
-
     if (url.protocol !== "socks5:") {
       fail(`Unsupported proxy protocol: ${url.protocol}. Only socks5:// is supported.`);
     }
     if (!url.hostname || !url.port) {
       fail("SOCKS proxy URI must include host and port.");
     }
-
     return {
       host: url.hostname,
       port: Number(url.port),
@@ -37,25 +64,25 @@ function parseProxy(rawValue) {
   }
 
   const parts = value.split(":");
-  if (parts.length !== 2 && parts.length !== 4) {
-    fail("Unsupported SOCKS proxy format. Use socks5://user:pass@host:port or host:port[:user:pass].");
+  if (parts.length === 2 || parts.length === 4) {
+    const [host, port, username = "", password = ""] = parts;
+    if (!host || !port) {
+      fail("Compact SOCKS proxy format must be host:port[:username:password].");
+    }
+    return {
+      host,
+      port: Number(port),
+      username,
+      password,
+    };
   }
 
-  const [host, port, username = "", password = ""] = parts;
-  if (!host || !port) {
-    fail("Compact SOCKS proxy format must be host:port[:username:password].");
-  }
-
-  return {
-    host,
-    port: Number(port),
-    username,
-    password,
-  };
+  fail("Unsupported SOCKS proxy format. Use socks5://user:pass@host:port or host:port[:user:pass].");
 }
 
 function buildConfig(proxy) {
-  const dnsServer = process.env.CERELAY_SOCKS_DNS_SERVER?.trim() || "1.1.1.1";
+  const dnsServer = normalizeDnsServer(process.env.CERELAY_SOCKS_DNS_SERVER);
+  const udpPolicy = parseUdpPolicy(process.env.CERELAY_SOCKS_UDP);
   const tunAddress = process.env.CERELAY_SOCKS_TUN_ADDRESS?.trim() || "172.19.0.1/30";
   const tunMtu = Number(process.env.CERELAY_SOCKS_TUN_MTU || "9000");
 
@@ -72,6 +99,11 @@ function buildConfig(proxy) {
   }
   if (proxy.password) {
     outbound.password = proxy.password;
+  }
+
+  const rules = [{ action: "sniff" }, { protocol: "dns", action: "hijack-dns" }];
+  if (udpPolicy === "block") {
+    rules.push({ network: "udp", action: "reject" });
   }
 
   return {
@@ -96,10 +128,7 @@ function buildConfig(proxy) {
     ],
     outbounds: [outbound],
     route: {
-      rules: [
-        { action: "sniff" },
-        { protocol: "dns", action: "hijack-dns" },
-      ],
+      rules,
       final: "proxy",
       auto_detect_interface: true,
     },
