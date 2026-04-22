@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -147,32 +146,26 @@ test("docker entrypoint creates .claude.json when it does not exist", async () =
   assert.equal(created.installMethod, "native");
 });
 
-test("docker entrypoint starts container-level SOCKS TUN when configured", async () => {
+test("docker entrypoint logs UDP policy at startup", async () => {
   const sandbox = await createSandbox();
-  const proxyServer = await createTcpServer();
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+    CERELAY_SOCKS_PROXY: "socks5://proxy.example.com:1080",
+    CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
+    CERELAY_TEST_NET_RESPONSES: "success",
+  });
 
-  try {
-    const result = await runEntrypoint(sandbox, {
-      PORT: "8765",
-      MODEL: "claude-sonnet-4",
-      LOG_LEVEL: "info",
-      LOG_JSON: "false",
-      ANTHROPIC_API_KEY: "key",
-      CERELAY_SOCKS_PROXY: `socks5://127.0.0.1:${proxyServer.port}`,
-      CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
-    });
-
-    assert.equal(result.exitCode, 0, result.stderr);
-    assert.match(result.stdout, /SOCKS TUN: 已启用/);
-    assert.match(result.stdout, /启动容器级透明 SOCKS5 代理/);
-    assert.match(result.stdout, /代理: 127\.0\.0\.1:/);
-    assert.match(
-      result.stdout,
-      /NODE_ARGS:\/app\/server\/dist\/index\.js --port 8765 --model claude-sonnet-4 --log-level info/
-    );
-  } finally {
-    await proxyServer.close();
-  }
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.match(result.stdout, /SOCKS TUN: 已启用/);
+  assert.match(result.stdout, /启动容器级透明 SOCKS5 代理/);
+  assert.match(result.stdout, /代理: proxy\.example\.com:1080/);
+  assert.match(result.stdout, /SOCKS UDP 策略: forward/);
+  assert.match(result.stdout, /SOCKS DNS: 1\.1\.1\.1（默认 TCP）/);
+  assert.match(result.stdout, /NODE_ARGS:\/app\/server\/dist\/index\.js --port 8765 --model claude-sonnet-4 --log-level info/);
 });
 
 test("docker entrypoint refuses to start when SOCKS proxy preflight fails", async () => {
@@ -184,39 +177,53 @@ test("docker entrypoint refuses to start when SOCKS proxy preflight fails", asyn
     LOG_LEVEL: "info",
     LOG_JSON: "false",
     ANTHROPIC_API_KEY: "key",
-    CERELAY_SOCKS_PROXY: "socks5://127.0.0.1:9",
+    CERELAY_SOCKS_PROXY: "socks5://proxy.example.com:1080",
     CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
     CERELAY_SOCKS_CONNECT_TIMEOUT_MS: "100",
+    CERELAY_TEST_NET_RESPONSES: "fail",
   });
 
   assert.notEqual(result.exitCode, 0);
   assert.match(result.stdout + result.stderr, /SOCKS 代理预检查失败/);
 });
 
-test("docker entrypoint fail-closes when sing-box exits after startup", async () => {
+test("docker entrypoint propagates CERELAY_SOCKS_UDP=block into generated sing-box config", async () => {
   const sandbox = await createSandbox();
-  const proxyServer = await createTcpServer();
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+    CERELAY_SOCKS_PROXY: "socks5://proxy.example.com:1080",
+    CERELAY_SOCKS_UDP: "block",
+    CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
+    CERELAY_TEST_NET_RESPONSES: "success",
+  });
 
-  try {
-    const result = await runEntrypoint(sandbox, {
-      PORT: "8765",
-      MODEL: "claude-sonnet-4",
-      LOG_LEVEL: "info",
-      LOG_JSON: "false",
-      ANTHROPIC_API_KEY: "key",
-      CERELAY_SOCKS_PROXY: `socks5://127.0.0.1:${proxyServer.port}`,
-      CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
-      CERELAY_SOCKS_MONITOR_INTERVAL_SECS: "0.1",
-      CERELAY_TEST_NODE_MODE: "server-sleep",
-      CERELAY_TEST_SINGBOX_MODE: "exit-after-start",
-      CERELAY_TEST_SINGBOX_EXIT_DELAY_SECS: "0.2",
-    });
+  assert.equal(result.exitCode, 0, result.stderr);
 
-    assert.notEqual(result.exitCode, 0);
-    assert.match(result.stdout + result.stderr, /SOCKS TUN 已停止，终止主进程以保持 fail-closed/);
-  } finally {
-    await proxyServer.close();
-  }
+  const config = JSON.parse(await readFile(path.join(sandbox.etcDir, "config.json"), "utf8"));
+  assert.deepEqual(config.route.rules.at(-1), { network: "udp", action: "reject" });
+});
+
+test("docker entrypoint fail-closes when SOCKS proxy endpoint becomes unreachable mid-flight", async () => {
+  const sandbox = await createSandbox();
+  const result = await runEntrypoint(sandbox, {
+    PORT: "8765",
+    MODEL: "claude-sonnet-4",
+    LOG_LEVEL: "info",
+    LOG_JSON: "false",
+    ANTHROPIC_API_KEY: "key",
+    CERELAY_SOCKS_PROXY: "socks5://proxy.example.com:1080",
+    CERELAY_SOCKS_CONFIG_SCRIPT: path.join(WORKDIR, "docker", "socks-proxy-config.mjs"),
+    CERELAY_SOCKS_MONITOR_INTERVAL_SECS: "0.1",
+    CERELAY_TEST_NODE_MODE: "server-sleep",
+    CERELAY_TEST_NET_RESPONSES: "success,fail",
+  });
+
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stdout + result.stderr, /SOCKS 代理端点不可达，终止主进程以保持 fail-closed/);
 });
 
 async function createSandbox() {
@@ -225,6 +232,7 @@ async function createSandbox() {
   const homeDir = path.join(rootDir, "home");
   const tunFlag = path.join(rootDir, "tun-ready");
   const etcDir = path.join(rootDir, "etc");
+  const netStateFile = path.join(rootDir, "net-state");
   const resolvConf = path.join(rootDir, "resolv.conf");
 
   await mkdir(binDir, { recursive: true });
@@ -249,27 +257,44 @@ exit 1
   await writeExecutable(
     path.join(binDir, "node"),
     `#!/bin/sh
-if [ "$1" = "-e" ]; then
-  exec "${realNode}" "$@"
-fi
-if [ -n "$CERELAY_SOCKS_CONFIG_SCRIPT" ] && [ "$1" = "$CERELAY_SOCKS_CONFIG_SCRIPT" ]; then
-  exec "${realNode}" "$@"
-fi
-if [ "$CERELAY_TEST_NODE_MODE" = "server-sleep" ]; then
-  trap 'exit 143' TERM
-  printf 'NODE_ARGS:%s\\n' "$*"
-  while true; do sleep 1; done
-fi
-printf 'NODE_ARGS:%s\\n' "$*"
-printf 'CLAUDE_CODE_EXECUTABLE_ENV:%s\\n' "$CLAUDE_CODE_EXECUTABLE"
-printf 'ANTHROPIC_AUTH_TOKEN_ENV:%s\\n' "$ANTHROPIC_AUTH_TOKEN"
+	if [ "$1" = "-e" ]; then
+	  case "$2" in
+	    *"const net = require('node:net');"*)
+	      if [ -n "$CERELAY_TEST_NET_RESPONSES" ]; then
+	        state_file="$CERELAY_TEST_NET_STATE_FILE"
+	        index=0
+	        if [ -f "$state_file" ]; then
+	          index=$(cat "$state_file")
+	        fi
+	        response=$(printf '%s\n' "$CERELAY_TEST_NET_RESPONSES" | awk -F, -v n=$((index + 1)) '{ if (n <= NF) print $n; else print $NF }')
+	        printf '%s' $((index + 1)) > "$state_file"
+	        if [ "$response" = "success" ]; then
+	          exit 0
+	        fi
+	        exit 1
+	      fi
+	      ;;
+	  esac
+	  exec "${realNode}" "$@"
+	fi
+	if [ -n "$CERELAY_SOCKS_CONFIG_SCRIPT" ] && [ "$1" = "$CERELAY_SOCKS_CONFIG_SCRIPT" ]; then
+	  exec "${realNode}" "$@"
+	fi
+	if [ "$CERELAY_TEST_NODE_MODE" = "server-sleep" ]; then
+	  trap 'exit 143' TERM
+	  printf 'NODE_ARGS:%s\\n' "$*"
+	  while true; do sleep 1; done
+	fi
+	printf 'NODE_ARGS:%s\\n' "$*"
+	printf 'CLAUDE_CODE_EXECUTABLE_ENV:%s\\n' "$CLAUDE_CODE_EXECUTABLE"
+	printf 'ANTHROPIC_AUTH_TOKEN_ENV:%s\\n' "$ANTHROPIC_AUTH_TOKEN"
 printf 'ANTHROPIC_BASE_URL_ENV:%s\\n' "$ANTHROPIC_BASE_URL"
 printf 'PORT_ENV:%s\\n' "$PORT"
 printf 'MODEL_ENV:%s\\n' "$MODEL"
 printf 'LOG_LEVEL_ENV:%s\\n' "$LOG_LEVEL"
 printf 'LOG_JSON_ENV:%s\\n' "$LOG_JSON"
-exit 0
-`
+	exit 0
+	`
   );
 
   await writeExecutable(
@@ -297,7 +322,7 @@ if [ "$1" = "-o" ] && [ "$2" = "link" ] && [ "$3" = "show" ] && [ "$4" = "tun0" 
   fi
   exit 1
 fi
-exit 1
+exec /usr/sbin/ip "$@"
 `
   );
 
@@ -308,7 +333,7 @@ exit 0
 `
   );
 
-  return { rootDir, binDir, homeDir, tunFlag, etcDir, resolvConf };
+  return { rootDir, binDir, homeDir, tunFlag, etcDir, netStateFile, resolvConf };
 }
 
 async function writeExecutable(filePath, content) {
@@ -324,6 +349,7 @@ function runEntrypoint(sandbox, overrides) {
         HOME: sandbox.homeDir,
         PATH: `${sandbox.binDir}:${process.env.PATH ?? ""}`,
         CERELAY_TEST_TUN_FLAG: sandbox.tunFlag,
+        CERELAY_TEST_NET_STATE_FILE: sandbox.netStateFile,
         CERELAY_SOCKS_CONFIG_DIR: sandbox.etcDir,
         CERELAY_RESOLV_CONF_PATH: sandbox.resolvConf,
         ...overrides,
@@ -348,38 +374,6 @@ function runEntrypoint(sandbox, overrides) {
         exitCode: code ?? 1,
         stdout,
         stderr,
-      });
-    });
-  });
-}
-
-function createTcpServer() {
-  return new Promise((resolve, reject) => {
-    const server = createServer((socket) => {
-      socket.on("error", () => undefined);
-      socket.end();
-    });
-
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("failed to get test proxy port"));
-        return;
-      }
-
-      resolve({
-        port: address.port,
-        close: () =>
-          new Promise((closeResolve, closeReject) => {
-            server.close((error) => {
-              if (error) {
-                closeReject(error);
-                return;
-              }
-              closeResolve();
-            });
-          }),
       });
     });
   });
