@@ -33,6 +33,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV HOME=/home/node
 
+ARG SINGBOX_VERSION=1.11.4
+
 # 运行阶段仍需完整 workspace 清单，否则 npm workspace 安装会失败
 COPY package.json package-lock.json ./
 COPY server/package.json ./server/
@@ -40,17 +42,35 @@ COPY client/package.json ./client/
 COPY web/package.json ./web/
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends util-linux python3 python3-pip fuse3 libfuse2 \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    fuse3 \
+    iproute2 \
+    libfuse2 \
+    nftables \
+    procps \
+    python3 \
+    python3-pip \
+    util-linux \
   && pip3 install --break-system-packages fusepy \
+  && ARCH="$(dpkg --print-architecture)" \
+  && case "$ARCH" in amd64) SB_ARCH=amd64;; arm64) SB_ARCH=arm64;; *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac \
+  && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${SB_ARCH}.tar.gz" \
+    | tar xzO "sing-box-${SINGBOX_VERSION}-linux-${SB_ARCH}/sing-box" > /usr/local/bin/sing-box \
+  && chmod 0755 /usr/local/bin/sing-box \
   && rm -rf /var/lib/apt/lists/* \
   && npm ci --omit=dev --workspace server --include-workspace-root=false \
   && npm install -g @anthropic-ai/claude-code
 
 COPY --from=builder /app/server/dist ./server/dist
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/socks-proxy-config.mjs /opt/cerelay/socks-proxy-config.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+  && chmod 0755 /opt/cerelay/socks-proxy-config.mjs \
   && mkdir -p /opt/cerelay-runtime \
+  && mkdir -p /etc/sing-box \
   && mkdir -p /home/node/.claude \
   && chown -R root:root /app /home/node /opt/cerelay-runtime
 

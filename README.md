@@ -123,6 +123,20 @@ cp .env.example .env       # 可选，按需修改
 LOG_LEVEL=debug npm run server:up
 ```
 
+启用容器级透明 SOCKS5 代理（fail-closed）：
+
+```bash
+CERELAY_SOCKS_PROXY=socks5://user:pass@proxy.example.com:1080 npm run server:up
+```
+
+也支持紧凑格式：
+
+```bash
+CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
+```
+
+开启后，Server 容器及其内部启动的 PTY/Claude 子进程都会继承容器网络命名空间；代理异常或 `sing-box` 退出时，入口脚本会终止主进程，避免回退直连。
+
 #### 本地直跑 / Run Locally
 
 需本机已安装并认证 `claude` CLI：
@@ -335,6 +349,10 @@ cd web && npm test
 | `MODEL` | `claude-sonnet-4-20250514` | 默认 Claude 模型 |
 | `LOG_LEVEL` | `info` | 日志级别 |
 | `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 mount namespace 隔离 |
+| `CERELAY_SOCKS_PROXY` | — | 容器级透明 SOCKS5 代理，支持 `socks5://...` 或 `host:port[:user:pass]` |
+| `CERELAY_SOCKS_DNS_SERVER` | `1.1.1.1` | TUN 模式上游 DNS |
+| `CERELAY_SOCKS_TUN_ADDRESS` | `172.19.0.1/30` | sing-box TUN 地址段 |
+| `CERELAY_SOCKS_TUN_MTU` | `9000` | sing-box TUN MTU |
 | `CLAUDE_CREDENTIALS` | — | Claude Code 登录凭证 JSON（替代文件挂载） |
 | `ANTHROPIC_API_KEY` | — | Claude API Key |
 | `HTTP_PROXY` | — | Client 连接 ws:// 目标时使用的代理 |

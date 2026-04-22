@@ -28,7 +28,7 @@ services:
 
     environment:
       - NODE_ENV=test
-      - CERELAY_ENABLE_MOUNT_NAMESPACE=true
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=false
       - CERELAY_NAMESPACE_RUNTIME_ROOT=/opt/cerelay-runtime
       # E2E mock-api 测试用的 claude 可执行文件
       - CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude

@@ -36,6 +36,11 @@ services:
       # Claude session 运行在独立 mount namespace 中
       - CERELAY_ENABLE_MOUNT_NAMESPACE=${CERELAY_ENABLE_MOUNT_NAMESPACE:-true}
       - CERELAY_NAMESPACE_RUNTIME_ROOT=${CERELAY_NAMESPACE_RUNTIME_ROOT:-/opt/cerelay-runtime}
+      # 可选：容器级透明 SOCKS5 代理（fail-closed）
+      - CERELAY_SOCKS_PROXY=${CERELAY_SOCKS_PROXY-}
+      - CERELAY_SOCKS_DNS_SERVER=${CERELAY_SOCKS_DNS_SERVER:-1.1.1.1}
+      - CERELAY_SOCKS_TUN_ADDRESS=${CERELAY_SOCKS_TUN_ADDRESS:-172.19.0.1/30}
+      - CERELAY_SOCKS_TUN_MTU=${CERELAY_SOCKS_TUN_MTU:-9000}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
@@ -51,6 +56,7 @@ services:
 
     cap_add:
       - SYS_ADMIN
+      - NET_ADMIN
 
     # 放行 seccomp/AppArmor：默认 profile 在部分内核版本下会间歇性阻断 FUSE mount 系统调用
     security_opt:
@@ -60,6 +66,7 @@ services:
     # FUSE 设备：供 Client 侧文件代理使用
     devices:
       - /dev/fuse:/dev/fuse
+      - /dev/net/tun:/dev/net/tun
 
     # 健康检查（覆盖 Dockerfile 中的定义，可按需调整）
     healthcheck:
