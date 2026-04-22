@@ -8,107 +8,49 @@ import WebSocket from "ws";
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
-import { McpRuntime } from "./mcp/runtime.js";
 import { FileProxyHandler } from "./file-proxy.js";
 import { UI } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
 import type {
-  CreateSession,
   CreatePtySession,
-  CreateSessionResponse,
   FileProxyRequest,
-  FileProxyResponse,
-  McpServerConfig,
-  McpServerCatalogEntry,
-  Prompt,
   PtyExit,
   PtyInput,
   PtyOutput,
   PtyResize,
   PtySessionCreated,
-  RestoreSession,
-  RestoreSessionResponse,
-  SessionMcpCatalog,
-  SessionMcpCatalogApplied,
   ToolResult,
   ServerToHandMessage,
   ToolCall,
-  SessionEnd,
   ServerError,
-  TextChunk,
-  ThoughtChunk,
 } from "./protocol.js";
 
 const log = createLogger("client");
-
-// ============================================================
-// 回调接口：供 ACP Server 等非 UI 场景使用
-// ============================================================
-
-export interface ClientCallbacks {
-  onTextChunk?: (text: string) => void;
-  onThoughtChunk?: (text: string) => void;
-  onToolCall?: (toolName: string, requestId: string, input: unknown) => void;
-  onToolCallComplete?: (toolName: string, requestId: string) => void;
-  onToolResult?: (toolName: string, requestId: string, output: unknown, error?: string) => void;
-}
 
 export interface ClientOptions {
   interactiveOutput?: boolean;
 }
 
-export interface EnsureSessionOptions {
-  cwd: string;
-  model?: string;
-  allowCreateOnRestoreFailure?: boolean;
-}
-
-// ============================================================
-// CerelayClient：连接 Cerelay Server 并处理消息
-// ============================================================
-
 export class CerelayClient {
   private readonly serverURL: string;
-  private readonly initialCwd: string;
   private ws: WebSocket | null = null;
   private readonly ui: UI;
   private readonly interactiveOutput: boolean;
   private pendingMessages: string[] = [];
   private activeMessageConsumer: ((raw: string) => void) | null = null;
-  // executor 在 session 创建后含有正确的 cwd，先用占位 cwd 初始化
   private executor: ToolExecutor;
   private fileProxy: FileProxyHandler;
-  private currentCwd: string;
-
-  // 当前活跃的 session ID
-  private sessionId = "";
   private ptySessionId = "";
-
-  // MCP 后台初始化 Promise，sendPrompt 发送前 await 此 Promise 确保 catalog 已就绪
-  private mcpReadyPromise: Promise<void> = Promise.resolve();
-
-  // 最后一次 session_end 结果（供 ACP Server 查询）
-  private lastResult: { result?: string; error?: string } = {};
-  private activeCallbacks: ClientCallbacks | undefined;
-
-  // MCP 连接池：跨 session 复用已建立的 MCP 连接
-  private sharedMcpRuntime: McpRuntime | null = null;
-  private lastMcpConfigFingerprint = "";
-
-  // 写锁：用 Promise 链模拟互斥，确保并发写安全
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(serverURL: string, cwd: string, options: ClientOptions = {}) {
     this.serverURL = serverURL;
-    this.initialCwd = cwd;
-    this.currentCwd = cwd;
     this.ui = new UI();
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
     this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
   }
 
-  // 连接到 Cerelay Server
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
@@ -126,8 +68,6 @@ export class CerelayClient {
         this.ws = ws;
         ws.on("message", (data) => {
           const raw = data.toString();
-          // file_proxy_request 必须始终响应，不受 consumer 状态影响
-          // （session 创建期间 FUSE bootstrap 就会发起文件操作）
           if (this.tryHandleFileProxyFromRaw(raw)) {
             return;
           }
@@ -146,10 +86,9 @@ export class CerelayClient {
     });
   }
 
-  // 关闭连接
   close(): void {
     log.debug("关闭 CerelayClient", {
-      sessionId: this.sessionId,
+      ptySessionId: this.ptySessionId,
       connected: Boolean(this.ws),
     });
     if (this.ws) {
@@ -157,50 +96,10 @@ export class CerelayClient {
       this.ws = null;
     }
     void this.executor.close().catch(() => undefined);
-    // 关闭共享 MCP 连接池
-    void this.sharedMcpRuntime?.close().catch(() => undefined);
-    this.sharedMcpRuntime = null;
-    this.lastMcpConfigFingerprint = "";
-  }
-
-  // 发送 create_session 并等待 session_created 响应
-  // MCP catalog 收集和上报在后台异步完成，不阻塞用户交互
-  async sendCreateSession(cwd: string, model?: string): Promise<void> {
-    this.currentCwd = cwd;
-    await this.resetExecutor(cwd);
-
-    const msg: CreateSession = {
-      type: "create_session",
-      cwd,
-      homeDir: os.homedir(),
-      model,
-    };
-    await this.writeJSON(msg);
-
-    const response = await this.waitForSessionReady("session_created") as CreateSessionResponse;
-
-    // MCP 初始化后台执行，sendPrompt 发送前会 await mcpReadyPromise
-    this.mcpReadyPromise = this.applySessionMcpConfig(response.sessionId, response.mcpServerConfigs)
-      .catch((error) => {
-        log.error("后台 MCP 初始化失败", {
-          sessionId: response.sessionId,
-          error: formatErrorForLog(error),
-        });
-        // 不抛出 — MCP 不可用不阻塞 session，仅影响 MCP 工具调用
-      });
-  }
-
-  async sendRestoreSession(sessionId: string): Promise<void> {
-    const msg: RestoreSession = {
-      type: "restore_session",
-      sessionId,
-    };
-    await this.writeJSON(msg);
-    await this.waitForSessionReady("session_restored");
   }
 
   async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
-    this.currentCwd = cwd;
+    await this.resetExecutor(cwd);
     const projectClaudeSettingsLocalContent = await readProjectClaudeSettingsLocal(cwd);
     const msg: CreatePtySession = {
       type: "create_pty_session",
@@ -221,188 +120,12 @@ export class CerelayClient {
     return sessionId;
   }
 
-  // 获取当前 session ID（供 ACP Server 查询）
-  getSessionId(): string {
-    return this.sessionId;
-  }
-
   getPtySessionId(): string {
     return this.ptySessionId;
   }
 
-  // 获取最后一次 session_end 的结果（供 ACP Server 查询）
-  getLastResult(): { result?: string; error?: string } {
-    return this.lastResult;
-  }
-
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
-  }
-
-  async ensureSession(options: EnsureSessionOptions): Promise<"restored" | "created" | "reused"> {
-    if (this.isConnected()) {
-      return "reused";
-    }
-
-    await this.connect();
-
-    if (this.sessionId) {
-      try {
-        await this.sendRestoreSession(this.sessionId);
-        return "restored";
-      } catch (error) {
-        if (!options.allowCreateOnRestoreFailure) {
-          throw error;
-        }
-        this.sessionId = "";
-      }
-    }
-
-    await this.sendCreateSession(options.cwd || this.initialCwd, options.model);
-    return "created";
-  }
-
-  // 发送用户 prompt（首次发送前自动等待 MCP catalog 就绪）
-  async sendPrompt(text: string): Promise<void> {
-    // 确保后台 MCP 初始化已完成，catalog 已送达 server
-    await this.mcpReadyPromise;
-
-    const msg: Prompt = {
-      type: "prompt",
-      sessionId: this.sessionId,
-      text,
-    };
-    await this.writeJSON(msg);
-  }
-
-  // 主消息循环（阻塞直到 session_end 或错误）
-  run(): Promise<void> {
-    return this.runInternal(undefined);
-  }
-
-  // 带回调的消息循环（供 ACP Server 使用，不依赖 UI）
-  runWithCallbacks(callbacks: ClientCallbacks): Promise<void> {
-    return this.runInternal(callbacks);
-  }
-
-  // 内部统一消息循环实现
-  private runInternal(callbacks?: ClientCallbacks): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws) {
-        reject(new Error("WebSocket 未连接"));
-        return;
-      }
-
-      this.activeCallbacks = callbacks;
-      const ws = this.ws;
-
-      const onMessage = (raw: string) => {
-        const done = this.handleMessage(raw, callbacks);
-        if (done) {
-          this.activeCallbacks = undefined;
-          releaseMessageConsumer();
-          ws.off("error", onError);
-          ws.off("close", onClose);
-          resolve();
-        }
-      };
-
-      const onError = (err: Error) => {
-        this.activeCallbacks = undefined;
-        releaseMessageConsumer();
-        ws.off("close", onClose);
-        reject(err);
-      };
-
-      const onClose = () => {
-        this.activeCallbacks = undefined;
-        releaseMessageConsumer();
-        ws.off("error", onError);
-        reject(new Error("WebSocket 连接已关闭"));
-      };
-
-      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
-      this.flushPendingMessages();
-      ws.on("error", onError);
-      ws.on("close", onClose);
-    });
-  }
-
-  // ============================================================
-  // 私有方法
-  // ============================================================
-
-  // 等待 session_created，跳过 connected 消息
-  private waitForSessionReady(expectedType: "session_created" | "session_restored"): Promise<CreateSessionResponse | RestoreSessionResponse> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws) {
-        reject(new Error("WebSocket 未连接"));
-        return;
-      }
-
-      const ws = this.ws;
-
-      const cleanup = () => {
-        releaseMessageConsumer();
-        ws.off("error", onError);
-        ws.off("close", onClose);
-      };
-
-      const onMessage = (raw: string) => {
-        let msg: ServerToHandMessage;
-        try {
-          msg = JSON.parse(raw) as ServerToHandMessage;
-        } catch {
-          return; // 跳过无法解析的消息
-        }
-
-        switch (msg.type) {
-          case "session_created":
-          case "session_restored": {
-            if (msg.type !== expectedType) {
-              break;
-            }
-
-            const response = msg as CreateSessionResponse | RestoreSessionResponse;
-            this.sessionId = response.sessionId;
-            cleanup();
-            if (this.interactiveOutput) {
-              const prefix = expectedType === "session_restored" ? "[已恢复]" : "[已连接]";
-              process.stdout.write(`\x1b[36m${prefix} Session: ${this.sessionId}\x1b[0m\n`);
-            }
-            resolve(response);
-            break;
-          }
-          case "connected":
-            // 忽略 connected 通知，继续等待
-            break;
-          case "error": {
-            cleanup();
-            reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
-            break;
-          }
-          default:
-            // 未处理的消息保留给后续消费器
-            this.pendingMessages.push(raw);
-            break;
-        }
-      };
-
-      const onError = (err: Error) => {
-        cleanup();
-        reject(new Error(`等待 session_created 失败: ${err.message}`));
-      };
-
-      const onClose = () => {
-        cleanup();
-        reject(new Error("等待 session_created 时连接已关闭"));
-      };
-
-      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
-      this.flushPendingMessages();
-      ws.on("error", onError);
-      ws.on("close", onClose);
-    });
   }
 
   private waitForPtySessionReady(): Promise<string> {
@@ -436,7 +159,6 @@ export class CerelayClient {
             break;
           }
           case "connected":
-            // 忽略 connected 通知，继续等待
             break;
           case "error": {
             cleanup();
@@ -444,8 +166,6 @@ export class CerelayClient {
             break;
           }
           default:
-            // 未处理的消息（如早到的 pty_output / pty_exit）必须保留给
-            // 后续的 runPtyPassthrough 消费，否则会被吞掉导致 Hand 卡死
             this.pendingMessages.push(raw);
             break;
         }
@@ -468,95 +188,7 @@ export class CerelayClient {
     });
   }
 
-  // 处理单条消息，返回 true 表示会话结束（session_end）
-  // callbacks 为可选，有则通知回调方（ACP 场景），无则使用 UI 输出（CLI 场景）
-  private handleMessage(raw: string, callbacks?: ClientCallbacks): boolean {
-    let msg: ServerToHandMessage;
-    try {
-      msg = JSON.parse(raw) as ServerToHandMessage;
-    } catch (err) {
-      this.ui.printError(`解析消息失败: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
-    }
-
-    if (!msg || !msg.type) {
-      this.ui.printError("收到无效消息：缺少 type 字段");
-      return false;
-    }
-
-    switch (msg.type) {
-      case "text_chunk": {
-        const chunk = msg as TextChunk;
-        if (callbacks?.onTextChunk) {
-          callbacks.onTextChunk(chunk.text);
-        } else if (this.interactiveOutput) {
-          this.ui.printText(chunk.text);
-        }
-        break;
-      }
-
-      case "thought_chunk": {
-        const chunk = msg as ThoughtChunk;
-        if (callbacks?.onThoughtChunk) {
-          callbacks.onThoughtChunk(chunk.text);
-        } else if (this.interactiveOutput) {
-          this.ui.printThought(chunk.text);
-        }
-        break;
-      }
-
-      case "file_proxy_request": {
-        const proxyReq = msg as FileProxyRequest;
-        void this.handleFileProxyRequest(proxyReq);
-        break;
-      }
-
-      case "tool_call": {
-        const toolCall = msg as ToolCall;
-        if (callbacks?.onToolCall) {
-          callbacks.onToolCall(toolCall.toolName, toolCall.requestId, toolCall.input);
-        } else if (this.interactiveOutput) {
-          this.ui.printToolCall(toolCall.toolName);
-        }
-        // 异步执行工具，不阻塞消息循环
-        void this.executeToolCall(toolCall);
-        break;
-      }
-
-      case "tool_call_complete": {
-        const complete = msg as import("./protocol.js").ToolCallComplete;
-        if (callbacks?.onToolCallComplete) {
-          callbacks.onToolCallComplete(complete.toolName, complete.requestId);
-        }
-        break;
-      }
-
-      case "session_end": {
-        const end = msg as SessionEnd;
-        // 记录最后结果供 ACP Server 查询
-        this.lastResult = { result: end.result, error: end.error };
-        if (!callbacks && this.interactiveOutput) {
-          this.ui.printSessionEnd(end.result, end.error);
-        }
-        return true; // 标记会话结束
-      }
-
-      case "error": {
-        const errMsg = msg as ServerError;
-        this.ui.printError(errMsg.message);
-        break;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * 从原始 JSON 中尝试识别并处理 file_proxy_request。
-   * 返回 true 表示已拦截，调用方不再分发。
-   */
   private tryHandleFileProxyFromRaw(raw: string): boolean {
-    // 快速前缀检查，避免对每条消息都 JSON.parse
     if (!raw.includes('"file_proxy_request"')) {
       return false;
     }
@@ -572,7 +204,6 @@ export class CerelayClient {
     }
   }
 
-  // 处理文件代理请求并将结果发回 Server
   private async handleFileProxyRequest(req: FileProxyRequest): Promise<void> {
     const resp = await this.fileProxy.handle(req);
     await this.writeJSON(resp).catch((writeErr: unknown) => {
@@ -583,7 +214,6 @@ export class CerelayClient {
     });
   }
 
-  // 在后台执行工具调用并将结果发回 Server
   private async executeToolCall(msg: ToolCall): Promise<void> {
     log.info("开始执行工具调用", {
       sessionId: msg.sessionId,
@@ -592,10 +222,7 @@ export class CerelayClient {
       inputSummary: summarizeUnknown(msg.input),
     });
     try {
-      const result = await this.executor.dispatch(
-        msg.toolName,
-        msg.input
-      );
+      const result = await this.executor.dispatch(msg.toolName, msg.input);
 
       if (this.interactiveOutput) {
         this.ui.printToolResult(msg.toolName, true);
@@ -616,8 +243,6 @@ export class CerelayClient {
         summary: resp.summary,
         outputSummary: summarizeUnknown(result),
       });
-
-      this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, result);
 
       await this.writeJSON(resp).catch((writeErr: unknown) => {
         this.ui.printError(
@@ -646,8 +271,6 @@ export class CerelayClient {
         rawError: formatErrorForLog(err),
       });
 
-      this.activeCallbacks?.onToolResult?.(msg.toolName, msg.requestId, undefined, resp.error);
-
       await this.writeJSON(resp).catch((writeErr: unknown) => {
         this.ui.printError(
           `发送 tool_result(error) 失败: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`
@@ -663,7 +286,6 @@ export class CerelayClient {
         return;
       }
 
-      // 在 PTY passthrough 期间禁用日志 console 输出，避免日志混入 PTY 数据流
       configureLogger({ console: false });
 
       const ws = this.ws;
@@ -685,7 +307,6 @@ export class CerelayClient {
           stdin.setRawMode(previousRawMode);
         }
         stdin.pause();
-        // PTY passthrough 完成后恢复日志 console 输出
         configureLogger({ console: true });
       };
 
@@ -724,13 +345,8 @@ export class CerelayClient {
             void this.executeToolCall(toolCall);
             break;
           }
-          case "tool_call_complete": {
-            const complete = msg as import("./protocol.js").ToolCallComplete;
-            if (complete.sessionId !== sessionId) {
-              break;
-            }
+          case "tool_call_complete":
             break;
-          }
           case "pty_output": {
             const output = msg as PtyOutput;
             if (output.sessionId !== sessionId) {
@@ -788,7 +404,6 @@ export class CerelayClient {
         finish(new Error("WebSocket 连接已关闭"));
       };
 
-      // 启动 spinner：在首次有效 PTY 输出到达前显示加载提示
       const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
       let spinnerIndex = 0;
       let spinnerActive = true;
@@ -803,13 +418,10 @@ export class CerelayClient {
         if (!spinnerActive) return;
         spinnerActive = false;
         clearInterval(spinnerTimer);
-        // 清除 spinner 行
         stdout.write("\r\x1b[K");
       };
 
-      // 包装 onMessage，在首次 pty_output 时关闭 spinner
       const wrappedOnMessage = (raw: string) => {
-        // 快速前缀检测：如果是 pty_output 且 spinner 还在，先关闭
         if (spinnerActive && raw.includes('"pty_output"')) {
           stopSpinner();
         }
@@ -830,9 +442,7 @@ export class CerelayClient {
     });
   }
 
-  // 线程安全的 JSON 写入（通过 Promise 链串行化）
   private writeJSON(data: unknown): Promise<void> {
-    // 前一次写失败后仍允许后续写继续排队，避免整条链永久 rejected。
     const nextWrite = this.writeChain
       .catch(() => undefined)
       .then(() => this.doWriteJSON(data));
@@ -860,140 +470,8 @@ export class CerelayClient {
 
   private async resetExecutor(cwd: string): Promise<void> {
     this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
-    await this.resetExecutorWithConfig(cwd, undefined);
-  }
-
-  private async resetExecutorWithConfig(
-    cwd: string,
-    mcpServerConfigs: Record<string, McpServerConfig> | undefined
-  ): Promise<void> {
     await this.executor.close().catch(() => undefined);
-
-    // 配置指纹：配置不变时复用已有 MCP 连接，避免重复 connect + listTools
-    const fingerprint = mcpServerConfigs
-      ? JSON.stringify(Object.keys(mcpServerConfigs).sort())
-      : "";
-    const configChanged = fingerprint !== this.lastMcpConfigFingerprint;
-
-    if (configChanged || !this.sharedMcpRuntime) {
-      // 配置变化或首次创建，关闭旧连接池，新建 McpRuntime
-      await this.sharedMcpRuntime?.close().catch(() => undefined);
-      this.sharedMcpRuntime = new McpRuntime(cwd, mcpServerConfigs);
-      this.lastMcpConfigFingerprint = fingerprint;
-      log.debug("MCP 连接池已创建", {
-        cwd,
-        mcpServers: Object.keys(mcpServerConfigs ?? {}),
-        reason: configChanged ? "配置变化" : "首次创建",
-      });
-    } else {
-      log.debug("MCP 配置未变，复用已有连接池", {
-        cwd,
-        mcpServers: Object.keys(mcpServerConfigs ?? {}),
-      });
-    }
-
-    this.executor = new ToolExecutor(cwd, this.sharedMcpRuntime);
-    log.debug("重建 ToolExecutor", {
-      cwd,
-      mcpServerCount: Object.keys(mcpServerConfigs ?? {}).length,
-      mcpServers: Object.keys(mcpServerConfigs ?? {}),
-      mcpRuntimeReused: !configChanged,
-    });
-  }
-
-  private async applySessionMcpConfig(
-    sessionId: string,
-    mcpServerConfigs: Record<string, McpServerConfig> | undefined
-  ): Promise<void> {
-    await this.resetExecutorWithConfig(this.currentCwd, mcpServerConfigs);
-
-    let mcpToolCatalog: Record<string, McpServerCatalogEntry>;
-    try {
-      mcpToolCatalog = await this.executor.describeMcpServers();
-      log.debug("收集 Server 下发 MCP tool catalog 完成", {
-        cwd: this.currentCwd,
-        sessionId,
-        serverCount: Object.keys(mcpToolCatalog).length,
-        servers: Object.keys(mcpToolCatalog),
-      });
-    } catch (error) {
-      log.error("收集 Server 下发 MCP tool catalog 失败", {
-        cwd: this.currentCwd,
-        sessionId,
-        error: formatErrorForLog(error),
-      });
-      throw error;
-    }
-
-    const update: SessionMcpCatalog = {
-      type: "session_mcp_catalog",
-      sessionId,
-      mcpToolCatalog,
-    };
-    await this.writeJSON(update);
-    await this.waitForMcpCatalogApplied(sessionId);
-  }
-
-  private waitForMcpCatalogApplied(sessionId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws) {
-        reject(new Error("WebSocket 未连接"));
-        return;
-      }
-
-      const ws = this.ws;
-
-      const cleanup = () => {
-        releaseMessageConsumer();
-        ws.off("error", onError);
-        ws.off("close", onClose);
-      };
-
-      const onMessage = (raw: string) => {
-        let msg: ServerToHandMessage;
-        try {
-          msg = JSON.parse(raw) as ServerToHandMessage;
-        } catch {
-          return;
-        }
-
-        switch (msg.type) {
-          case "session_mcp_catalog_applied": {
-            const applied = msg as SessionMcpCatalogApplied;
-            if (applied.sessionId !== sessionId) {
-              break;
-            }
-            cleanup();
-            resolve();
-            break;
-          }
-          case "error": {
-            cleanup();
-            reject(new Error(`服务器错误: ${(msg as ServerError).message}`));
-            break;
-          }
-          default:
-            // 未处理的消息保留给后续消费器
-            this.pendingMessages.push(raw);
-            break;
-        }
-      };
-
-      const onError = (err: Error) => {
-        cleanup();
-        reject(new Error(`等待 MCP catalog 应用失败: ${err.message}`));
-      };
-
-      const onClose = () => {
-        cleanup();
-        reject(new Error("等待 MCP catalog 应用时连接已关闭"));
-      };
-
-      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
-      this.flushPendingMessages();
-      ws.on("error", onError);
-      ws.on("close", onClose);
-    });
+    this.executor = new ToolExecutor(cwd);
   }
 
   private attachMessageConsumer(consumer: (raw: string) => void): () => void {
@@ -1065,12 +543,6 @@ function formatErrorForLog(error: unknown): string {
   return String(error);
 }
 
-// ============================================================
-// HTTP(S) Proxy 支持
-// 读取 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量，
-// 检查 NO_PROXY 排除匹配目标，为 ws 连接提供 agent。
-// ============================================================
-
 function resolveProxyAgent(serverURL: string): Agent | undefined {
   const url = new URL(serverURL);
   const isSecure = url.protocol === "wss:";
@@ -1101,11 +573,9 @@ function matchesNoProxy(hostname: string, port: string): boolean {
   for (const entry of entries) {
     if (entry === "*") return true;
 
-    // 分离可选的端口部分
     const [hostPattern, portPattern] = entry.split(":");
     if (portPattern && portPattern !== port) continue;
 
-    // 精确匹配或后缀匹配（.example.com 匹配 foo.example.com）
     if (hostname === hostPattern) return true;
     if (hostPattern.startsWith(".") && hostname.endsWith(hostPattern)) return true;
     if (!hostPattern.startsWith(".") && hostname.endsWith(`.${hostPattern}`)) return true;

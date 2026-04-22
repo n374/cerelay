@@ -5,7 +5,6 @@ import path from "node:path";
 import process from "node:process";
 import { Command } from "commander";
 import { CerelayClient } from "./client.js";
-import { runAcpServer } from "./acp/index.js";
 import { configureLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
 
 const program = new Command();
@@ -34,19 +33,6 @@ program
     configureHandLogging(opts);
     const lines = Math.max(Number.parseInt(commandOptions.lines ?? "200", 10) || 200, 1);
     await runLogsMode(lines, commandOptions.follow ?? true);
-  });
-
-// ---- 子命令：acp（stdio ACP Server，供编辑器集成）----
-program
-  .command("acp")
-  .description("以 ACP stdio 模式启动，供编辑器（Zed/VS Code）通过 ACP 协议连接")
-  .action(async () => {
-    const opts = program.opts<CommonOptions>();
-    configureHandLogging(opts);
-    await runAcpServer({
-      serverURL: buildServerURL(opts.server, resolveKey(opts.key)),
-      cwd: opts.cwd ?? process.cwd(),
-    });
   });
 
 await program.parseAsync(process.argv);

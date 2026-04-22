@@ -5,18 +5,6 @@
 // Server -> Hand 消息
 // ============================================================
 
-export interface TextChunk {
-  type: "text_chunk";
-  sessionId: string;
-  text: string;
-}
-
-export interface ThoughtChunk {
-  type: "thought_chunk";
-  sessionId: string;
-  text: string;
-}
-
 export interface ToolCall {
   type: "tool_call";
   sessionId: string;
@@ -31,13 +19,6 @@ export interface ToolCallComplete {
   sessionId: string;
   requestId: string;
   toolName: string;
-}
-
-export interface SessionEnd {
-  type: "session_end";
-  sessionId: string;
-  result?: string;
-  error?: string;
 }
 
 export interface ServerError {
@@ -150,63 +131,6 @@ export type McpServerConfig =
   | SseMcpServerConfig
   | HttpMcpServerConfig;
 
-export interface CreateSessionResponse {
-  type: "session_created";
-  sessionId: string;
-  mcpServerConfigs?: Record<string, McpServerConfig>;
-}
-
-export interface RestoreSessionResponse {
-  type: "session_restored";
-  sessionId: string;
-}
-
-export interface SessionInfo {
-  sessionId: string;
-  cwd: string;
-  model?: string;
-  status: "idle" | "active" | "ended";
-  createdAt: string;
-}
-
-export interface SessionList {
-  type: "session_list";
-  sessions: SessionInfo[];
-}
-
-// ============================================================
-// Hand -> Server 消息
-// ============================================================
-
-export interface CreateSession {
-  type: "create_session";
-  cwd: string;
-  homeDir?: string;
-  model?: string;
-}
-
-export interface SessionMcpCatalog {
-  type: "session_mcp_catalog";
-  sessionId: string;
-  mcpToolCatalog: Record<string, McpServerCatalogEntry>;
-}
-
-export interface SessionMcpCatalogApplied {
-  type: "session_mcp_catalog_applied";
-  sessionId: string;
-}
-
-export interface Prompt {
-  type: "prompt";
-  sessionId: string;
-  text: string;
-}
-
-export interface RestoreSession {
-  type: "restore_session";
-  sessionId: string;
-}
-
 export interface ToolResult {
   type: "tool_result";
   sessionId: string;
@@ -220,14 +144,6 @@ export interface CloseSession {
   type: "close_session";
   sessionId: string;
 }
-
-export interface ListSessions {
-  type: "list_sessions";
-}
-
-// ============================================================
-// File Proxy：Hand 侧文件系统代理（FUSE 透传）
-// ============================================================
 
 export type FileProxyOp =
   | "getattr"
@@ -294,32 +210,20 @@ export interface FileProxyResponse {
 
 export type ServerToHandMessage =
   | Connected
-  | CreateSessionResponse
   | FileProxyRequest
   | PtySessionCreated
   | PtyOutput
   | PtyExit
-  | RestoreSessionResponse
   | ServerError
-  | SessionMcpCatalogApplied
-  | SessionEnd
-  | SessionList
-  | TextChunk
-  | ThoughtChunk
   | ToolCall
   | ToolCallComplete;
 
 export type HandToServerMessage =
   | CloseSession
-  | CreateSession
   | CreatePtySession
   | FileProxyResponse
-  | ListSessions
-  | Prompt
   | PtyInput
   | PtyResize
-  | RestoreSession
-  | SessionMcpCatalog
   | ToolResult;
 
 // ============================================================
@@ -334,20 +238,8 @@ export interface Envelope {
 // Type guards
 // ============================================================
 
-export function isTextChunk(msg: ServerToHandMessage): msg is TextChunk {
-  return msg.type === "text_chunk";
-}
-
-export function isThoughtChunk(msg: ServerToHandMessage): msg is ThoughtChunk {
-  return msg.type === "thought_chunk";
-}
-
 export function isToolCall(msg: ServerToHandMessage): msg is ToolCall {
   return msg.type === "tool_call";
-}
-
-export function isSessionEnd(msg: ServerToHandMessage): msg is SessionEnd {
-  return msg.type === "session_end";
 }
 
 export function isServerError(msg: ServerToHandMessage): msg is ServerError {
@@ -356,12 +248,6 @@ export function isServerError(msg: ServerToHandMessage): msg is ServerError {
 
 export function isConnected(msg: ServerToHandMessage): msg is Connected {
   return msg.type === "connected";
-}
-
-export function isCreateSessionResponse(
-  msg: ServerToHandMessage
-): msg is CreateSessionResponse {
-  return msg.type === "session_created";
 }
 
 export function isFileProxyRequest(msg: ServerToHandMessage): msg is FileProxyRequest {
