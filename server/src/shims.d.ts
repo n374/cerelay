@@ -1,7 +1,3 @@
-declare module "@anthropic-ai/claude-agent-sdk" {
-  export function query(input: unknown): AsyncIterable<unknown>;
-}
-
 declare module "ws" {
   import { EventEmitter } from "node:events";
   import type { IncomingMessage } from "node:http";

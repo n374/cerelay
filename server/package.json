@@ -10,7 +10,6 @@
     "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "latest",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ws": "^8.0.0"
   },

@@ -7,7 +7,8 @@ test("Logger writes json logs to the expected stream", () => {
   const stderr = captureWrites(process.stderr);
 
   try {
-    const logger = new Logger("unit", "debug", true);
+    configureLogger({ minLevel: "debug", json: true });
+    const logger = new Logger("unit");
     logger.info("hello", { a: 1 });
     logger.error("oops", { b: 2 });
 
@@ -17,6 +18,7 @@ test("Logger writes json logs to the expected stream", () => {
   } finally {
     stdout.restore();
     stderr.restore();
+    configureLogger({ minLevel: "info", json: false });
   }
 });
 

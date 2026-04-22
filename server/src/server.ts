@@ -19,33 +19,25 @@ import WebSocket, { WebSocketServer } from "ws";
 import type {
   Connected,
   CloseSession,
-  CreateSession,
   CreatePtySession,
   Envelope,
-  ListSessions,
-  Prompt,
   PtyInput,
   PtyResize,
-  RestoreSession,
-  SessionMcpCatalog,
   ServerError,
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
-import { ServerSession } from "./session.js";
+import type { HookInput } from "./session.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
 import { createClaudeSessionRuntime, getClaudeSessionRuntimeRoot } from "./claude-session-runtime.js";
-import { createMcpProxyServers } from "./mcp-proxy.js";
-import { loadClaudeMcpServerConfigs } from "./claude-mcp-config.js";
 import { ClaudePtySession } from "./pty-session.js";
 import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
 import { FileProxyManager } from "./file-proxy-manager.js";
 import type { FileProxyResponse } from "./protocol.js";
-import type { HookInput } from "./session.js";
 
 const log = createLogger("server");
 const SESSION_RESUME_GRACE_MS = 60_000;
@@ -76,20 +68,19 @@ export interface ServerOptions {
 export class CerelayServer {
   private readonly defaultModel: string;
   private readonly port: number;
+  /** @deprecated SDK session resume 已移除，保留字段兼容现有构造调用 */
   private readonly sessionResumeGraceMs: number;
   private readonly cerelayKey: string | undefined;
 
   // 组件
   private readonly auth: TokenStore;
   private readonly clients = new ClientRegistry();
-  private readonly sessions = new Map<string, SessionEntry>();
   private readonly ptySessions = new Map<string, PtySessionEntry>();
   /** sessionId → FileProxyManager，独立于 session entry 注册，确保 session 创建期间也能 dispatch */
   private readonly fileProxies = new Map<string, FileProxyManager>();
   private readonly stats = new StatsCollector();
   private readonly toolRouting = new ToolRoutingStore();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
-  private readonly sessionCleanupTimer: NodeJS.Timeout;
 
   // HTTP/WS 基础设施
   private readonly httpServer = createServer(this.handleHttpRequest.bind(this));
@@ -123,10 +114,6 @@ export class CerelayServer {
         log.debug("已清理过期或吊销的 token", { removed });
       }
     }, 60_000);
-
-    this.sessionCleanupTimer = setInterval(() => {
-      this.cleanupDetachedSessions();
-    }, options.sessionCleanupIntervalMs ?? 15_000);
 
     this.httpServer.on("upgrade", this.handleUpgrade.bind(this));
     this.wsServer.on("connection", (socket, req) => {
@@ -168,13 +155,8 @@ export class CerelayServer {
     this.shuttingDown = true;
     log.info("开始优雅关闭...");
     clearInterval(this.tokenCleanupTimer);
-    clearInterval(this.sessionCleanupTimer);
 
     // 关闭所有 session
-    for (const { session } of this.sessions.values()) {
-      session.close();
-    }
-    this.sessions.clear();
     for (const [sessionId, entry] of Array.from(this.ptySessions.entries())) {
       this.destroyPtySession(sessionId, entry, "服务器关闭");
     }
@@ -287,17 +269,6 @@ export class CerelayServer {
     if (url === "/admin/clients" && req.method === "GET") {
       requestLog.debug("返回 Client 列表");
       this.sendJson(res, 200, { clients: this.clients.stats() });
-      return;
-    }
-
-    if (url === "/admin/sessions" && req.method === "GET") {
-      requestLog.debug("返回 Session 列表", { sessionCount: this.sessions.size });
-      this.sendJson(res, 200, {
-        sessions: Array.from(this.sessions.entries()).map(([id, { session, clientId }]) => ({
-          ...session.info(),
-          clientId,
-        })),
-      });
       return;
     }
 
@@ -516,33 +487,11 @@ export class CerelayServer {
         sessionCount: clientInfo.sessionIds.size,
       });
 
-      // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
       for (const sessionId of clientInfo.sessionIds) {
         const ptyEntry = this.ptySessions.get(sessionId);
         if (ptyEntry) {
           clientLog.debug("Client 断开时销毁 PTY session", { sessionId });
           this.destroyPtySession(sessionId, ptyEntry, "Client 断开");
-          continue;
-        }
-
-        const entry = this.sessions.get(sessionId);
-        if (entry) {
-          if (entry.session.info().status === "active") {
-            clientLog.debug("Client 断开时销毁活跃 session", { sessionId });
-            this.destroySession(sessionId, entry, "Client 断开时 session 仍在运行");
-            continue;
-          }
-
-          entry.clientId = null;
-          entry.resumableUntil = Date.now() + this.sessionResumeGraceMs;
-          log.info("Session 进入可恢复窗口", {
-            sessionId,
-            resumableUntil: new Date(entry.resumableUntil).toISOString(),
-          });
-          clientLog.debug("Session 已标记为可恢复", {
-            sessionId,
-            resumableUntil: entry.resumableUntil,
-          });
         }
       }
     });
@@ -577,17 +526,8 @@ export class CerelayServer {
 
     try {
       switch (envelope.type) {
-        case "create_session":
-          await this.handleCreateSession(clientId, JSON.parse(raw) as CreateSession);
-          return;
         case "create_pty_session":
           await this.handleCreatePtySession(clientId, JSON.parse(raw) as CreatePtySession);
-          return;
-        case "prompt":
-          await this.handlePrompt(clientId, JSON.parse(raw) as Prompt);
-          return;
-        case "restore_session":
-          await this.handleRestoreSession(clientId, JSON.parse(raw) as RestoreSession);
           return;
         case "tool_result":
           await this.handleToolResult(clientId, JSON.parse(raw) as ToolResult);
@@ -600,12 +540,6 @@ export class CerelayServer {
           return;
         case "pty_resize":
           await this.handlePtyResize(clientId, JSON.parse(raw) as PtyResize);
-          return;
-        case "session_mcp_catalog":
-          await this.handleSessionMcpCatalog(clientId, JSON.parse(raw) as SessionMcpCatalog);
-          return;
-        case "list_sessions":
-          await this.handleListSessions(clientId, JSON.parse(raw) as ListSessions);
           return;
         case "close_session":
           await this.handleCloseSession(clientId, JSON.parse(raw) as CloseSession);
@@ -640,109 +574,6 @@ export class CerelayServer {
   // ============================================================
   // Session 创建
   // ============================================================
-
-  private async handleCreateSession(clientId: string, message: CreateSession): Promise<void> {
-    log.debug("收到创建 Session 请求", {
-      clientId,
-      cwd: message.cwd || ".",
-      model: message.model || this.defaultModel,
-    });
-    const sessionId = `sess-${Date.now()}-${randomUUID()}`;
-    const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
-
-    // 启动 FUSE 文件代理（mount namespace 模式下）
-    let fileProxy: FileProxyManager | undefined;
-    if (this.shouldStartFileProxy()) {
-      // 容器内凭证文件作为 shadow file 注入 FUSE，确保 namespace 内可见
-      const shadowFiles: Record<string, string> = {};
-      const containerCredPath = (process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude") + "/.credentials.json";
-      if (existsSync(containerCredPath)) {
-        shadowFiles["home-claude/.credentials.json"] = containerCredPath;
-      }
-      fileProxy = new FileProxyManager({
-        runtimeRoot,
-        clientHomeDir: message.homeDir || process.env.HOME || "/home/node",
-        clientCwd: message.cwd || ".",
-        sessionId,
-        shadowFiles,
-        sendToClient: async (msg) => {
-          await this.sendToClient(clientId, msg);
-        },
-      });
-      this.fileProxies.set(sessionId, fileProxy);
-      await fileProxy.start();
-    }
-
-    let runtime;
-    try {
-      runtime = await createClaudeSessionRuntime({
-        sessionId,
-        cwd: message.cwd || ".",
-        clientHomeDir: message.homeDir,
-        fuseRootDir: fileProxy?.mountPoint,
-      });
-    } catch (err) {
-      if (fileProxy) {
-        this.fileProxies.delete(sessionId);
-        await fileProxy.shutdown().catch(() => undefined);
-      }
-      await rm(runtimeRoot, { recursive: true, force: true }).catch(() => undefined);
-      throw err;
-    }
-    const claudeMcpConfigs = await loadClaudeMcpServerConfigs({
-      cwd: message.cwd || ".",
-    });
-
-    let session!: ServerSession;
-    session = ServerSession.createSession({
-      id: sessionId,
-      cwd: message.cwd || ".",
-      claudeEnv: runtime.env,
-      claudeHomeDir: runtime.env.HOME,
-      clientHomeDir: message.homeDir,
-      model: message.model || this.defaultModel,
-      sdkCwd: runtime.cwd,
-      spawnClaudeCodeProcess: runtime.spawnClaudeCodeProcess,
-      onClose: runtime.cleanup,
-      shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
-      transport: {
-        send: async (payload) => {
-          const currentEntry = this.sessions.get(sessionId);
-          if (!currentEntry?.clientId) {
-            throw new Error(`Session ${sessionId} 当前未绑定可用 Client`);
-          }
-          log.debug("转发 Session 消息到 Client", {
-            sessionId,
-            clientId: currentEntry.clientId,
-            ...messageDebugFields(payload),
-          });
-          // tool_call 时记录工具调用统计
-          if (payload.type === "tool_call") {
-            const tc = payload as import("./protocol.js").ToolCall;
-            this.stats.onToolCall(tc.toolName);
-          }
-          await this.sendToClient(currentEntry.clientId, payload);
-        },
-      },
-    });
-
-    this.sessions.set(sessionId, {
-      session,
-      clientId,
-      resumableUntil: null,
-      fileProxy,
-    });
-    this.clients.bindSession(clientId, sessionId);
-    this.stats.onSessionCreated();
-
-    log.info("Session 已创建", { sessionId, clientId, cwd: message.cwd, model: message.model });
-
-    await this.sendToClient(clientId, {
-      type: "session_created",
-      sessionId,
-      mcpServerConfigs: claudeMcpConfigs,
-    });
-  }
 
   private async handleCreatePtySession(clientId: string, message: CreatePtySession): Promise<void> {
     log.debug("收到创建 PTY Session 请求", {
@@ -910,85 +741,6 @@ export class CerelayServer {
     log.info("PTY Session 已创建", { sessionId, clientId, cwd: message.cwd, model: message.model });
   }
 
-  private async handleSessionMcpCatalog(clientId: string, message: SessionMcpCatalog): Promise<void> {
-    const entry = this.getSessionEntry(message.sessionId);
-    if (entry.clientId !== clientId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
-    }
-
-    entry.session.setMcpServers(
-      createMcpProxyServers(
-        message.mcpToolCatalog,
-        (toolName, input) => entry.session.executeToolViaClient(toolName, input)
-      )
-    );
-
-    log.debug("已应用 Client 返回的 MCP tool catalog", {
-      sessionId: message.sessionId,
-      clientId,
-      serverCount: Object.keys(message.mcpToolCatalog).length,
-      servers: Object.keys(message.mcpToolCatalog),
-    });
-
-    await this.sendToClient(clientId, {
-      type: "session_mcp_catalog_applied",
-      sessionId: message.sessionId,
-    });
-  }
-
-  private async handleRestoreSession(clientId: string, message: RestoreSession): Promise<void> {
-    const entry = this.getSessionEntry(message.sessionId);
-    log.debug("收到恢复 Session 请求", {
-      sessionId: message.sessionId,
-      clientId,
-      currentClientId: entry.clientId,
-      resumableUntil: entry.resumableUntil,
-      status: entry.session.info().status,
-    });
-
-    if (entry.clientId) {
-      throw new Error(`Session ${message.sessionId} 当前已绑定到其他 Client`);
-    }
-
-    if (entry.resumableUntil !== null && entry.resumableUntil < Date.now()) {
-      this.destroySession(message.sessionId, entry, "恢复窗口已过期");
-      throw new Error(`Session ${message.sessionId} 已过期，无法恢复`);
-    }
-
-    entry.clientId = clientId;
-    entry.resumableUntil = null;
-    this.clients.bindSession(clientId, message.sessionId);
-
-    log.info("Session 已恢复", { sessionId: message.sessionId, clientId });
-
-    await this.sendToClient(clientId, {
-      type: "session_restored",
-      sessionId: message.sessionId,
-    });
-  }
-
-  private async handlePrompt(clientId: string, message: Prompt): Promise<void> {
-    const entry = this.getSessionEntry(message.sessionId);
-
-    if (entry.clientId !== clientId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
-    }
-
-    log.debug("收到 prompt", { sessionId: message.sessionId, clientId });
-    log.debug("开始派发 prompt 到 ServerSession", {
-      sessionId: message.sessionId,
-      clientId,
-      textLength: message.text.length,
-      preview: previewText(message.text),
-    });
-
-    void entry.session.prompt(message.text).catch((error) => {
-      log.error("prompt 执行失败", { sessionId: message.sessionId, error: String(error) });
-      this.stats.onError();
-      void this.sendErrorToClient(clientId, asError(error).message, message.sessionId);
-    });
-  }
-
   private async handleToolResult(clientId: string, message: ToolResult): Promise<void> {
     log.debug("收到工具结果", {
       clientId,
@@ -1006,15 +758,6 @@ export class CerelayServer {
       summary: message.summary,
       error: message.error,
     };
-
-    const sessionEntry = this.sessions.get(message.sessionId);
-    if (sessionEntry) {
-      if (sessionEntry.clientId !== clientId) {
-        throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
-      }
-      sessionEntry.session.resolveToolResult(message.requestId, result);
-      return;
-    }
 
     const ptyEntry = this.getPtySessionEntry(message.sessionId);
     if (ptyEntry.clientId !== clientId) {
@@ -1039,66 +782,18 @@ export class CerelayServer {
     entry.session.resize(message.cols, message.rows);
   }
 
-  private async handleListSessions(clientId: string, _: ListSessions): Promise<void> {
-    // 只列出属于该 client 的 session
-    const clientInfo = this.clients.get(clientId);
-    const sessionIds = clientInfo ? clientInfo.sessionIds : new Set<string>();
-
-    const sessionList = Array.from(sessionIds)
-      .map((id) => this.sessions.get(id))
-      .filter(Boolean)
-      .map((entry) => entry!.session.info());
-
-    log.debug("返回 Client 的 Session 列表", {
-      clientId,
-      sessionCount: sessionList.length,
-    });
-
-    await this.sendToClient(clientId, {
-      type: "session_list",
-      sessions: sessionList,
-    });
-  }
-
   private async handleCloseSession(clientId: string, message: CloseSession): Promise<void> {
-    const ptyEntry = this.ptySessions.get(message.sessionId);
-    if (ptyEntry) {
-      if (ptyEntry.clientId !== clientId) {
-        throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
-      }
-      this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
-      log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
-      return;
+    const ptyEntry = this.getPtySessionEntry(message.sessionId);
+    if (ptyEntry.clientId !== clientId) {
+      throw new Error(`PTY Session ${message.sessionId} 不属于当前 Client`);
     }
-
-    const entry = this.getSessionEntry(message.sessionId);
-
-    if (entry.clientId !== clientId) {
-      throw new Error(`Session ${message.sessionId} 不属于当前 Client`);
-    }
-
-    log.debug("收到关闭 Session 请求", {
-      clientId,
-      sessionId: message.sessionId,
-      status: entry.session.info().status,
-    });
-    entry.session.close();
-    this.destroySession(message.sessionId, entry, "客户端主动关闭");
-
-    log.info("Session 已关闭", { sessionId: message.sessionId, clientId });
+    this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
+    log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
   }
 
   // ============================================================
   // 辅助方法
   // ============================================================
-
-  private getSessionEntry(sessionId: string): SessionEntry {
-    const entry = this.sessions.get(sessionId);
-    if (!entry) {
-      throw new Error(`会话不存在: ${sessionId}`);
-    }
-    return entry;
-  }
 
   private getPtySessionEntry(sessionId: string): PtySessionEntry {
     const entry = this.ptySessions.get(sessionId);
@@ -1155,39 +850,6 @@ export class CerelayServer {
     }
   }
 
-  private cleanupDetachedSessions(): void {
-    const now = Date.now();
-    let expiredCount = 0;
-
-    for (const [sessionId, entry] of this.sessions.entries()) {
-      if (entry.clientId !== null || entry.resumableUntil === null || entry.resumableUntil > now) {
-        continue;
-      }
-
-      expiredCount += 1;
-      this.destroySession(sessionId, entry, "恢复窗口超时");
-    }
-
-    if (expiredCount > 0) {
-      log.debug("已清理超时未恢复的 Session", { expiredCount });
-    }
-  }
-
-  private destroySession(sessionId: string, entry: SessionEntry, reason: string): void {
-    const boundClientId = entry.clientId;
-    entry.session.close();
-    if (entry.fileProxy) {
-      this.fileProxies.delete(sessionId);
-      void entry.fileProxy.shutdown().catch(() => undefined);
-    }
-    this.sessions.delete(sessionId);
-    if (boundClientId) {
-      this.clients.unbindSession(boundClientId, sessionId);
-    }
-    this.stats.onSessionEnded();
-    log.info("Session 已销毁", { sessionId, clientId: boundClientId, reason });
-  }
-
   private destroyPtySession(sessionId: string, entry: PtySessionEntry, reason: string): void {
     const boundClientId = entry.clientId;
     void entry.session.close().catch(() => undefined);
@@ -1216,9 +878,8 @@ export class CerelayServer {
     }
 
     const token = req.headers["x-cerelay-hook-token"];
-    const sessionEntry = this.sessions.get(sessionId);
     const ptyEntry = this.ptySessions.get(sessionId);
-    const expectedToken = sessionEntry?.hookToken ?? ptyEntry?.hookToken;
+    const expectedToken = ptyEntry?.hookToken;
     if (!expectedToken) {
       this.sendJson(res, 404, { error: "session_not_found" });
       return;
@@ -1252,18 +913,11 @@ export class CerelayServer {
         toolName: payload.tool_name,
         toolUseId: payload.tool_use_id,
         inputSummary: summarizeUnknown(payload.tool_input),
-        from: sessionEntry ? "sdk-session" : "pty-session",
       });
 
-      if (sessionEntry) {
-        // SDK session: 保留 hookSpecificOutput 包装（SDK 回调期望此格式）
-        const result = await sessionEntry.session.handleInjectedPreToolUse(payload);
-        this.sendJson(res, 200, result);
-      } else {
-        // PTY session: 命令行 Hook 期望顶层字段，不认 hookSpecificOutput 包装
-        const result = await ptyEntry!.session.handleInjectedPreToolUse(payload);
-        this.sendJson(res, 200, result.hookSpecificOutput ?? result);
-      }
+      // PTY session: 命令行 Hook 期望顶层字段，不认 hookSpecificOutput 包装
+      const result = await ptyEntry!.session.handleInjectedPreToolUse(payload);
+      this.sendJson(res, 200, result.hookSpecificOutput ?? result);
     } catch (error) {
       log.warn("处理内部 PreToolUse hook bridge 失败", {
         sessionId,
@@ -1368,14 +1022,6 @@ async function verifyPtyHookVisibleInRuntime(
       .filter(Boolean)
       .join(" | ")
   );
-}
-
-interface SessionEntry {
-  session: ServerSession;
-  clientId: string | null;
-  resumableUntil: number | null;
-  hookToken?: string;
-  fileProxy?: FileProxyManager;
 }
 
 interface PtySessionEntry {

@@ -242,7 +242,7 @@ export class ClaudePtySession {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "",
+        permissionDecisionReason: "Tool response ready",
         additionalContext: renderToolResultForClaude(input.tool_name, result),
       },
     };
@@ -284,6 +284,7 @@ export class ClaudePtySession {
     });
     const requestId = `hook-${this.id}-${randomUUID()}`;
     const pending = this.relay.createPending(requestId, toolName);
+    void pending.catch(() => undefined);
 
     this.log.info("PTY tool 准备转发到 Client", {
       requestId,
@@ -292,7 +293,23 @@ export class ClaudePtySession {
       inputSummary: summarizeUnknown(rewrittenInput),
     });
 
-    await this.transport.sendToolCall(this.id, requestId, toolName, toolUseId, rewrittenInput);
+    try {
+      await this.transport.sendToolCall(this.id, requestId, toolName, toolUseId, rewrittenInput);
+      this.log.info("PTY tool 已发送到 Client", {
+        requestId,
+        toolName,
+      });
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.log.warn("PTY tool 发送到 Client 失败", {
+        requestId,
+        toolName,
+        error: err.message,
+      });
+      this.relay.reject(requestId, err);
+      throw err;
+    }
+
     const result = await pending;
     this.log.info("PTY tool 收到 Client 结果", {
       requestId,

@@ -1,160 +1,278 @@
-import os from "node:os";
-import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ServerSession } from "../src/session.js";
-import type { ServerToHandMessage } from "../src/protocol.js";
-import { writeFakeClaude } from "./fixtures/fake-claude.js";
+import { renderToolResultForClaude, rewriteToolInputForClient } from "../src/session.js";
 
-test("runPrompt 不透传 Client 宿主机 cwd:使用系统临时目录避免 spawn ENOENT / regression for host cwd leaking", async (t) => {
-  const fake = await writeFakeClaude();
-  const originalExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
-  process.env.CLAUDE_CODE_EXECUTABLE = fake.executablePath;
+// ============================================================
+// 路径重写：Write / Edit / MultiEdit / Grep / Glob 全覆盖
+// ============================================================
 
-  t.after(async () => {
-    if (originalExecutable === undefined) {
-      delete process.env.CLAUDE_CODE_EXECUTABLE;
-    } else {
-      process.env.CLAUDE_CODE_EXECUTABLE = originalExecutable;
-    }
-    await fake.cleanup();
+test("rewriteToolInputForClient rewrites Write file_path from server to client", () => {
+  const result = rewriteToolInputForClient("Write", {
+    file_path: "/tmp/cerelay-claude-sess-1/src/index.ts",
+    content: "console.log('hello');",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
   });
-
-  // 故意构造一个明显不存在的宿主机风格路径:如果 ServerSession 把它直接透传给 SDK,
-  // child_process.spawn 会因 cwd ENOENT 立刻失败 —— 这正是 fix 之前的 bug。
-  const hostCwd = "/Users/nobody/does-not-exist-xxx-regression";
-  let capturedCwd: unknown = "<unset>";
-
-  const session = ServerSession.createSession({
-    id: "sess-flow-cwd-regression",
-    cwd: hostCwd,
-    model: "claude-test",
-    transport: {
-      send: async () => {},
-    },
-    queryRunner: (input) => {
-      capturedCwd = (input.options as { cwd?: unknown }).cwd;
-      return (async function* () {
-        yield { type: "result", result: "ok" };
-      })();
-    },
-  });
-
-  await session.prompt("regression");
-
-  // 1. 宿主机路径必须没有泄漏到 SDK
-  assert.notEqual(capturedCwd, hostCwd);
-  // 2. SDK 收到的是系统临时目录(方案 3 的承诺)
-  assert.equal(capturedCwd, os.tmpdir());
-  // 3. ServerSession 仍把宿主机路径作为元信息保留(供 Client / 日志使用)
-  assert.equal(session.info().cwd, hostCwd);
-});
-
-test("ServerSession relays tool calls through Client and completes once tool_result arrives", async () => {
-  const sent: ServerToHandMessage[] = [];
-  let session!: ServerSession;
-
-  session = ServerSession.createSession({
-    id: "sess-flow-2",
-    cwd: "/workspace/demo",
-    model: "claude-test",
-    transport: {
-      send: async (message) => {
-        sent.push(message);
-        if (message.type === "tool_call") {
-          queueMicrotask(() => {
-            session.resolveToolResult(message.requestId, {
-              output: { stdout: "/workspace/demo\n", stderr: "", exit_code: 0 },
-              summary: "pwd 完成",
-            });
-          });
-        }
-      },
-    },
-    queryRunner: () => (async function* () {
-      const decision = await session.handleInjectedPreToolUse({
-        tool_name: "Bash",
-        tool_use_id: "toolu_123",
-        tool_input: { command: "pwd" },
-      });
-
-      assert.equal(decision.hookSpecificOutput?.permissionDecisionReason, "Tool response ready");
-      assert.equal(decision.hookSpecificOutput?.additionalContext, "stdout:\n/workspace/demo\n\nexit_code: 0");
-
-      yield {
-        type: "assistant",
-        message: {
-          content: [{ type: "text", text: `工具结果: ${decision.hookSpecificOutput?.additionalContext ?? ""}` }],
-        },
-      };
-      yield { type: "result", result: "done" };
-    })(),
-  });
-
-  await session.prompt("执行 pwd");
-
-  assert.equal(sent[0]?.type, "tool_call");
-  assert.equal(sent[1]?.type, "tool_call_complete");
-  assert.deepEqual(sent[2], {
-    type: "text_chunk",
-    sessionId: "sess-flow-2",
-    text: "工具结果: stdout:\n/workspace/demo\n\nexit_code: 0",
-  });
-  assert.deepEqual(sent[3], {
-    type: "session_end",
-    sessionId: "sess-flow-2",
-    result: "done",
-    error: undefined,
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/project/src/index.ts",
+    content: "console.log('hello');",
   });
 });
 
-test("ServerSession rewrites Claude-local file paths and injected cwd before handing tools to Client", async () => {
-  const sent: ServerToHandMessage[] = [];
-  let session!: ServerSession;
-  const sdkCwd = "/tmp/cerelay-claude-sess-123";
-  const clientCwd = "/Users/n374/Documents/Code/axon";
-  const clientHomeDir = "/Users/n374";
-
-  session = ServerSession.createSession({
-    id: "sess-flow-path-rewrite",
-    claudeHomeDir: "/home/node",
-    cwd: clientCwd,
-    clientHomeDir,
-    model: "claude-test",
-    sdkCwd,
-    transport: {
-      send: async (message) => {
-        sent.push(message);
-        if (message.type === "tool_call") {
-          session.resolveToolResult(message.requestId, {
-            output: { stdout: "ok\n", stderr: "", exit_code: 0 },
-            summary: "ok",
-          });
-        }
-      },
-    },
-    queryRunner: () => (async function* () {
-      await session.handleInjectedPreToolUse({
-        tool_name: "Read",
-        tool_use_id: "toolu_read",
-        tool_input: { file_path: "/home/node/.claude/settings.json" },
-      });
-      await session.handleInjectedPreToolUse({
-        tool_name: "Bash",
-        tool_use_id: "toolu_bash",
-        tool_input: { command: `cd ${sdkCwd} && cat /home/node/.claude.json && pwd` },
-      });
-      yield { type: "result", result: "done" };
-    })(),
+test("rewriteToolInputForClient rewrites Edit file_path from server to client", () => {
+  const result = rewriteToolInputForClient("Edit", {
+    file_path: "/home/node/.claude/CLAUDE.md",
+    old_string: "old",
+    new_string: "new",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-sess",
+    clientCwd: "/Users/dev/project",
   });
-
-  await session.prompt("path rewrite");
-
-  const toolCalls = sent.filter((message): message is Extract<ServerToHandMessage, { type: "tool_call" }> => message.type === "tool_call");
-  assert.equal(toolCalls.length, 2);
-  assert.deepEqual(toolCalls[0]?.input, { file_path: `${clientHomeDir}/.claude/settings.json` });
-  assert.deepEqual(toolCalls[1]?.input, {
-    command: `cd ${clientCwd} && cat ${clientHomeDir}/.claude.json && pwd`,
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/.claude/CLAUDE.md",
+    old_string: "old",
+    new_string: "new",
   });
 });
 
+test("rewriteToolInputForClient rewrites MultiEdit file_path from server to client", () => {
+  const result = rewriteToolInputForClient("MultiEdit", {
+    file_path: "/tmp/cerelay-claude-sess-1/package.json",
+    edits: [{ old_string: "a", new_string: "b" }],
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/project/package.json",
+    edits: [{ old_string: "a", new_string: "b" }],
+  });
+});
+
+test("rewriteToolInputForClient rewrites Grep path from server to client", () => {
+  const result = rewriteToolInputForClient("Grep", {
+    pattern: "TODO",
+    path: "/tmp/cerelay-claude-sess-1/src",
+    glob: "*.ts",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    pattern: "TODO",
+    path: "/Users/dev/project/src",
+    glob: "*.ts",
+  });
+});
+
+test("rewriteToolInputForClient rewrites Glob path from server to client", () => {
+  const result = rewriteToolInputForClient("Glob", {
+    pattern: "*.ts",
+    path: "/tmp/cerelay-claude-sess-1",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    pattern: "*.ts",
+    path: "/Users/dev/project",
+  });
+});
+
+// ============================================================
+// 路径重写：CC 配置文件路径（认证 / 用户配置 / 项目配置）
+// ============================================================
+
+test("rewriteToolInputForClient rewrites .credentials.json path for Read", () => {
+  const result = rewriteToolInputForClient("Read", {
+    file_path: "/home/node/.claude/.credentials.json",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/sess",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/.claude/.credentials.json",
+  });
+});
+
+test("rewriteToolInputForClient rewrites project CLAUDE.md path for Read", () => {
+  const result = rewriteToolInputForClient("Read", {
+    file_path: "/tmp/cerelay-claude-sess-1/CLAUDE.md",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/project/CLAUDE.md",
+  });
+});
+
+test("rewriteToolInputForClient rewrites project .claude/ directory paths for Read", () => {
+  const result = rewriteToolInputForClient("Read", {
+    file_path: "/tmp/cerelay-claude-sess-1/.claude/settings.local.json",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    file_path: "/Users/dev/project/.claude/settings.local.json",
+  });
+});
+
+test("rewriteToolInputForClient rewrites Bash command accessing .claude.json", () => {
+  const result = rewriteToolInputForClient("Bash", {
+    command: "cat /home/node/.claude.json",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/sess",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    command: "cat /Users/dev/.claude.json",
+  });
+});
+
+test("rewriteToolInputForClient rewrites Bash command accessing .credentials.json", () => {
+  const result = rewriteToolInputForClient("Bash", {
+    command: "cat /home/node/.claude/.credentials.json && echo ok",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/sess",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    command: "cat /Users/dev/.claude/.credentials.json && echo ok",
+  });
+});
+
+test("rewriteToolInputForClient rewrites Grep path targeting ~/.claude for settings search", () => {
+  const result = rewriteToolInputForClient("Grep", {
+    pattern: "mcpServers",
+    path: "/home/node/.claude",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/sess",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    pattern: "mcpServers",
+    path: "/Users/dev/.claude",
+  });
+});
+
+test("rewriteToolInputForClient rewrites Glob path targeting project .claude/ directory", () => {
+  const result = rewriteToolInputForClient("Glob", {
+    pattern: "*.json",
+    path: "/tmp/cerelay-claude-sess-1/.claude",
+  }, {
+    serverHomeDir: "/home/node",
+    clientHomeDir: "/Users/dev",
+    serverCwd: "/tmp/cerelay-claude-sess-1",
+    clientCwd: "/Users/dev/project",
+  });
+  assert.deepEqual(result, {
+    pattern: "*.json",
+    path: "/Users/dev/project/.claude",
+  });
+});
+
+// ============================================================
+// renderToolResultForClaude：各工具类型结果格式化
+// ============================================================
+
+test("renderToolResultForClaude formats Read result as content string", () => {
+  const output = renderToolResultForClaude("Read", {
+    output: { content: "line1\nline2\nline3" },
+    summary: "Read 成功",
+  });
+  assert.equal(output, "line1\nline2\nline3");
+});
+
+test("renderToolResultForClaude formats Write result as path string", () => {
+  const output = renderToolResultForClaude("Write", {
+    output: { path: "/Users/dev/project/new-file.ts" },
+    summary: "Write 成功",
+  });
+  assert.equal(output, "/Users/dev/project/new-file.ts");
+});
+
+test("renderToolResultForClaude formats Edit result as path string", () => {
+  const output = renderToolResultForClaude("Edit", {
+    output: { path: "/Users/dev/project/index.ts" },
+    summary: "Edit 成功",
+  });
+  assert.equal(output, "/Users/dev/project/index.ts");
+});
+
+test("renderToolResultForClaude formats Bash result with stdout/stderr/exit_code", () => {
+  const output = renderToolResultForClaude("Bash", {
+    output: { stdout: "hello\n", stderr: "warn: something\n", exit_code: 0 },
+    summary: "Bash 成功",
+  });
+  assert.equal(output, "stdout:\nhello\n\nstderr:\nwarn: something\n\nexit_code: 0");
+});
+
+test("renderToolResultForClaude formats Bash result with only stdout", () => {
+  const output = renderToolResultForClaude("Bash", {
+    output: { stdout: "/Users/dev/project\n", stderr: "", exit_code: 0 },
+    summary: "Bash 成功",
+  });
+  assert.equal(output, "stdout:\n/Users/dev/project\n\nexit_code: 0");
+});
+
+test("renderToolResultForClaude formats Grep result as file:line:text", () => {
+  const output = renderToolResultForClaude("Grep", {
+    output: {
+      matches: [
+        { file: "src/index.ts", line: 10, text: "const x = 1;" },
+        { file: "src/utils.ts", line: 5, text: "export const y = 2;" },
+      ],
+    },
+    summary: "Grep 成功",
+  });
+  assert.equal(output, "src/index.ts:10:const x = 1;\nsrc/utils.ts:5:export const y = 2;");
+});
+
+test("renderToolResultForClaude formats Glob result as newline-separated file list", () => {
+  const output = renderToolResultForClaude("Glob", {
+    output: {
+      files: ["src/index.ts", "src/utils.ts", "package.json"],
+    },
+    summary: "Glob 成功",
+  });
+  assert.equal(output, "src/index.ts\nsrc/utils.ts\npackage.json");
+});
+
+test("renderToolResultForClaude returns error string when result has error", () => {
+  const output = renderToolResultForClaude("Read", {
+    error: "ENOENT: no such file or directory",
+  });
+  assert.equal(output, "ENOENT: no such file or directory");
+});
+
+test("renderToolResultForClaude returns summary when output is undefined", () => {
+  const output = renderToolResultForClaude("Read", {
+    summary: "文件不存在",
+  });
+  assert.equal(output, "文件不存在");
+});

@@ -106,6 +106,16 @@ test("admin APIs require a valid token and expose token management", async (t) =
 });
 
 test("websocket auth rejects missing tokens and accepts valid query/header tokens", async (t) => {
+  const originalMountNamespace = process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
+  process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = "false";
+  t.after(() => {
+    if (originalMountNamespace === undefined) {
+      delete process.env.CERELAY_ENABLE_MOUNT_NAMESPACE;
+      return;
+    }
+    process.env.CERELAY_ENABLE_MOUNT_NAMESPACE = originalMountNamespace;
+  });
+
   const server = new CerelayServer({
     model: "claude-sonnet-4-20250514",
     port: 0,
@@ -123,10 +133,10 @@ test("websocket auth rejects missing tokens and accepts valid query/header token
   const querySocket = await connectSocket(`ws://127.0.0.1:${port}/ws?token=${WS_TOKEN}`);
   registerSocketCleanup(t, querySocket);
   querySocket.send(JSON.stringify({
-    type: "create_session",
+    type: "create_pty_session",
     cwd: "/tmp",
   }));
-  const queryCreated = await waitForMessageType(querySocket, "session_created");
+  const queryCreated = await waitForMessageType(querySocket, "pty_session_created");
   assert.equal(typeof queryCreated.sessionId, "string");
   await closeSocket(querySocket);
 
@@ -135,10 +145,10 @@ test("websocket auth rejects missing tokens and accepts valid query/header token
   });
   registerSocketCleanup(t, headerSocket);
   headerSocket.send(JSON.stringify({
-    type: "create_session",
+    type: "create_pty_session",
     cwd: "/tmp",
   }));
-  const created = await waitForMessageType(headerSocket, "session_created");
+  const created = await waitForMessageType(headerSocket, "pty_session_created");
   assert.equal(typeof created.sessionId, "string");
   await closeSocket(headerSocket);
 });
