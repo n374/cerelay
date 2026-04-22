@@ -14,8 +14,11 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { renderNamespaceBootstrapScript } from "../src/claude-session-runtime.js";
 import { FileProxyManager } from "../src/file-proxy-manager.js";
+
+const testFileDir = path.dirname(fileURLToPath(import.meta.url));
 
 // ============================================================
 // 场景 1: bootstrap 脚本使用 --rbind 递归挂载 shared claude dir
@@ -60,6 +63,22 @@ test("bootstrap script in FUSE mode binds home-claude from FUSE mount point", ()
     script,
     /mount\s+--bind\s+"\$CERELAY_FUSE_ROOT\/home-claude"\s+"\$CERELAY_HOME_DIR\/\.claude"/,
     "FUSE 模式从 FUSE 挂载点绑定 ~/.claude"
+  );
+});
+
+test("bootstrap script no longer marks mounted credentials file as read-only in compose", async () => {
+  const composePath = path.resolve(testFileDir, "..", "..", "docker-compose.yml");
+  const compose = await readFile(composePath, "utf8");
+
+  assert.match(
+    compose,
+    /target:\s*\/home\/node\/\.claude\/\.credentials\.json/,
+    "compose 应继续挂载 credentials 文件"
+  );
+  assert.doesNotMatch(
+    compose,
+    /read_only:\s*true/,
+    "compose 不应再将 credentials mount 标记为只读"
   );
 });
 
@@ -158,6 +177,36 @@ test("PTY session combines hook injection and credentials shadow files", async (
     "project-claude/settings.local.json": settingsPath,
     "home-claude/.credentials.json": credPath,
   }, "PTY session 应同时包含 hook injection 和凭证的 shadow file");
+});
+
+test("FUSE script writes shadow credentials file back to local server path", () => {
+  const script = renderNamespaceBootstrapScript();
+
+  assert.match(
+    script,
+    /mount\s+--bind\s+"\$CERELAY_FUSE_ROOT\/home-claude"\s+"\$CERELAY_HOME_DIR\/\.claude"/,
+    "bootstrap 仍应绑定 FUSE 的 home-claude 目录"
+  );
+});
+
+test("FUSE host script handles shadow file writes locally instead of proxying to Hand", async () => {
+  const { PYTHON_FUSE_HOST_SCRIPT } = await import("../src/fuse-host-script.js");
+
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /def resolve_shadow_path\(fuse_path\):/,
+    "FUSE script 应暴露 shadow file 路径解析 helper"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /def write\(self, path, data, offset, fh\):\n\s+local_path = resolve_shadow_path\(path\)\n\s+if local_path:/,
+    "shadow file 写入应先命中本地路径分支"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /def truncate\(self, path, length, fh=None\):\n\s+local_path = resolve_shadow_path\(path\)\n\s+if local_path:/,
+    "shadow file truncate 应直接作用于本地文件"
+  );
 });
 
 // ============================================================

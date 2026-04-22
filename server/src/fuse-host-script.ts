@@ -205,6 +205,10 @@ def resolve_hand_path(root_name, rel_path):
         return os.path.join(hand_root, rel_path)
     return hand_root
 
+def resolve_shadow_path(fuse_path):
+    """返回 shadow file 对应的本地真实路径；非 shadow file 返回 None。"""
+    return SHADOW_FILES.get(fuse_path.lstrip("/"))
+
 # ============================================================
 # 虚拟节点 stat
 # ============================================================
@@ -296,9 +300,8 @@ class AxonFuseOps(Operations):
             raise FuseOSError(errno.ENOENT)
 
         # Shadow file: 本地文件优先（如 hook injection 的 settings.local.json）
-        fuse_rel = path.lstrip("/")
-        if fuse_rel in SHADOW_FILES:
-            local_path = SHADOW_FILES[fuse_rel]
+        local_path = resolve_shadow_path(path)
+        if local_path:
             try:
                 st = os.stat(local_path)
                 return {
@@ -379,9 +382,8 @@ class AxonFuseOps(Operations):
 
     def read(self, path, size, offset, fh):
         # Shadow file: 本地读取
-        fuse_rel = path.lstrip("/")
-        if fuse_rel in SHADOW_FILES:
-            local_path = SHADOW_FILES[fuse_rel]
+        local_path = resolve_shadow_path(path)
+        if local_path:
             try:
                 with open(local_path, "rb") as f:
                     f.seek(offset)
@@ -423,6 +425,20 @@ class AxonFuseOps(Operations):
     # ================================================================
 
     def write(self, path, data, offset, fh):
+        local_path = resolve_shadow_path(path)
+        if local_path:
+            try:
+                fd = os.open(local_path, os.O_WRONLY)
+                try:
+                    os.lseek(fd, offset, os.SEEK_SET)
+                    written = os.write(fd, bytes(data))
+                finally:
+                    os.close(fd)
+                _cache.invalidate(local_path)
+                return written
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
         root_name, rel_path = parse_fuse_path(path)
         if root_name not in ROOTS:
             raise FuseOSError(errno.EROFS)
@@ -441,6 +457,16 @@ class AxonFuseOps(Operations):
         return resp.get("written", len(data))
 
     def create(self, path, mode, fi=None):
+        local_path = resolve_shadow_path(path)
+        if local_path:
+            try:
+                fd = os.open(local_path, os.O_WRONLY | os.O_CREAT, mode)
+                os.close(fd)
+                _cache.invalidate(local_path)
+                return 0
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
         root_name, rel_path = parse_fuse_path(path)
         if root_name not in ROOTS:
             raise FuseOSError(errno.EROFS)
@@ -458,6 +484,15 @@ class AxonFuseOps(Operations):
         return 0
 
     def unlink(self, path):
+        local_path = resolve_shadow_path(path)
+        if local_path:
+            try:
+                os.unlink(local_path)
+                _cache.invalidate(local_path)
+                return
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
         root_name, rel_path = parse_fuse_path(path)
         if root_name not in ROOTS:
             raise FuseOSError(errno.EROFS)
@@ -504,6 +539,19 @@ class AxonFuseOps(Operations):
         _cache.invalidate(hand_path)
 
     def rename(self, old, new):
+        old_shadow = resolve_shadow_path(old)
+        new_shadow = resolve_shadow_path(new)
+        if old_shadow or new_shadow:
+            if not old_shadow or not new_shadow:
+                raise FuseOSError(errno.EXDEV)
+            try:
+                os.replace(old_shadow, new_shadow)
+                _cache.invalidate(old_shadow)
+                _cache.invalidate(new_shadow)
+                return
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
         old_root, old_rel = parse_fuse_path(old)
         new_root, new_rel = parse_fuse_path(new)
         if old_root not in ROOTS or new_root not in ROOTS:
@@ -524,6 +572,16 @@ class AxonFuseOps(Operations):
         _cache.invalidate(new_hand)
 
     def truncate(self, path, length, fh=None):
+        local_path = resolve_shadow_path(path)
+        if local_path:
+            try:
+                with open(local_path, "r+b") as f:
+                    f.truncate(length)
+                _cache.invalidate(local_path)
+                return
+            except OSError as e:
+                raise FuseOSError(e.errno or errno.EIO)
+
         root_name, rel_path = parse_fuse_path(path)
         if root_name not in ROOTS:
             raise FuseOSError(errno.EROFS)

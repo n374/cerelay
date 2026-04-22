@@ -46,13 +46,12 @@ services:
     ports:
       - "${SERVER_HOST_PORT:-8765}:${SERVER_PORT:-8765}"
 
-    # Claude Code 登录态：挂载宿主机凭证文件（只读）
+    # Claude Code 登录态：挂载宿主机凭证文件（可写，namespace 内修改需回写到 Server 侧文件）
     # 也可通过 CLAUDE_CREDENTIALS 环境变量传入 JSON 内容代替挂载
     volumes:
       - type: bind
         source: ${CLAUDE_CREDENTIALS_PATH:-${HOME}/.claude/.credentials.json}
         target: /home/node/.claude/.credentials.json
-        read_only: true
 
     cap_add:
       - SYS_ADMIN
