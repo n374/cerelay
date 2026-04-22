@@ -1,41 +1,41 @@
 # Cerelay
 
-**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端通过 Claude Agent SDK 驱动推理，Client 端在本地执行工具，两者通过 WebSocket 双向通信。
+**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端托管 Claude Code PTY 会话，Client 端在本地执行工具与文件代理，两者通过 WebSocket 双向通信。
 
-**Cerelay** is a split-architecture implementation of Claude Code. The Server drives reasoning via the Claude Agent SDK, the Client executes tools locally, and they communicate over WebSocket.
+**Cerelay** is a split-architecture implementation of Claude Code. The Server hosts Claude Code PTY sessions, the Client executes tools and file proxy operations locally, and they communicate over WebSocket.
 
 ## 架构 / Architecture
 
 ```text
-Client (TypeScript)  ←— WebSocket —→  Server (TypeScript)  ←→  Claude Agent SDK  ←→  claude CLI
-  ├─ 本地工具执行                        ├─ Session 管理
+Client (TypeScript)  ←— WebSocket —→  Server (TypeScript)  ←→  Claude Code PTY / claude CLI
+  ├─ 本地工具执行                        ├─ PTY 会话托管
   ├─ MCP Runtime                        ├─ Hook 拦截 + 工具转发
-  └─ 终端 UI / ACP                      └─ MCP 代理
+  └─ 文件代理 / File Proxy              └─ Runtime 隔离 + 鉴权
 ```
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
-    participant SDK as Claude Agent SDK
+    participant PTY as Claude Code PTY
 
-    C->>S: WebSocket prompt
-    S->>SDK: query({ prompt, hooks })
-    SDK-->>S: text / thinking stream
-    S-->>C: text_chunk / thought_chunk
-    SDK->>S: PreToolUse callback (tool_call)
+    C->>S: WebSocket create_pty_session / prompt
+    S->>PTY: spawn claude CLI in PTY
+    PTY-->>S: pty_output / text stream
+    S-->>C: pty_output / text_chunk
+    PTY->>S: PreToolUse hook (tool_call)
     S-->>C: tool_call (Read/Write/Bash/...)
     C->>C: 本地执行工具
     C-->>S: tool_result
-    S-->>SDK: hook result
-    SDK-->>S: session_end
-    S-->>C: session_end
+    S-->>PTY: hook result / pty_input
+    PTY-->>S: pty_exit / session_end
+    S-->>C: pty_exit / session_end
 ```
 
 **核心设计 / Key Design**:
 
-- **SDK Hook 拦截**：Server 通过 `PreToolUse` callback 接管工具调用，转发到 Client 执行
-- **Session Runtime**：Docker 下每个 session 有独立 mount namespace，Claude 看到的 `HOME`/`cwd` 对齐 Client 本地路径
+- **PTY Hook 拦截**：Server 通过 Claude Code 的 `PreToolUse` hook 接管工具调用，转发到 Client 执行
+- **Session Runtime**：Docker 下每个 PTY session 有独立 mount namespace，Claude 看到的 `HOME`/`cwd` 对齐 Client 本地路径
 - **MCP 代理**：Server 读取 Claude 的 MCP 配置下发给 Client，Client 负责连接 MCP Server 并执行工具
 - **FUSE 文件代理**：容器内通过 FUSE 将文件读写请求转发到 Client 本地文件系统
 
@@ -135,7 +135,11 @@ CERELAY_SOCKS_PROXY=socks5://user:pass@proxy.example.com:1080 npm run server:up
 CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
 ```
 
-开启后，Server 容器及其内部启动的 PTY/Claude 子进程都会继承容器网络命名空间；代理异常或 `sing-box` 退出时，入口脚本会终止主进程，避免回退直连。
+开启后，容器内所有公网出站流量都经由 sing-box TUN 走 SOCKS5；代理异常或 sing-box 退出时，入口脚本会终止主进程，让容器断开并由 Docker 重启策略接管。
+
+DNS 默认通过代理上的 TCP 上游解析，不依赖代理 UDP。`CERELAY_SOCKS_UDP=forward`（默认）会继续放行非 DNS UDP；如需更严格的 fail-closed 策略，可设为 `block`，让 sing-box 显式拒绝其他 UDP。
+
+注意：该模式依赖 Linux 容器能力（`NET_ADMIN`、`/dev/net/tun`、`nftables`），适合部署在原生 Linux Docker 主机上。
 
 #### 本地直跑 / Run Locally
 
@@ -288,22 +292,52 @@ export CERELAY_KEY=my-secret
 CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
 ```
 
+### 多账号 / Multi-account
+
+透明 SOCKS5 代理是**容器级**能力，不是 session 级能力。一个容器只能稳定对应一套代理出口，因此多账号应部署为多个并列容器实例，而不是 Docker-in-Docker。
+
+推荐做法：
+
+```bash
+# 账号 A
+COMPOSE_PROJECT_NAME=cerelay-a \
+SERVER_HOST_PORT=8765 \
+CLAUDE_CREDENTIALS_PATH=/srv/claude/a/.credentials.json \
+CERELAY_SOCKS_PROXY=socks5://userA:passA@proxy-a.example.com:1080 \
+npm run server:up
+
+# 账号 B
+COMPOSE_PROJECT_NAME=cerelay-b \
+SERVER_HOST_PORT=8766 \
+CLAUDE_CREDENTIALS_PATH=/srv/claude/b/.credentials.json \
+CERELAY_SOCKS_PROXY=socks5://userB:passB@proxy-b.example.com:1080 \
+npm run server:up
+```
+
+这样每个实例都有独立的：
+
+- Claude 凭证
+- 宿主机端口
+- 容器网络出口
+- Docker 生命周期
+
 ## 项目结构 / Project Structure
 
 ```text
 cerelay/
-├── server/                   # Server（Claude Agent SDK 集成）
+├── server/                   # Server（Claude Code PTY 托管）
 │   └── src/
-│       ├── server.ts         # HTTP + WebSocket + 工具转发
-│       ├── session.ts        # SDK query() 会话驱动
-│       ├── claude-session-runtime.ts  # Mount namespace 隔离
-│       └── pty-session.ts    # PTY 终端会话
+│       ├── server.ts         # HTTP + WebSocket + PTY / tool relay
+│       ├── pty-session.ts    # Claude Code PTY 会话
+│       ├── claude-tool-bridge.ts      # PreToolUse hook 桥接
+│       └── claude-session-runtime.ts  # Mount namespace 隔离
 ├── client/                   # Client（本地工具执行）
 │   └── src/
 │       ├── index.ts          # CLI 入口（默认 PTY 模式）
 │       ├── client.ts         # WebSocket 客户端
 │       ├── executor.ts       # 工具分发（Read/Write/Edit/Bash/Grep/Glob）
-│       └── acp/              # ACP 模式（编辑器集成）
+│       ├── mcp/runtime.ts    # MCP Runtime 桥接
+│       └── file-proxy.ts     # 文件代理客户端
 ├── web/                      # 浏览器 UI（可选）
 ├── docker-compose.yml
 ├── Dockerfile
@@ -350,7 +384,8 @@ cd web && npm test
 | `LOG_LEVEL` | `info` | 日志级别 |
 | `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 mount namespace 隔离 |
 | `CERELAY_SOCKS_PROXY` | — | 容器级透明 SOCKS5 代理，支持 `socks5://...` 或 `host:port[:user:pass]` |
-| `CERELAY_SOCKS_DNS_SERVER` | `1.1.1.1` | TUN 模式上游 DNS |
+| `CERELAY_SOCKS_DNS_SERVER` | `1.1.1.1` | TUN 模式下走代理解析的上游 DNS |
+| `CERELAY_SOCKS_UDP` | `forward` | UDP 策略：`forward` 继续放行，`block` 显式拒绝非 DNS UDP |
 | `CERELAY_SOCKS_TUN_ADDRESS` | `172.19.0.1/30` | sing-box TUN 地址段 |
 | `CERELAY_SOCKS_TUN_MTU` | `9000` | sing-box TUN MTU |
 | `CLAUDE_CREDENTIALS` | — | Claude Code 登录凭证 JSON（替代文件挂载） |
