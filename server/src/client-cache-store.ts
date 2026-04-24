@@ -12,7 +12,7 @@
 // ============================================================
 
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -167,6 +167,83 @@ export class ClientCacheStore {
 
   blobExists(deviceId: string, cwd: string, sha256: string): boolean {
     return existsSync(this.blobPath(deviceId, cwd, sha256));
+  }
+
+  /**
+   * 同步读取 blob 内容。commit 3 的 FUSE 读路径使用：
+   * - 文件不存在（skipped / 新文件）→ 返回 null，调用方 fallback 到穿透 Client
+   * - 文件存在 → 返回 Buffer
+   */
+  readBlobSync(deviceId: string, cwd: string, sha256: string): Buffer | null {
+    const p = this.blobPath(deviceId, cwd, sha256);
+    if (!existsSync(p)) return null;
+    try {
+      return readFileSync(p);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把一个内存 buffer 作为"已写入 cache 的变更"落盘。供 FUSE 写入同步调用。
+   * 返回写入后的 CacheEntry，调用方负责把它合并进 manifest（通常通过 upsertEntry）。
+   */
+  async writeBlobBuffer(deviceId: string, cwd: string, buf: Buffer): Promise<CacheEntry> {
+    const sessionDir = this.sessionDir(deviceId, cwd);
+    await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
+    const sha = sha256Hex(buf);
+    await writeBlobIfMissing(sessionDir, sha, buf);
+    return {
+      size: buf.byteLength,
+      mtime: Date.now(),
+      sha256: sha,
+    };
+  }
+
+  /**
+   * 更新单个 entry 的 manifest 记录（不写 blob）。适合与 writeBlobBuffer 搭配，
+   * 或用于 Claude Code 通过 FUSE write 后刷新 manifest。
+   */
+  async upsertEntry(
+    deviceId: string,
+    cwd: string,
+    scope: CacheScope,
+    relPath: string,
+    entry: CacheEntry,
+  ): Promise<void> {
+    const manifest = await this.loadManifest(deviceId, cwd);
+    manifest.scopes[scope].entries[relPath] = entry;
+    await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+  }
+
+  /**
+   * 从 manifest 移除一个 entry。供 FUSE unlink 同步调用。
+   */
+  async removeEntry(
+    deviceId: string,
+    cwd: string,
+    scope: CacheScope,
+    relPath: string,
+  ): Promise<void> {
+    const manifest = await this.loadManifest(deviceId, cwd);
+    if (scope in manifest.scopes && relPath in manifest.scopes[scope].entries) {
+      delete manifest.scopes[scope].entries[relPath];
+      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+    }
+  }
+
+  /**
+   * 查询某个 (scope, relPath) 在 cache 中的元数据。未命中返回 null。
+   * FUSE 读优先策略：先 lookupEntry，命中且未 skipped → readBlobSync，否则回源 Client。
+   */
+  async lookupEntry(
+    deviceId: string,
+    cwd: string,
+    scope: CacheScope,
+    relPath: string,
+  ): Promise<CacheEntry | null> {
+    const manifest = await this.loadManifest(deviceId, cwd);
+    return manifest.scopes[scope]?.entries[relPath] ?? null;
   }
 
   // ---------- 内部 ----------

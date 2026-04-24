@@ -41,6 +41,8 @@ export interface CreatePtySession {
   colorTerm?: string;
   termProgram?: string;
   termProgramVersion?: string;
+  /** 本机持久化的 deviceId，用于 Server 侧按 (deviceId, cwd) 定位缓存 */
+  deviceId?: string;
 }
 
 export interface PtySessionCreated {

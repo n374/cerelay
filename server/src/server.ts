@@ -641,6 +641,10 @@ export class CerelayServer {
         sendToClient: async (msg) => {
           await this.sendToClient(clientId, msg);
         },
+        // 仅当 Client 上报了 deviceId 时才启用 cache 读优先；
+        // 未上报则 FileProxyManager 退化为纯穿透模式，功能不变。
+        cacheStore: message.deviceId ? this.cacheStore : undefined,
+        deviceId: message.deviceId,
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
       // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，

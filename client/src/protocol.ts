@@ -44,6 +44,8 @@ export interface CreatePtySession {
   colorTerm?: string;
   termProgram?: string;
   termProgramVersion?: string;
+  /** 本机持久化的 deviceId，Server 用它定位 cache 目录 */
+  deviceId?: string;
 }
 
 export interface PtySessionCreated {

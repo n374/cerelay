@@ -6,7 +6,14 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { createLogger } from "./logger.js";
 import { PYTHON_FUSE_HOST_SCRIPT } from "./fuse-host-script.js";
-import type { FileProxyRequest, FileProxyResponse } from "./protocol.js";
+import type {
+  CacheScope,
+  FileProxyRequest,
+  FileProxyResponse,
+  FileProxySnapshotEntry,
+  FileProxyStat,
+} from "./protocol.js";
+import type { ClientCacheStore, PersistedManifest } from "./client-cache-store.js";
 
 const log = createLogger("file-proxy-manager");
 
@@ -42,6 +49,17 @@ export interface FileProxyManagerOptions {
   sessionId: string;
   /** Shadow files: FUSE 内虚拟路径 → 本地真实文件路径（如 hook injection settings） */
   shadowFiles?: Record<string, string>;
+  /**
+   * Client 文件缓存。提供后：
+   * - 启动时 snapshot 优先从 cache 构造 home-claude / home-claude-json，
+   *   避免向 Client 发全量 snapshot 请求
+   * - 运行时 read 命中 cache 的 blob 时直接回，不穿透 Client
+   * - FUSE 写入（write/create/unlink/truncate）在穿透 Client 后同步更新 cache，
+   *   让 cache 与 Client 本地保持一致
+   */
+  cacheStore?: ClientCacheStore;
+  /** Client 本机 deviceId，用于定位 cache session 目录 */
+  deviceId?: string;
 }
 
 /**
@@ -67,6 +85,10 @@ export class FileProxyManager {
   private readonly roots: Record<string, string>;
   /** Shadow files: FUSE 内路径 → 本地文件路径 */
   private readonly shadowFiles: Record<string, string>;
+  /** Client 文件缓存（可选）；未提供时退化为纯穿透模式 */
+  private readonly cacheStore: ClientCacheStore | undefined;
+  /** Client 本机 deviceId；无 cacheStore 时忽略 */
+  private readonly deviceId: string | undefined;
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -75,12 +97,19 @@ export class FileProxyManager {
     this.clientCwd = options.clientCwd;
     this.sendToClient = options.sendToClient;
     this.shadowFiles = options.shadowFiles ?? {};
+    this.cacheStore = options.cacheStore;
+    this.deviceId = options.deviceId;
 
     this.roots = {
       "home-claude": path.join(this.clientHomeDir, ".claude"),
       "home-claude-json": path.join(this.clientHomeDir, ".claude.json"),
       "project-claude": path.join(this.clientCwd, ".claude"),
     };
+  }
+
+  /** 判断是否启用了 cache 读优先路径。二者同时存在才算启用。 */
+  private cacheAvailable(): boolean {
+    return Boolean(this.cacheStore && this.deviceId);
   }
 
   get mountPoint(): string {
@@ -243,9 +272,34 @@ export class FileProxyManager {
   private async collectAndWriteSnapshot(snapshotFile: string): Promise<void> {
     const startedAt = Date.now();
 
-    // 并行对每个 root 发 snapshot 请求
+    // 区分 root：home-claude 和 home-claude-json 优先从 Server 侧缓存构造，
+    // 避免启动时向 Client 发全量 snapshot 请求（单次 round-trip 变 0 次）。
+    // project-claude 仍然穿透 Client —— 项目级文件不进 cache。
+    const cacheCoveredRoots = new Set<string>(["home-claude", "home-claude-json"]);
+    const rootsToFetchFromClient: Array<[string, string]> = [];
+    const cachedEntries: FileProxySnapshotEntry[] = [];
+    let cachedEntryCount = 0;
+
+    if (this.cacheAvailable()) {
+      const manifest = await this.cacheStore!.loadManifest(this.deviceId!, this.clientCwd);
+      const built = this.buildSnapshotFromManifest(manifest);
+      cachedEntries.push(...built);
+      cachedEntryCount = built.length;
+      log.debug("启动时从 cache 构造 snapshot", {
+        sessionId: this.sessionId,
+        deviceId: this.deviceId,
+        cachedEntryCount,
+      });
+    }
+
+    for (const [rootName, clientPath] of Object.entries(this.roots)) {
+      if (this.cacheAvailable() && cacheCoveredRoots.has(rootName)) continue;
+      rootsToFetchFromClient.push([rootName, clientPath]);
+    }
+
+    // 未被 cache 覆盖的 root 并行向 Client 取 snapshot
     const results = await Promise.allSettled(
-      Object.entries(this.roots).map(async ([rootName, clientPath]) => {
+      rootsToFetchFromClient.map(async ([rootName, clientPath]) => {
         const reqId = `snapshot-${rootName}-${Date.now()}`;
         const resp = await this.sendSnapshotRequest(reqId, rootName, clientPath);
         return { rootName, entries: resp };
@@ -260,23 +314,27 @@ export class FileProxyManager {
     } = { stats: {}, readdirs: {}, reads: {} };
 
     let entryCount = 0;
+
+    // 1. 先写入 cache 构造的条目
+    for (const entry of cachedEntries) {
+      entryCount++;
+      const cachePath = entry.path;
+      snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
+      if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
+      if (entry.data) snapshot.reads[cachePath] = entry.data;
+    }
+
+    // 2. 再写入 Client 穿透拿到的条目（project-claude 等）
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
-      const { rootName, entries } = result.value;
+      const { entries } = result.value;
       if (!entries) continue;
-
-      const handRoot = this.roots[rootName];
       for (const entry of entries) {
         entryCount++;
-        // 将 Hand 绝对路径转换为 FUSE daemon 缓存用的 Hand 路径
         const cachePath = entry.path;
         snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
-        if (entry.entries) {
-          snapshot.readdirs[cachePath] = entry.entries;
-        }
-        if (entry.data) {
-          snapshot.reads[cachePath] = entry.data;
-        }
+        if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
+        if (entry.data) snapshot.reads[cachePath] = entry.data;
       }
     }
 
@@ -285,8 +343,143 @@ export class FileProxyManager {
     log.info("FUSE 缓存快照已收集", {
       sessionId: this.sessionId,
       entryCount,
+      cachedEntryCount,
+      clientFetchedRoots: rootsToFetchFromClient.map(([r]) => r),
       durationMs: Date.now() - startedAt,
     });
+  }
+
+  /**
+   * 从 ClientCacheStore 持久化的 manifest 反向构造出 FUSE snapshot 条目。
+   *
+   * - home-claude scope：目录 `~/.claude/` 及其中所有文件
+   * - home-claude-json scope：单文件 `~/.claude.json`
+   *
+   * 处理细节：
+   * - 目录 stat 是合成的（FUSE 只看 st_mode/st_size 等，uid/gid 默认当前进程）
+   * - 中间目录（如 `subdir/nested.json` 中的 `subdir`）必须显式创建 stat + entries
+   * - skipped 的大文件只有 stat，没有 data → FUSE read 时会触发穿透 Client
+   * - blob 缺失（manifest 里有记录但 blob 被手动删除）与 skipped 同等处理
+   */
+  private buildSnapshotFromManifest(manifest: PersistedManifest): FileProxySnapshotEntry[] {
+    const entries: FileProxySnapshotEntry[] = [];
+    const claudeRoot = path.join(this.clientHomeDir, ".claude");
+    const claudeJsonPath = path.join(this.clientHomeDir, ".claude.json");
+
+    // claude-json: 单文件
+    const jsonEntries = manifest.scopes["claude-json"]?.entries ?? {};
+    const jsonEntry = jsonEntries[""];
+    if (jsonEntry) {
+      entries.push(this.cacheEntryToSnapshot(claudeJsonPath, jsonEntry, "claude-json", ""));
+    }
+
+    // claude-home: 目录 + 文件（完全空时不生成占位根目录，避免 FUSE 看到一个
+    // 和 Client 本机不一致的空 ~/.claude）
+    const homeEntries = manifest.scopes["claude-home"]?.entries ?? {};
+    if (Object.keys(homeEntries).length > 0) {
+      const allDirs = new Set<string>();
+      allDirs.add(""); // 根目录 ~/.claude
+      for (const relPath of Object.keys(homeEntries)) {
+        const parts = relPath.split("/");
+        for (let i = 1; i < parts.length; i++) {
+          allDirs.add(parts.slice(0, i).join("/"));
+        }
+      }
+
+      // 生成目录 stat + readdir
+      for (const dir of allDirs) {
+        const abs = dir ? path.join(claudeRoot, dir) : claudeRoot;
+        const children = this.collectDirectChildren(dir, allDirs, Object.keys(homeEntries));
+        entries.push({
+          path: abs,
+          stat: makeDirStat(),
+          entries: Array.from(children).sort(),
+        });
+      }
+
+      // 生成文件 stat + data
+      for (const [relPath, entry] of Object.entries(homeEntries)) {
+        const abs = path.join(claudeRoot, relPath);
+        entries.push(this.cacheEntryToSnapshot(abs, entry, "claude-home", relPath));
+      }
+    }
+
+    return entries;
+  }
+
+  private cacheEntryToSnapshot(
+    absPath: string,
+    entry: import("./protocol.js").CacheEntry,
+    _scope: CacheScope,
+    _relPath: string,
+  ): FileProxySnapshotEntry {
+    let data: string | undefined;
+    if (!entry.skipped && entry.sha256 && this.cacheAvailable()) {
+      const buf = this.cacheStore!.readBlobSync(this.deviceId!, this.clientCwd, entry.sha256);
+      if (buf) {
+        data = buf.toString("base64");
+      }
+      // blob 缺失（被删 / 损坏）时不带 data，FUSE read 时会穿透 Client
+    }
+    return {
+      path: absPath,
+      stat: makeFileStat(entry.size, entry.mtime),
+      data,
+    };
+  }
+
+  /**
+   * 尝试从 cache 返回一次 FUSE read。命中返回 true（已写回 FUSE daemon），
+   * 未命中返回 false（调用方继续穿透 Client）。
+   */
+  private async tryServeReadFromCache(req: FuseRequest): Promise<boolean> {
+    if (!this.cacheStore || !this.deviceId) return false;
+    const scope = rootToCacheScope(req.root);
+    if (!scope) return false;
+
+    const cacheRelPath = toCacheRelPath(scope, req.relPath);
+    const entry = await this.cacheStore.lookupEntry(
+      this.deviceId,
+      this.clientCwd,
+      scope,
+      cacheRelPath,
+    );
+    if (!entry || entry.skipped || !entry.sha256) return false;
+
+    const buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
+    if (!buf) return false;
+
+    const offset = req.offset ?? 0;
+    const size = req.size ?? buf.byteLength;
+    const slice = buf.subarray(offset, Math.min(offset + size, buf.byteLength));
+    this.writeToDaemon({
+      reqId: req.reqId,
+      data: slice.toString("base64"),
+    });
+    return true;
+  }
+
+  /** 列出 dir 下的直接子项（子目录名 + 直接子文件名） */
+  private collectDirectChildren(
+    dir: string,
+    allDirs: Set<string>,
+    filePaths: string[],
+  ): Set<string> {
+    const children = new Set<string>();
+    const prefix = dir ? `${dir}/` : "";
+
+    for (const other of allDirs) {
+      if (other === dir) continue;
+      if (!other.startsWith(prefix)) continue;
+      const remainder = other.slice(prefix.length);
+      if (remainder && !remainder.includes("/")) children.add(remainder);
+    }
+    for (const filePath of filePaths) {
+      if (!filePath.startsWith(prefix)) continue;
+      const remainder = filePath.slice(prefix.length);
+      if (remainder && !remainder.includes("/")) children.add(remainder);
+    }
+    return children;
   }
 
   private sendSnapshotRequest(
@@ -438,6 +631,14 @@ export class FileProxyManager {
       return;
     }
 
+    // 运行时 cache 读优先：对 read op 在 home-claude / home-claude-json 命中
+    // blob 时直接从 Server 侧返回，不穿透 Client。
+    // Python FUSE daemon 也会在本地 snapshot 缓存中查（启动时预热过），所以
+    // 正常情况下这条路径只在 Python cache 被失效时才会触发，作为兜底。
+    if (req.op === "read" && this.cacheAvailable() && await this.tryServeReadFromCache(req)) {
+      return;
+    }
+
     // 构建 Client 侧绝对路径
     const clientPath = relPath ? path.join(clientRoot, relPath) : clientRoot;
 
@@ -550,6 +751,54 @@ export class FileProxyManager {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 把 FUSE 的 root 名转成 cache scope 名。
+ * project-claude 不走 cache（项目级文件频繁变更，穿透 Client 就行），返回 null。
+ */
+function rootToCacheScope(root: string): CacheScope | null {
+  if (root === "home-claude") return "claude-home";
+  if (root === "home-claude-json") return "claude-json";
+  return null;
+}
+
+/**
+ * FUSE 请求的 relPath → cache store 使用的 relPath。
+ * claude-json scope 下，FUSE 的 relPath 总是 ""；cache store 也用 ""。
+ * claude-home scope 直接透传。
+ */
+function toCacheRelPath(scope: CacheScope, fuseRelPath: string): string {
+  if (scope === "claude-json") return "";
+  return fuseRelPath;
+}
+
+/** 合成一个目录 stat，供从 manifest 构造 snapshot 时使用。 */
+function makeDirStat(): FileProxyStat {
+  return {
+    mode: 0o755,
+    size: 0,
+    mtime: Math.floor(Date.now() / 1000),
+    atime: Math.floor(Date.now() / 1000),
+    uid: process.getuid ? process.getuid()! : 0,
+    gid: process.getgid ? process.getgid()! : 0,
+    isDir: true,
+  };
+}
+
+/** 从 manifest 的 size + mtime 合成文件 stat。 */
+function makeFileStat(size: number, mtime: number): FileProxyStat {
+  // cache manifest 的 mtime 是毫秒；FileProxyStat 使用秒
+  const mtimeSec = Math.floor(mtime / 1000);
+  return {
+    mode: 0o644,
+    size,
+    mtime: mtimeSec,
+    atime: mtimeSec,
+    uid: process.getuid ? process.getuid()! : 0,
+    gid: process.getgid ? process.getgid()! : 0,
+    isDir: false,
+  };
 }
 
 function statToFuseFormat(st: import("./protocol.js").FileProxyStat): Record<string, unknown> {

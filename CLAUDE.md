@@ -298,6 +298,14 @@ hooks: {
 - 失败策略：缓存同步失败不阻塞 PTY session 启动——降级为"无 Server 缓存"，FUSE 读请求仍可穿透回 Client
 - Integration 测试通过 `CERELAY_DISABLE_INITIAL_CACHE_SYNC=true` 跳过该流程，避免 mock server 需要模拟该协议
 
+**FUSE 读路径与 cache 协同**（`server/src/file-proxy-manager.ts`）：
+
+- `create_pty_session` 会把 Client 的 `deviceId` 带给 Server；`FileProxyManager` 收到 `cacheStore + deviceId` 后启用 cache 读优先
+- 启动时 `collectAndWriteSnapshot` 对 `home-claude` / `home-claude-json` **优先从 cache 构造 snapshot**（`buildSnapshotFromManifest`），不再向 Client 发全量 snapshot 请求；`project-claude` 因为不在 cache 覆盖范围仍然穿透 Client
+- 运行时 `handleFuseLine` 的 `read` op 会先调用 `tryServeReadFromCache`：命中 blob 直接写回 FUSE daemon；miss 或 skipped 文件 fallback 到原穿透路径
+- cache 未启用（Client 未上报 deviceId / 未提供 cacheStore）时退化为纯穿透模式，行为与未接入 cache 时完全一致
+- cache 新鲜度：短期内依赖"下次启动时的增量握手 push"来修正；未来若需要 session 运行期内双向同步（watcher + `cache_delta`）再扩展
+
 ## 依赖关系 / Dependencies
 
 ### Server

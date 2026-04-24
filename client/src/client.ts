@@ -128,6 +128,7 @@ export class CerelayClient {
       colorTerm: process.env.COLORTERM,
       termProgram: process.env.TERM_PROGRAM,
       termProgramVersion: process.env.TERM_PROGRAM_VERSION,
+      deviceId: this.deviceId,
     };
     await this.writeJSON(msg);
     const sessionId = await this.waitForPtySessionReady();
