@@ -115,7 +115,7 @@ npm run server:logs        # 查看日志
 npm run server:down        # 停止容器
 ```
 
-容器会自动挂载 `~/.claude/.credentials.json` 作为 Claude Code 登录态，并写入 onboarding 标记跳过首次向导。
+容器使用 `cerelay-data` named volume 持久化登录凭证（`/var/lib/cerelay/credentials/default/.credentials.json`）。首次启动凭证为空，连上 Client 后执行 `claude login` 即可，凭证会自动写入 volume 并在后续重启中保留。
 
 也可通过环境变量覆盖：
 
@@ -283,13 +283,12 @@ export CERELAY_KEY=my-secret
 
 ### Claude Code 登录态
 
-容器内的 Claude Code 需要登录态才能工作。两种方式：
+容器内 Claude Code 的登录凭证由 `cerelay-data` named volume 持久化，路径：`/var/lib/cerelay/credentials/default/.credentials.json`（容器内）。
 
-1. **文件挂载**（默认）：自动挂载 `~/.claude/.credentials.json` 到容器
-2. **环境变量**：通过 `CLAUDE_CREDENTIALS` 传入凭证 JSON
+- **推荐方式**：首次启动容器 → 连接 Client → 在 Client 中执行 `claude login` 完成登录；凭证会通过 FUSE shadow file 写入并持久化到 volume，重启容器不需要重新登录。
+- **可选 seed**：通过 `CLAUDE_CREDENTIALS` 环境变量一次性写入凭证 JSON：
 
 ```bash
-# 方式 2：环境变量
 CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
 ```
 
@@ -297,20 +296,18 @@ CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
 
 透明 SOCKS5 代理是**容器级**能力，不是 session 级能力。一个容器只能稳定对应一套代理出口，因此多账号应部署为多个并列容器实例，而不是 Docker-in-Docker。
 
-推荐做法：
+推荐做法：每个账号用独立的 `COMPOSE_PROJECT_NAME`，docker-compose 会为每个 project 生成独立的 `cerelay-data` volume，凭证彼此隔离。
 
 ```bash
 # 账号 A
 COMPOSE_PROJECT_NAME=cerelay-a \
 SERVER_HOST_PORT=8765 \
-CLAUDE_CREDENTIALS_PATH=/srv/claude/a/.credentials.json \
 CERELAY_SOCKS_PROXY=socks5://userA:passA@proxy-a.example.com:1080 \
 npm run server:up
 
 # 账号 B
 COMPOSE_PROJECT_NAME=cerelay-b \
 SERVER_HOST_PORT=8766 \
-CLAUDE_CREDENTIALS_PATH=/srv/claude/b/.credentials.json \
 CERELAY_SOCKS_PROXY=socks5://userB:passB@proxy-b.example.com:1080 \
 npm run server:up
 ```
@@ -389,7 +386,8 @@ cd web && npm test
 | `CERELAY_SOCKS_UDP` | `forward` | UDP 策略：`forward` 继续放行，`block` 显式拒绝非 DNS UDP |
 | `CERELAY_SOCKS_TUN_ADDRESS` | `172.19.0.1/30` | sing-box TUN 地址段 |
 | `CERELAY_SOCKS_TUN_MTU` | `9000` | sing-box TUN MTU |
-| `CLAUDE_CREDENTIALS` | — | Claude Code 登录凭证 JSON（替代文件挂载） |
+| `CLAUDE_CREDENTIALS` | — | 可选：seed 登录凭证 JSON（写入 Data volume） |
+| `CERELAY_DATA_DIR` | `/var/lib/cerelay` | 容器内持久化数据目录（凭证 + Client 缓存） |
 | `ANTHROPIC_API_KEY` | — | Claude API Key |
 | `HTTP_PROXY` | — | Client 连接 ws:// 目标时使用的代理 |
 | `HTTPS_PROXY` | — | Client 连接 wss:// 目标时使用的代理 |

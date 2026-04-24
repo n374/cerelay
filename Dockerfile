@@ -72,7 +72,9 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
   && mkdir -p /opt/cerelay-runtime \
   && mkdir -p /etc/sing-box \
   && mkdir -p /home/node/.claude \
-  && chown -R root:root /app /home/node /opt/cerelay-runtime
+  && mkdir -p /var/lib/cerelay/credentials/default \
+  && mkdir -p /var/lib/cerelay/client-cache \
+  && chown -R root:root /app /home/node /opt/cerelay-runtime /var/lib/cerelay
 
 # 暴露 WebSocket 端口（默认 8765）
 EXPOSE 8765

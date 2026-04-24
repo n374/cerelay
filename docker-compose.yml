@@ -41,17 +41,20 @@ services:
       - CERELAY_SOCKS_DNS_SERVER=${CERELAY_SOCKS_DNS_SERVER:-1.1.1.1}
       - CERELAY_SOCKS_TUN_ADDRESS=${CERELAY_SOCKS_TUN_ADDRESS:-172.19.0.1/30}
       - CERELAY_SOCKS_TUN_MTU=${CERELAY_SOCKS_TUN_MTU:-9000}
+      # 容器持久化数据目录：凭证与 Client 缓存均存放于此
+      - CERELAY_DATA_DIR=${CERELAY_DATA_DIR:-/var/lib/cerelay}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
       - "${SERVER_HOST_PORT:-8765}:${SERVER_PORT:-8765}"
 
-    # Claude Code 登录态：挂载宿主机凭证文件（可写，namespace 内修改需回写到 Server 侧文件）
-    # 也可通过 CLAUDE_CREDENTIALS 环境变量传入 JSON 内容代替挂载
+    # 容器持久化数据：Claude Code 登录凭证、Client 文件缓存
+    # 首次启动 credentials 为空，用户通过 Client 发起 `claude login` 之后产生的凭证
+    # 由 FUSE shadow file 落到 /var/lib/cerelay/credentials/default/.credentials.json 并持久化
     volumes:
-      - type: bind
-        source: ${CLAUDE_CREDENTIALS_PATH:-${HOME}/.claude/.credentials.json}
-        target: /home/node/.claude/.credentials.json
+      - type: volume
+        source: cerelay-data
+        target: /var/lib/cerelay
 
     cap_add:
       - SYS_ADMIN
@@ -90,3 +93,7 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+volumes:
+  cerelay-data:
+    driver: local

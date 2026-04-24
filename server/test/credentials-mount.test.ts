@@ -66,19 +66,26 @@ test("bootstrap script in FUSE mode binds home-claude from FUSE mount point", ()
   );
 });
 
-test("bootstrap script no longer marks mounted credentials file as read-only in compose", async () => {
+test("docker-compose persists cerelay-data volume instead of bind-mounting credentials", async () => {
   const composePath = path.resolve(testFileDir, "..", "..", "docker-compose.yml");
   const compose = await readFile(composePath, "utf8");
 
+  // 新架构：named volume 持久化 /var/lib/cerelay，凭证由 FUSE shadow file 落到 volume
   assert.match(
     compose,
-    /target:\s*\/home\/node\/\.claude\/\.credentials\.json/,
-    "compose 应继续挂载 credentials 文件"
+    /source:\s*cerelay-data/,
+    "compose 应声明 cerelay-data named volume"
   );
+  assert.match(
+    compose,
+    /target:\s*\/var\/lib\/cerelay/,
+    "compose 应把 cerelay-data 挂载到 /var/lib/cerelay"
+  );
+  // 旧架构的宿主机 credentials bind-mount 必须被移除
   assert.doesNotMatch(
     compose,
-    /read_only:\s*true/,
-    "compose 不应再将 credentials mount 标记为只读"
+    /target:\s*\/home\/node\/\.claude\/\.credentials\.json/,
+    "compose 不应再 bind-mount 宿主机 .credentials.json"
   );
 });
 
@@ -121,36 +128,49 @@ test("FileProxyManager without shadowFiles defaults to empty", () => {
 // 场景 3: 凭证 shadow file 注入逻辑（模拟 server.ts 中的条件判断）
 // ============================================================
 
-test("credentials shadow file is added when .credentials.json exists", async (t) => {
+test("credentials shadow file is always injected regardless of file existence", async (t) => {
+  // 新架构：凭证存放在 Data 目录（/var/lib/cerelay/credentials/default/.credentials.json），
+  // 首次启动文件不存在是允许的——CC login 时 FUSE create 会创建它。
+  // 因此 shadow file 映射必须总是注入，不得用 existsSync 跳过。
   const tempDir = await mkdir(path.join(tmpdir(), `cred-test-${Date.now()}`), { recursive: true });
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  // 模拟容器内凭证文件存在
-  const credPath = path.join(tempDir, ".credentials.json");
-  await writeFile(credPath, JSON.stringify({ claudeAiOauth: { token: "test" } }), "utf8");
+  const credentialsDir = path.join(tempDir, "credentials", "default");
+  await mkdir(credentialsDir, { recursive: true });
+  const credPath = path.join(credentialsDir, ".credentials.json");
 
-  // 复现 server.ts 中的条件逻辑
-  const shadowFiles: Record<string, string> = {};
-  const containerCredPath = credPath;
-  if (existsSync(containerCredPath)) {
-    shadowFiles["home-claude/.credentials.json"] = containerCredPath;
-  }
+  // 复现 server.ts 中的新逻辑：总是注入，不依赖 existsSync
+  const shadowFilesCase1: Record<string, string> = {};
+  shadowFilesCase1["home-claude/.credentials.json"] = credPath;
 
-  assert.deepEqual(shadowFiles, {
+  assert.deepEqual(shadowFilesCase1, {
     "home-claude/.credentials.json": credPath,
-  }, "凭证文件存在时应添加 shadow file 映射");
+  }, "凭证不存在时也必须注入 shadow file 映射（FUSE create 会在 shadow 路径创建新文件）");
+
+  // 凭证存在的情况下也应注入
+  await writeFile(credPath, JSON.stringify({ claudeAiOauth: { token: "test" } }), "utf8");
+  const shadowFilesCase2: Record<string, string> = {};
+  shadowFilesCase2["home-claude/.credentials.json"] = credPath;
+  assert.deepEqual(shadowFilesCase2, {
+    "home-claude/.credentials.json": credPath,
+  }, "凭证存在时也应注入相同映射");
 });
 
-test("credentials shadow file is NOT added when .credentials.json does not exist", () => {
-  const shadowFiles: Record<string, string> = {};
-  const containerCredPath = "/nonexistent/path/.credentials.json";
-  if (existsSync(containerCredPath)) {
-    shadowFiles["home-claude/.credentials.json"] = containerCredPath;
-  }
+test("credentials shadow file targets Data directory path", () => {
+  // 新架构要求：shadow file 映射到 ${CERELAY_DATA_DIR}/credentials/default/.credentials.json
+  const dataDir = "/var/lib/cerelay";
+  const credentialsPath = path.join(dataDir, "credentials", "default", ".credentials.json");
+  const shadowFiles: Record<string, string> = {
+    "home-claude/.credentials.json": credentialsPath,
+  };
 
-  assert.deepEqual(shadowFiles, {}, "凭证文件不存在时不应添加 shadow file");
+  assert.equal(
+    shadowFiles["home-claude/.credentials.json"],
+    "/var/lib/cerelay/credentials/default/.credentials.json",
+    "凭证 shadow file 必须落到 Data 目录中的默认用户子目录",
+  );
 });
 
 test("PTY session combines hook injection and credentials shadow files", async (t) => {
@@ -159,19 +179,19 @@ test("PTY session combines hook injection and credentials shadow files", async (
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  const credPath = path.join(tempDir, ".credentials.json");
+  const credentialsDir = path.join(tempDir, "credentials", "default");
+  await mkdir(credentialsDir, { recursive: true });
+  const credPath = path.join(credentialsDir, ".credentials.json");
   const settingsPath = path.join(tempDir, "settings.local.json");
-  await writeFile(credPath, '{"token":"x"}', "utf8");
   await writeFile(settingsPath, '{"hooks":{}}', "utf8");
+  // 凭证文件可以不存在：新架构下 shadow file 总是注入，由 CC login 触发创建
 
-  // 复现 PTY session 创建逻辑：同时注入 hook settings 和 credentials
+  // 复现 PTY session 创建逻辑：注入 hook settings（条件）+ 凭证（无条件）
   const shadowFiles: Record<string, string> = {};
   if (existsSync(settingsPath)) {
     shadowFiles["project-claude/settings.local.json"] = settingsPath;
   }
-  if (existsSync(credPath)) {
-    shadowFiles["home-claude/.credentials.json"] = credPath;
-  }
+  shadowFiles["home-claude/.credentials.json"] = credPath;
 
   assert.deepEqual(shadowFiles, {
     "project-claude/settings.local.json": settingsPath,

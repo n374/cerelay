@@ -169,6 +169,15 @@ start_socks_tun
 CLAUDE_CONFIG_DIR="${HOME}/.claude"
 mkdir -p "${CLAUDE_CONFIG_DIR}"
 
+# Data 目录：默认 /var/lib/cerelay，由 docker-compose 的 named volume 持久化
+# 结构：
+#   /var/lib/cerelay/credentials/default/   —— 默认用户的凭证（.credentials.json 由 login 产生）
+#   /var/lib/cerelay/client-cache/          —— 后续 commit 实现的 Client 文件缓存
+CERELAY_DATA_DIR="${CERELAY_DATA_DIR:-/var/lib/cerelay}"
+CERELAY_CREDENTIALS_DIR="${CERELAY_DATA_DIR}/credentials/default"
+mkdir -p "${CERELAY_CREDENTIALS_DIR}"
+mkdir -p "${CERELAY_DATA_DIR}/client-cache"
+
 # 写入 onboarding 标记，防止 Claude Code 进入首次安装向导
 # 使用 node 合并而非覆盖，保留已有字段
 node -e "
@@ -181,14 +190,18 @@ obj.installMethod = 'native';
 fs.writeFileSync(p, JSON.stringify(obj) + '\n');
 "
 
-# 登录凭证：优先通过 CLAUDE_CREDENTIALS 环境变量注入，否则依赖 bind mount
+# 登录凭证：由 FUSE shadow file 将 Claude Code 写入的 ~/.claude/.credentials.json
+# 实际落到 ${CERELAY_CREDENTIALS_DIR}/.credentials.json 持久化保存。
+# 启动时凭证可为空，用户首次连接后通过 Client 发起 `claude login` 即可生成。
+# 兼容通道：允许通过 CLAUDE_CREDENTIALS 环境变量（JSON 字符串）种入初始凭证。
+CERELAY_CREDENTIALS_FILE="${CERELAY_CREDENTIALS_DIR}/.credentials.json"
 if [ -n "${CLAUDE_CREDENTIALS}" ]; then
-  printf '%s\n' "${CLAUDE_CREDENTIALS}" > "${CLAUDE_CONFIG_DIR}/.credentials.json"
-  info "已通过 CLAUDE_CREDENTIALS 环境变量写入登录凭证"
-elif [ -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
-  info "检测到已挂载的 Claude Code 登录凭证"
+  printf '%s\n' "${CLAUDE_CREDENTIALS}" > "${CERELAY_CREDENTIALS_FILE}"
+  info "已通过 CLAUDE_CREDENTIALS 环境变量写入登录凭证至 ${CERELAY_CREDENTIALS_FILE}"
+elif [ -f "${CERELAY_CREDENTIALS_FILE}" ]; then
+  info "检测到已持久化的 Claude Code 登录凭证（${CERELAY_CREDENTIALS_FILE}）"
 else
-  warn "未找到 Claude Code 登录凭证（~/.claude/.credentials.json），Claude CLI 可能无法认证"
+  info "未找到 Claude Code 登录凭证，首次使用请在 Client 中执行 \`claude login\`"
 fi
 
 # 如果提供了 CLAUDE_CONFIG（JSON 字符串），写入配置文件

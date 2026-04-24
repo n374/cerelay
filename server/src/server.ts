@@ -12,8 +12,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import path from "node:path";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import type {
@@ -604,11 +605,15 @@ export class CerelayServer {
       if (hookInjection.settingsPath) {
         shadowFiles["project-claude/settings.local.json"] = hookInjection.settingsPath;
       }
-      // 容器内凭证文件作为 shadow file 注入 FUSE，确保 namespace 内可见
-      const containerCredPath = (process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude") + "/.credentials.json";
-      if (existsSync(containerCredPath)) {
-        shadowFiles["home-claude/.credentials.json"] = containerCredPath;
-      }
+      // 容器内凭证文件作为 shadow file 注入 FUSE，确保 namespace 内可见。
+      // 凭证存放于 Data 目录（默认 /var/lib/cerelay/credentials/default/.credentials.json），
+      // 由 docker-compose named volume 持久化。
+      // 首次启动文件不存在是允许的：CC `login` 时 FUSE create 会在 shadow 路径创建新文件。
+      // 所以这里必须总是注入映射，不能用 existsSync 跳过——否则写入会穿透到 Client，违背隔离约束。
+      const dataDir = process.env.CERELAY_DATA_DIR?.trim() || "/var/lib/cerelay";
+      const credentialsDir = path.join(dataDir, "credentials", "default");
+      mkdirSync(credentialsDir, { recursive: true });
+      shadowFiles["home-claude/.credentials.json"] = path.join(credentialsDir, ".credentials.json");
       fileProxy = new FileProxyManager({
         runtimeRoot,
         clientHomeDir: message.homeDir || process.env.HOME || "/home/node",

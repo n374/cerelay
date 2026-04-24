@@ -70,8 +70,8 @@ npm start -- --server 192.168.1.100:8765
 | `MODEL` | `claude-sonnet-4-20250514` | 使用的 Claude 模型 |
 | `BRAIN_HOST_PORT` | `8765` | 宿主机映射端口（仅 docker-compose） |
 | `CLAUDE_CONFIG` | 空 | claude CLI 额外配置（JSON 字符串） |
-| `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | 宿主机 Claude 配置目录挂载源 |
-| `CLAUDE_JSON_PATH` | `${HOME}/.claude.json` | 宿主机 Claude 登录态文件挂载源 |
+| `CLAUDE_CREDENTIALS` | 空 | 可选：首次 seed 的登录凭证 JSON 字符串（会写入 Data 目录） |
+| `CERELAY_DATA_DIR` | `/var/lib/cerelay` | 容器内持久化数据目录（挂载自 `cerelay-data` volume） |
 | `AXON_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 per-session mount namespace runtime |
 | `AXON_NAMESPACE_RUNTIME_ROOT` | `/opt/axon-runtime` | 容器内 session runtime 根目录 |
 
@@ -102,11 +102,14 @@ docker rm axon-brain
 
 ## 数据持久化 / Persistence
 
-docker-compose 配置了 `claude_config` 卷挂载到容器内的 `/home/node/.claude`，用于持久化 claude CLI 的登录状态和配置，避免每次重启容器后重新认证。
+docker-compose 通过 named volume `cerelay-data` 把 `/var/lib/cerelay` 持久化。该目录结构如下：
 
-此外还会把宿主机的 `~/.claude.json` 挂载到容器内 `/home/node/.claude.json`，因为部分 Claude Code 登录态存放在该文件中。
+- `/var/lib/cerelay/credentials/default/.credentials.json` —— 默认用户的 Claude Code 登录凭证；首次启动为空，用户通过 Client 发起 `claude login` 之后由 FUSE shadow file 写入并保留。
+- `/var/lib/cerelay/client-cache/<deviceId>/<cwdHash>/` —— 预留给 Client 文件同步缓存（按设备 ID + 工作目录路径隔离）。
 
-The docker-compose config mounts the host `~/.claude` directory to `/home/node/.claude` inside the container, and also mounts `~/.claude.json` to `/home/node/.claude.json`, because part of the Claude Code login state is stored in that file.
+与早期版本不同，**不再** bind-mount 宿主机 `~/.claude/.credentials.json` 或 `~/.claude.json` 到容器。凭证由容器自己管理、由 volume 持久化。
+
+The docker-compose config uses a named volume `cerelay-data` to persist `/var/lib/cerelay`. The `credentials/default/.credentials.json` file is populated by Claude Code login (via FUSE shadow file) and survives container restarts. Unlike earlier versions, the host `~/.claude` is no longer bind-mounted into the container.
 
 此外，默认 compose 配置会启用 per-session mount namespace runtime。每次创建 session 时，Brain 会在容器内创建独立的 Claude runtime，并把 Hand 上报的 `HOME` / `cwd` 视图投影进去，再在该 runtime 中启动 Claude Code。
 
@@ -118,13 +121,13 @@ This setup also enables a per-session mount namespace runtime by default. For ea
 - 用户文件系统访问必须通过 `PreToolUse` hook 转发到 Client 执行。`Bash`、`Read`、`Write`、`Edit`、`MultiEdit`、`Grep`、`Glob` 应使用 Client 的真实 cwd 和真实绝对路径语义。
 - 不要把 Client 的项目根目录、Client 根目录或宿主机 `/` 通过 FUSE/bind mount 暴露给 CC。项目源码、cwd 上级目录和其他系统路径的读写能力来自 Client-routed tools。
 - FUSE file proxy 只投影 Claude 运行配置：`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`，其中 `{cwd}/.claude/settings.local.json` 必须保留用于注入 Axon 的 `PreToolUse` hook。
-- Server 容器自己的 `.credentials.json` 必须以 `home-claude/.credentials.json` shadow file 形式出现在 runtime 中；读、写、truncate 都必须落到 Server 侧本地凭证文件，而不是转发给 Client。
+- Server 侧凭证必须以 `home-claude/.credentials.json` shadow file 形式出现在 runtime 中；读、写、truncate 都必须落到 `${CERELAY_DATA_DIR}/credentials/default/.credentials.json`，而不是转发给 Client。首次启动凭证文件可为空，CC `login` 时由 FUSE create 创建——因此 shadow file 映射必须**总是注入**，不得因为文件不存在而跳过。
 
 ## Namespace 前置条件 / Namespace Prerequisites
 
 - 容器需要 `SYS_ADMIN` capability
 - 镜像内需要 `util-linux`，以提供 `unshare` / `nsenter`
-- `~/.claude` 与 `~/.claude.json` 仍需挂载到容器，作为共享 Claude 配置源
+- 登录凭证由 `cerelay-data` volume 持久化，不再需要从宿主机挂载 `~/.claude`
 
 如果这些条件不满足，可以把 `AXON_ENABLE_MOUNT_NAMESPACE=false`，Brain 会回退到普通目录 runtime。
 
