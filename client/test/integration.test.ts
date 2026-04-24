@@ -11,6 +11,11 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const CLIENT_WORKDIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// 这批 integration 测试使用 fake brain，不模拟 cache_handshake/cache_push_ack。
+// 开启 env var 跳过启动缓存同步，避免 60s 等待超时。真正的 cache sync 路径由
+// test/cache-sync.test.ts 独立覆盖。
+process.env.CERELAY_DISABLE_INITIAL_CACHE_SYNC = "true";
+
 test("PTY mode executes remote tool calls while terminal passthrough is active", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-pty-"));
   const brain = await startFakeBrain();

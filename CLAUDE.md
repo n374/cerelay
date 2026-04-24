@@ -278,6 +278,26 @@ hooks: {
 - 支持交互式命令（如 `git`, `npm` 交互式提示）
 - 通过 host script 与 Client 交互
 
+### 5. Client 文件缓存 / Client File Cache
+
+**文件**: `server/src/client-cache-store.ts`, `client/src/cache-sync.ts`, `client/src/device-id.ts`
+
+- 目标：降低 Client 每次连接的启动开销，避免把 `~/.claude/` 整棵目录完整重传
+- 存储：`${CERELAY_DATA_DIR}/client-cache/<deviceId>/<cwdHash>/`
+  - `manifest.json`：按 scope（`claude-home` / `claude-json`）记录 `path → {size, mtime, sha256, skipped}`
+  - `blobs/<sha256>`：实际内容，内容寻址、天然去重
+- `deviceId`：Client 首次启动生成 UUIDv4，持久化到 `~/.config/cerelay/device-id`；Server 侧按 (deviceId, cwdHash) 隔离缓存，因此同一设备切换 cwd 不会互相污染
+- 协议（见 `server/src/protocol.ts` 的 Cache* 类型）：
+  1. Client → Server：`cache_handshake { deviceId, cwd, scopes }`
+  2. Server → Client：`cache_manifest` 返回当前持久化的元数据
+  3. Client 扫本地 → 对比 → 只推送差异：`cache_push { adds, deletes, truncated? }`
+  4. Server → Client：`cache_push_ack`
+- 大小限制：
+  - 单文件 > 1MB（`MAX_FILE_BYTES`）：标记 `skipped`，仅同步元数据
+  - 单 scope 累计 > 100MB（`MAX_SCOPE_BYTES`）：按 mtime 倒序截断，后面的文件完全丢弃，manifest 记录 `truncated: true` 用于诊断
+- 失败策略：缓存同步失败不阻塞 PTY session 启动——降级为"无 Server 缓存"，FUSE 读请求仍可穿透回 Client
+- Integration 测试通过 `CERELAY_DISABLE_INITIAL_CACHE_SYNC=true` 跳过该流程，避免 mock server 需要模拟该协议
+
 ## 依赖关系 / Dependencies
 
 ### Server

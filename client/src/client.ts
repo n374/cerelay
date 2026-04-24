@@ -11,7 +11,11 @@ import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.j
 import { FileProxyHandler } from "./file-proxy.js";
 import { UI } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
+import { getOrCreateDeviceId } from "./device-id.js";
+import { performInitialCacheSync } from "./cache-sync.js";
 import type {
+  CacheHandshake,
+  CachePush,
   CreatePtySession,
   FileProxyRequest,
   PtyExit,
@@ -42,6 +46,13 @@ export class CerelayClient {
   private fileProxy: FileProxyHandler;
   private ptySessionId = "";
   private writeChain: Promise<void> = Promise.resolve();
+  /**
+   * 本机设备 ID，用于 Server 侧文件缓存按 (deviceId, cwd) 隔离。
+   * 在构造时读取/生成并持久化到 ~/.config/cerelay/device-id。
+   */
+  private readonly deviceId: string;
+  /** 启动时缓存同步只做一次，避免 reconnect 场景下重复上传 */
+  private cacheSyncDone = false;
 
   constructor(serverURL: string, cwd: string, options: ClientOptions = {}) {
     this.serverURL = serverURL;
@@ -49,6 +60,7 @@ export class CerelayClient {
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
     this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
+    this.deviceId = getOrCreateDeviceId();
   }
 
   connect(): Promise<void> {
@@ -99,6 +111,9 @@ export class CerelayClient {
   }
 
   async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
+    // 启动前先做一次文件缓存同步：只在本次 client 生命周期内执行一次，
+    // 失败不阻塞 session 创建（降级为"无 Server 缓存"，FUSE 仍可穿透到 Client）。
+    await this.ensureInitialCacheSync(cwd);
     await this.resetExecutor(cwd);
     const projectClaudeSettingsLocalContent = await readProjectClaudeSettingsLocal(cwd);
     const msg: CreatePtySession = {
@@ -439,6 +454,97 @@ export class CerelayClient {
       stdin.on("data", onInput);
       stdout.on("resize", onResize);
       onResize();
+    });
+  }
+
+  /**
+   * 启动时的 cache 同步入口。
+   *
+   * - 失败不抛：缓存同步失败只是导致启动慢一点，不应让用户无法使用
+   * - 整个流程期间独占 activeMessageConsumer，因为此时 PTY session 尚未创建，
+   *   FUSE 请求通过独立 fast path (`tryHandleFileProxyFromRaw`) 处理，不会被借走
+   */
+  private async ensureInitialCacheSync(cwd: string): Promise<void> {
+    if (this.cacheSyncDone) return;
+    if (process.env.CERELAY_DISABLE_INITIAL_CACHE_SYNC === "true") {
+      // 测试场景：mock server 不响应 cache_handshake，直接跳过避免超时
+      log.debug("CERELAY_DISABLE_INITIAL_CACHE_SYNC=true，跳过启动缓存同步");
+      this.cacheSyncDone = true;
+      return;
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      log.warn("WebSocket 未就绪，跳过缓存同步");
+      return;
+    }
+
+    try {
+      const summaries = await performInitialCacheSync(
+        {
+          sendMessage: (msg: CacheHandshake | CachePush) => this.writeJSON(msg),
+          waitForServerMessage: <T>(predicate: (raw: string) => T | null, timeoutMs: number) =>
+            this.waitForSpecificMessage<T>(predicate, timeoutMs),
+          homedir: os.homedir(),
+        },
+        {
+          deviceId: this.deviceId,
+          cwd,
+        },
+      );
+      for (const s of summaries) {
+        log.info("启动缓存同步完成", {
+          scope: s.scope,
+          pushed: s.pushed,
+          deleted: s.deleted,
+          skippedLarge: s.skippedLarge,
+          truncated: s.truncated,
+          totalLocal: s.totalLocal,
+          error: s.error,
+        });
+      }
+      this.cacheSyncDone = true;
+    } catch (err) {
+      log.warn("启动缓存同步异常，降级继续", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * 临时订阅一条符合 predicate 的消息。超时会 reject。
+   *
+   * - 命中 predicate 的消息被消费；其他消息回流到 pendingMessages
+   * - consumer 独占期间，FUSE 请求仍由 fast path 拦截，不受影响
+   */
+  private waitForSpecificMessage<T>(
+    predicate: (raw: string) => T | null,
+    timeoutMs: number,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error("WebSocket 未连接"));
+        return;
+      }
+
+      let release: (() => void) | null = null;
+      const timer = setTimeout(() => {
+        release?.();
+        reject(new Error(`等待 Server 消息超时（${timeoutMs}ms）`));
+      }, timeoutMs);
+
+      const onMessage = (raw: string) => {
+        const matched = predicate(raw);
+        if (matched !== null) {
+          clearTimeout(timer);
+          release?.();
+          resolve(matched);
+          return;
+        }
+        // 非目标消息回流到 pending 队列，等后续 consumer 处理
+        this.pendingMessages.push(raw);
+      };
+
+      release = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
     });
   }
 

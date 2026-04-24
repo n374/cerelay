@@ -18,6 +18,10 @@ import path from "node:path";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import type {
+  CacheHandshake,
+  CacheManifest,
+  CachePush,
+  CachePushAck,
   Connected,
   CloseSession,
   CreatePtySession,
@@ -28,6 +32,7 @@ import type {
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
+import { CACHE_SCOPES, ClientCacheStore } from "./client-cache-store.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
 import { StatsCollector } from "./stats.js";
@@ -75,6 +80,13 @@ export class CerelayServer {
   private readonly stats = new StatsCollector();
   private readonly toolRouting = new ToolRoutingStore();
   private readonly tokenCleanupTimer: NodeJS.Timeout;
+  /**
+   * Client 文件缓存存储（Data 目录持久化）。
+   * 在构造时固定 dataDir，后续 handshake/push 都复用这一个实例。
+   */
+  private readonly cacheStore = new ClientCacheStore({
+    dataDir: process.env.CERELAY_DATA_DIR?.trim() || "/var/lib/cerelay",
+  });
 
   // HTTP/WS 基础设施
   private readonly httpServer = createServer(this.handleHttpRequest.bind(this));
@@ -549,6 +561,12 @@ export class CerelayServer {
         case "close_session":
           await this.handleCloseSession(clientId, JSON.parse(raw) as CloseSession);
           return;
+        case "cache_handshake":
+          await this.handleCacheHandshake(clientId, JSON.parse(raw) as CacheHandshake);
+          return;
+        case "cache_push":
+          await this.handleCachePush(clientId, JSON.parse(raw) as CachePush);
+          return;
         default:
           throw new Error(`未知消息类型: ${envelope.type}`);
       }
@@ -797,6 +815,85 @@ export class CerelayServer {
     }
     this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
     log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
+  }
+
+  // ============================================================
+  // Client 文件缓存
+  // ============================================================
+
+  private async handleCacheHandshake(clientId: string, message: CacheHandshake): Promise<void> {
+    const requested = new Set(message.scopes?.length ? message.scopes : CACHE_SCOPES);
+    const manifests = {
+      "claude-home": { entries: {} },
+      "claude-json": { entries: {} },
+    } as CacheManifest["manifests"];
+
+    const persisted = await this.cacheStore.loadManifest(message.deviceId, message.cwd);
+    for (const scope of CACHE_SCOPES) {
+      if (requested.has(scope)) {
+        manifests[scope] = { entries: persisted.scopes[scope].entries };
+      }
+    }
+
+    const entryCounts = Object.fromEntries(
+      CACHE_SCOPES.map((scope) => [scope, Object.keys(manifests[scope].entries).length]),
+    );
+    log.info("收到 cache_handshake，已返回 manifest", {
+      clientId,
+      deviceId: message.deviceId,
+      cwd: message.cwd,
+      scopes: Array.from(requested),
+      entryCounts,
+    });
+
+    const resp: CacheManifest = {
+      type: "cache_manifest",
+      deviceId: message.deviceId,
+      cwd: message.cwd,
+      manifests,
+    };
+    await this.sendToClient(clientId, resp);
+  }
+
+  private async handleCachePush(clientId: string, message: CachePush): Promise<void> {
+    let ack: CachePushAck;
+    try {
+      const result = await this.cacheStore.applyPush(message);
+      log.info("处理 cache_push 完成", {
+        clientId,
+        deviceId: message.deviceId,
+        cwd: message.cwd,
+        scope: message.scope,
+        written: result.written,
+        deleted: result.deleted,
+        skippedContents: result.skippedContents,
+        truncated: Boolean(message.truncated),
+      });
+      ack = {
+        type: "cache_push_ack",
+        deviceId: message.deviceId,
+        cwd: message.cwd,
+        scope: message.scope,
+        ok: true,
+      };
+    } catch (err) {
+      log.error("处理 cache_push 失败", {
+        clientId,
+        deviceId: message.deviceId,
+        cwd: message.cwd,
+        scope: message.scope,
+        error: asError(err).message,
+      });
+      ack = {
+        type: "cache_push_ack",
+        deviceId: message.deviceId,
+        cwd: message.cwd,
+        scope: message.scope,
+        ok: false,
+        error: asError(err).message,
+      };
+    }
+    await this.sendToClient(clientId, ack);
   }
 
   private getPtySessionEntry(sessionId: string): PtySessionEntry {

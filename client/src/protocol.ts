@@ -205,10 +205,71 @@ export interface FileProxyResponse {
 }
 
 // ============================================================
+// Client 文件缓存同步协议（与 server/src/protocol.ts 对齐）
+// ============================================================
+
+export type CacheScope = "claude-home" | "claude-json";
+
+export interface CacheEntry {
+  size: number;
+  mtime: number;
+  sha256: string | null;
+  skipped?: boolean;
+}
+
+export interface CacheManifestData {
+  entries: Record<string, CacheEntry>;
+}
+
+export interface CacheHandshake {
+  type: "cache_handshake";
+  deviceId: string;
+  cwd: string;
+  scopes: CacheScope[];
+}
+
+export interface CacheManifest {
+  type: "cache_manifest";
+  deviceId: string;
+  cwd: string;
+  manifests: Record<CacheScope, CacheManifestData>;
+}
+
+export interface CachePushEntry {
+  path: string;
+  size: number;
+  mtime: number;
+  sha256: string;
+  content?: string;
+  skipped?: boolean;
+}
+
+export interface CachePush {
+  type: "cache_push";
+  deviceId: string;
+  cwd: string;
+  scope: CacheScope;
+  adds: CachePushEntry[];
+  deletes: string[];
+  truncated?: boolean;
+}
+
+export interface CachePushAck {
+  type: "cache_push_ack";
+  deviceId: string;
+  cwd: string;
+  scope: CacheScope;
+  ok: boolean;
+  error?: string;
+}
+
+// ============================================================
 // Union 类型
 // ============================================================
 
 export type ServerToHandMessage =
+  | CacheManifest
+  | CachePushAck
   | Connected
   | FileProxyRequest
   | PtySessionCreated
@@ -219,6 +280,8 @@ export type ServerToHandMessage =
   | ToolCallComplete;
 
 export type HandToServerMessage =
+  | CacheHandshake
+  | CachePush
   | CloseSession
   | CreatePtySession
   | FileProxyResponse
