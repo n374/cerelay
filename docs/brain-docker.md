@@ -112,6 +112,14 @@ The docker-compose config mounts the host `~/.claude` directory to `/home/node/.
 
 This setup also enables a per-session mount namespace runtime by default. For each session, Brain creates an isolated Claude runtime, projects the Hand-reported `HOME` / `cwd` view into it, and launches Claude Code inside that runtime.
 
+## 文件访问与 Hook 约束 / Filesystem and Hook Invariants
+
+- CC 启动时的工作目录路径必须等于 Hand/Client 上报的 `cwd`，例如 Client 在 `/repo/app` 启动时，CC 内部 `pwd` 也应显示 `/repo/app`。
+- 用户文件系统访问必须通过 `PreToolUse` hook 转发到 Client 执行。`Bash`、`Read`、`Write`、`Edit`、`MultiEdit`、`Grep`、`Glob` 应使用 Client 的真实 cwd 和真实绝对路径语义。
+- 不要把 Client 的项目根目录、Client 根目录或宿主机 `/` 通过 FUSE/bind mount 暴露给 CC。项目源码、cwd 上级目录和其他系统路径的读写能力来自 Client-routed tools。
+- FUSE file proxy 只投影 Claude 运行配置：`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`，其中 `{cwd}/.claude/settings.local.json` 必须保留用于注入 Axon 的 `PreToolUse` hook。
+- Server 容器自己的 `.credentials.json` 必须以 `home-claude/.credentials.json` shadow file 形式出现在 runtime 中；读、写、truncate 都必须落到 Server 侧本地凭证文件，而不是转发给 Client。
+
 ## Namespace 前置条件 / Namespace Prerequisites
 
 - 容器需要 `SYS_ADMIN` capability

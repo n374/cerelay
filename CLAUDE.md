@@ -225,6 +225,14 @@ axon/
 - Claude 看到的 `HOME` 和 `cwd` 对齐 Client 上报的路径
 - 使用 `unshare` / `nsenter` 实现
 
+**Filesystem access invariants**:
+
+- CC 启动后的 `cwd` 字符串必须等于 Client 启动目录；从 CC 与 Client 两侧看，当前目录路径应一致。
+- 用户文件访问必须走被 hook 拦截的工具调用（`Bash`、`Read`、`Write`、`Edit`、`MultiEdit`、`Grep`、`Glob`），并在 Client 本机执行；不要通过 FUSE 把项目目录或 Client 根目录映射给 CC。
+- FUSE file proxy 只允许 Claude 配置范围：`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`。项目源码、cwd 上级目录、系统其他路径的访问能力来自 Client-routed tools。
+- `settings.local.json` 必须继续作为项目级 hook 配置注入到 `{cwd}/.claude/settings.local.json`。
+- Server/容器自己的 `.credentials.json` 必须作为 `home-claude/.credentials.json` shadow file 暴露给 runtime，且读写、truncate 都应作用在 Server 侧本地凭证文件。
+
 ```typescript
 // 关键调用位置：session.ts 中的 createSessionRuntime()
 const runtime = new ClaudeSessionRuntime({

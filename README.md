@@ -1,8 +1,8 @@
 # Cerelay
 
-**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端托管 Claude Code PTY 会话，Client 端在本地执行工具与文件代理，两者通过 WebSocket 双向通信。
+**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端托管 Claude Code PTY 会话，Client 端在本地执行工具调用；FUSE 文件代理只投影 Claude 运行所需的配置文件，两者通过 WebSocket 双向通信。
 
-**Cerelay** is a split-architecture implementation of Claude Code. The Server hosts Claude Code PTY sessions, the Client executes tools and file proxy operations locally, and they communicate over WebSocket.
+**Cerelay** is a split-architecture implementation of Claude Code. The Server hosts Claude Code PTY sessions, the Client executes tool calls locally, FUSE only projects the Claude runtime config files, and both sides communicate over WebSocket.
 
 ## 架构 / Architecture
 
@@ -10,7 +10,7 @@
 Client (TypeScript)  ←— WebSocket —→  Server (TypeScript)  ←→  Claude Code PTY / claude CLI
   ├─ 本地工具执行                        ├─ PTY 会话托管
   ├─ MCP Runtime                        ├─ Hook 拦截 + 工具转发
-  └─ 文件代理 / File Proxy              └─ Runtime 隔离 + 鉴权
+  └─ 配置文件代理 / Config File Proxy      └─ Runtime 隔离 + 鉴权
 ```
 
 ```mermaid
@@ -37,7 +37,8 @@ sequenceDiagram
 - **PTY Hook 拦截**：Server 通过 Claude Code 的 `PreToolUse` hook 接管工具调用，转发到 Client 执行
 - **Session Runtime**：Docker 下每个 PTY session 有独立 mount namespace，Claude 看到的 `HOME`/`cwd` 对齐 Client 本地路径
 - **MCP 代理**：Server 读取 Claude 的 MCP 配置下发给 Client，Client 负责连接 MCP Server 并执行工具
-- **FUSE 文件代理**：容器内通过 FUSE 将文件读写请求转发到 Client 本地文件系统
+- **Client 文件访问**：Claude 的 `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` 等工具调用必须通过 hook 转发到 Client，在 Client 的当前目录和真实文件系统中执行；绝对路径与相对路径的语义应和用户本地一致
+- **FUSE 配置投影**：FUSE 只用于投影 Claude 配置视图（`~/.claude`、`~/.claude.json`、`{cwd}/.claude/settings.local.json`）以及 Server 侧 shadow 文件，不用于把用户项目根目录或整个 Client 文件系统暴露给容器
 
 ## 前置条件 / Prerequisites
 

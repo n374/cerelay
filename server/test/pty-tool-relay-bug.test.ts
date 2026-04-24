@@ -270,48 +270,47 @@ test("嫌疑2: Bash ls 在 fallback cwd 中执行结果为空", async (t) => {
 });
 
 // ============================================================
-// 嫌疑 3: Mount namespace bootstrap 后 cwd 内无项目文件
+// 嫌疑 3: Mount namespace bootstrap 后 cwd 路径对齐，用户文件由 Client 工具访问
 // ============================================================
 
-test("嫌疑3: bootstrap 脚本中 cwd 只做 mkdir -p，不挂载项目文件", () => {
+test("嫌疑3-修复: bootstrap 保持 CC cwd 路径与 Client cwd 一致且只挂载 hook 配置", () => {
   const script = renderNamespaceBootstrapScript();
 
-  // 验证 cwd 只是被 mkdir -p 创建，没有任何文件挂载
   assert.match(
     script,
     /mkdir -p "\$CERELAY_HOME_DIR" "\$CERELAY_WORK_DIR"/,
     "bootstrap 通过 mkdir -p 创建 cwd"
   );
 
-  // ★ 核心断言：CERELAY_WORK_DIR 没有项目文件的 bind mount
-  // FUSE 模式只挂载 .claude/ 目录，不挂载项目源文件
-  // 传统模式同样不挂载项目源文件
-  // 所以 namespace 内的 cwd 只有 .claude/ 子目录
-
-  // 验证 FUSE 模式只挂载 .claude 相关目录
   assert.match(
     script,
     /mount --bind "\$CERELAY_FUSE_ROOT\/project-claude" "\$CERELAY_WORK_DIR\/\.claude"/,
-    "FUSE 模式只挂载 {cwd}/.claude"
+    "FUSE 模式必须挂载 {cwd}/.claude 以注入 hook settings"
   );
 
-  // 验证没有挂载项目源文件（如 src/、package.json 等）的逻辑
-  // 获取所有涉及 CERELAY_WORK_DIR 的 mount 行（完整行）
-  const workDirMountLines = script.split("\n").filter(
-    (line) => /mount\s+--(?:r?bind)/.test(line) && line.includes("$CERELAY_WORK_DIR")
+  assert.doesNotMatch(
+    script,
+    /__cerelay_client_root/,
+    "不应把 Client 根目录额外挂到 CC 侧；用户文件访问由 Client-routed tools 执行"
   );
-  // 每一行 mount 到 WORK_DIR 的目标都应该是 .claude 相关路径
-  const nonClaudeMounts = workDirMountLines.filter(
-    (line) => !line.includes(".claude")
+
+  const fuseWorkDirMountLines = script.split("\n").filter(
+    (line) => /mount\s+--(?:r?bind)/.test(line) && line.includes("$CERELAY_FUSE_ROOT") && line.includes("$CERELAY_WORK_DIR")
   );
   assert.deepEqual(
-    nonClaudeMounts,
-    [],
-    "WORK_DIR 下所有 mount 都应该指向 .claude 相关路径（项目源文件不可见）"
+    fuseWorkDirMountLines,
+    ['  mount --bind "$CERELAY_FUSE_ROOT/project-claude" "$CERELAY_WORK_DIR/.claude"'],
+    "FUSE 模式下 WORK_DIR 只能挂载 .claude hook 配置目录"
+  );
+
+  assert.match(
+    script,
+    /mount --bind "\$CERELAY_PROJECT_SETTINGS_SOURCE" "\$CERELAY_WORK_DIR\/\.claude\/settings\.local\.json"/,
+    "legacy 模式仍应挂载项目级 settings.local.json 以注入 hook"
   );
 });
 
-test("嫌疑3: view root 覆盖后顶层目录为空（用户文件被遮盖）", () => {
+test("嫌疑3-约束: view root 只创建路径外壳，用户文件不通过 FUSE 暴露", () => {
   const script = renderNamespaceBootstrapScript();
 
   // 验证 view root 覆盖逻辑：用空目录 bind mount 覆盖顶层路径
@@ -321,9 +320,8 @@ test("嫌疑3: view root 覆盖后顶层目录为空（用户文件被遮盖）"
     "view root 用空目录覆盖顶层路径"
   );
 
-  // 这意味着 /Users（或 /home）下的所有原始文件被空目录覆盖
-  // 之后只有 mkdir -p 创建空的 cwd 和 home 目录
-  // 所以项目文件完全不可见
+  // 这意味着 /Users（或 /home）下只创建 CC 需要的路径外壳。
+  // 用户项目文件不通过 FUSE 暴露，必须由 Client-routed tools 访问。
 
   // 验证 view 目录被空创建
   assert.match(
@@ -351,23 +349,20 @@ if (expectMountNamespaceTests) {
   assert.ok(hasSysAdmin, "容器测试环境应提供 unshare --mount / SYS_ADMIN 能力");
 }
 
-test("嫌疑3-集成: namespace 内 cwd 只有 .claude/ 没有项目文件", { skip: !hasSysAdmin }, async (t) => {
+test("嫌疑3-集成: namespace 内 cwd 路径存在并含有 hook settings", { skip: !hasSysAdmin }, async (t) => {
   const { execSync } = await import("node:child_process");
-  const tempDir = await mkdir(path.join(tmpdir(), `ns-empty-cwd-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdir(path.join(tmpdir(), `ns-project-cwd-${Date.now()}`), { recursive: true });
+  const sourceParent = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
+  const sourceDir = await mkdir(path.join(sourceParent, `ns-project-source-${Date.now()}`), { recursive: true });
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    await rm(sourceDir, { recursive: true, force: true });
   });
 
-  // 准备 "项目" 目录（模拟宿主机 cwd 有文件）
+  const projectClaudeSource = path.join(sourceDir, "project-claude");
+  await mkdir(projectClaudeSource, { recursive: true });
+  await writeFile(path.join(projectClaudeSource, "settings.local.json"), '{"hooks":{}}', "utf8");
   const projectDir = path.join(tempDir, "project");
-  await mkdir(path.join(projectDir, "src"), { recursive: true });
-  await writeFile(path.join(projectDir, "package.json"), '{"name":"test"}', "utf8");
-  await writeFile(path.join(projectDir, "src", "index.ts"), "export default {};", "utf8");
-
-  // 验证 "项目" 目录有文件
-  const beforeFiles = await readdir(projectDir);
-  assert.ok(beforeFiles.includes("package.json"), "项目目录应包含 package.json");
-  assert.ok(beforeFiles.includes("src"), "项目目录应包含 src");
 
   const runtimeRoot = path.join(tempDir, "runtime");
   await mkdir(path.join(runtimeRoot, "views"), { recursive: true });
@@ -383,19 +378,18 @@ test("嫌疑3-集成: namespace 内 cwd 只有 .claude/ 没有项目文件", { s
     unshare --mount --propagation private /bin/sh -c '
       # 用空目录覆盖顶层路径
       mount --bind "${viewDir}" "/${topLevelName}"
-      # 重建 cwd（空目录）
-      mkdir -p "${projectDir}"
-      # 列出 cwd 内容
-      ls "${projectDir}" 2>&1 || echo "__EMPTY__"
+      mkdir -p "${projectDir}/.claude"
+      mount --bind "${projectClaudeSource}" "${projectDir}/.claude"
+      cd "${projectDir}"
+      pwd
+      find . -maxdepth 3 -type f | sort
     '
-  `, { encoding: "utf8" }).trim();
+  `, { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 
-  // ★ 核心断言：namespace 内 cwd 应该是空的（项目文件被 view root 遮盖）
-  assert.equal(
+  assert.deepEqual(
     result,
-    "",
-    "namespace 内 cwd 应为空——项目文件被 view root 覆盖后不可见，" +
-    "这就是 CC 本地 ls 返回空的原因"
+    [projectDir, "./.claude/settings.local.json"],
+    "CC cwd 路径应与 Client cwd 一致，且 hook settings 可见；项目文件访问由 Client 工具执行"
   );
 });
 
