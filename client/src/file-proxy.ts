@@ -33,12 +33,14 @@ export class FileProxyHandler {
   private readonly allowedPrefixes: string[];
 
   constructor(homeDir: string, cwd: string) {
+    const resolvedHome = path.resolve(homeDir);
+    const resolvedCwd = path.resolve(cwd);
     this.allowedPrefixes = [
-      path.join(homeDir, ".claude") + path.sep,
-      path.join(homeDir, ".claude"),
-      path.join(homeDir, ".claude.json"),
-      path.join(cwd, ".claude") + path.sep,
-      path.join(cwd, ".claude"),
+      path.join(resolvedHome, ".claude") + path.sep,
+      path.join(resolvedHome, ".claude"),
+      path.join(resolvedHome, ".claude.json"),
+      path.join(resolvedCwd, ".claude") + path.sep,
+      path.join(resolvedCwd, ".claude"),
     ];
   }
 
@@ -142,7 +144,7 @@ export class FileProxyHandler {
   private isAllowed(filePath: string): boolean {
     const normalized = path.resolve(filePath);
     return this.allowedPrefixes.some(
-      (prefix) => normalized === prefix || normalized.startsWith(prefix)
+      (prefix) => normalized === prefix || (prefix.endsWith(path.sep) && normalized.startsWith(prefix))
     );
   }
 

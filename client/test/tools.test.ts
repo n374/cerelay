@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { readFile, writeFile, editFile, multiEdit } from "../src/tools/fs.js";
 import { executeBash } from "../src/tools/bash.js";
 import { grep, globFiles } from "../src/tools/search.js";
+import { FileProxyHandler } from "../src/file-proxy.js";
 import {
   ToolError,
   ToolExecutor,
@@ -62,6 +63,81 @@ test("bash tool executes commands and validates timeout", async () => {
   assert.equal(result.exit_code, 0);
 
   await assert.rejects(() => executeBash({ command: "echo nope", timeout: 0 }, cwd), /timeout/);
+});
+
+test("client-routed tools can access cwd, parent paths, and absolute files", async () => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-tools-root-"));
+  const cwd = path.join(parent, "project");
+  const siblingPath = path.join(parent, "sibling.txt");
+  const outputPath = path.join(parent, "written.txt");
+  await fs.mkdir(cwd, { recursive: true });
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"project"}');
+  await fs.writeFile(siblingPath, "parent file");
+
+  const pwd = await executeBash({ command: "pwd" }, cwd);
+  assert.equal(pwd.stdout.trim(), await fs.realpath(cwd), "Bash 应在 Client cwd 中执行");
+
+  const parentLs = await executeBash({ command: "ls .." }, cwd);
+  assert.match(parentLs.stdout, /sibling\.txt/, "Bash 应能访问 cwd 上级目录");
+
+  assert.deepEqual(await readFile({ file_path: siblingPath }, cwd), {
+    content: "parent file",
+  });
+
+  await writeFile({ file_path: outputPath, content: "created outside cwd" }, cwd);
+  assert.equal(await fs.readFile(outputPath, "utf8"), "created outside cwd");
+
+  await editFile({ file_path: outputPath, old_string: "outside", new_string: "above" }, cwd);
+  assert.equal(await fs.readFile(outputPath, "utf8"), "created above cwd");
+});
+
+test("file proxy remains scoped to Claude config paths, not user project files", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-home-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-project-"));
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"project"}');
+  await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "src", "index.ts"), "export default {};");
+  await fs.mkdir(path.join(cwd, ".claude"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".claude", "settings.local.json"), '{"hooks":{}}');
+
+  const handler = new FileProxyHandler(home, cwd);
+
+  const projectSnapshot = await handler.handle({
+    type: "file_proxy_request",
+    reqId: "snap-project-root",
+    sessionId: "pty-test",
+    op: "snapshot",
+    path: cwd,
+  });
+  assert.equal(projectSnapshot.error?.code, 1, "用户项目根目录不应通过 FUSE file proxy 暴露");
+
+  const adjacentSnapshot = await handler.handle({
+    type: "file_proxy_request",
+    reqId: "snap-project-claude-adjacent",
+    sessionId: "pty-test",
+    op: "snapshot",
+    path: path.join(cwd, ".claude2"),
+  });
+  assert.equal(adjacentSnapshot.error?.code, 1, ".claude 相邻目录不应误命中 file proxy allow-list");
+
+  const claudeSnapshot = await handler.handle({
+    type: "file_proxy_request",
+    reqId: "snap-project-claude",
+    sessionId: "pty-test",
+    op: "snapshot",
+    path: path.join(cwd, ".claude"),
+  });
+  assert.equal(claudeSnapshot.error, undefined);
+  const snapshotPaths = (claudeSnapshot.snapshot ?? []).map((entry) => entry.path);
+  assert.ok(
+    snapshotPaths.includes(path.join(cwd, ".claude", "settings.local.json")),
+    "project .claude/settings.local.json 应通过 file proxy 暴露"
+  );
+  assert.equal(
+    snapshotPaths.some((filePath) => filePath === path.join(cwd, "package.json") || filePath.includes(`${path.sep}src${path.sep}`)),
+    false,
+    ".claude snapshot should remain scoped to Claude config files"
+  );
 });
 
 test("ToolExecutor dispatches tools and formats results", async () => {
