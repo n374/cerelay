@@ -209,6 +209,26 @@ def resolve_shadow_path(fuse_path):
     """返回 shadow file 对应的本地真实路径；非 shadow file 返回 None。"""
     return SHADOW_FILES.get(fuse_path.lstrip("/"))
 
+def shadow_child_names(fuse_path):
+    """返回 shadow file 在 fuse_path 目录下贡献的直接子节点名。"""
+    normalized = fuse_path.strip("/")
+    prefix = f"{normalized}/" if normalized else ""
+    names = []
+    for shadow_key in SHADOW_FILES:
+        if not shadow_key.startswith(prefix):
+            continue
+        remainder = shadow_key[len(prefix):]
+        if not remainder:
+            continue
+        child = remainder.split("/", 1)[0]
+        if child and child not in names:
+            names.append(child)
+    return names
+
+def has_shadow_descendant(fuse_path):
+    """fuse_path 是否是某个 shadow file 的父目录。"""
+    return len(shadow_child_names(fuse_path)) > 0
+
 # ============================================================
 # 虚拟节点 stat
 # ============================================================
@@ -317,6 +337,9 @@ class AxonFuseOps(Operations):
             except OSError as e:
                 raise FuseOSError(e.errno or errno.EIO)
 
+        if has_shadow_descendant(path):
+            return virtual_dir_stat()
+
         hand_path = resolve_hand_path(root_name, rel_path)
         if not hand_path:
             raise FuseOSError(errno.ENOENT)
@@ -353,7 +376,11 @@ class AxonFuseOps(Operations):
 
         cached = _cache.get_readdir(hand_path)
         if cached is not None:
-            return [".", ".."] + cached
+            entries = list(cached)
+            for shadow_name in shadow_child_names(path):
+                if shadow_name not in entries:
+                    entries.append(shadow_name)
+            return [".", ".."] + entries
 
         try:
             resp = send_request({
@@ -369,13 +396,11 @@ class AxonFuseOps(Operations):
             else:
                 raise
 
-        # 注入 shadow file 到目录列表（如 hook injection 的 settings.local.json）
-        dir_prefix = path.lstrip("/") + "/"
-        for shadow_key in SHADOW_FILES:
-            if shadow_key.startswith(dir_prefix):
-                shadow_name = shadow_key[len(dir_prefix):]
-                if "/" not in shadow_name and shadow_name not in entries:
-                    entries.append(shadow_name)
+        # 注入 shadow file 到目录列表（如 hook injection 的 settings.local.json）。
+        # 如果 shadow file 的父目录不存在，也要虚拟出中间目录（例如 .claude）。
+        for shadow_name in shadow_child_names(path):
+            if shadow_name not in entries:
+                entries.append(shadow_name)
 
         _cache.put_readdir(hand_path, entries)
         return [".", ".."] + entries

@@ -199,6 +199,26 @@ test("FUSE host script handles shadow file writes locally instead of proxying to
   );
   assert.match(
     PYTHON_FUSE_HOST_SCRIPT,
+    /def shadow_child_names\(fuse_path\):/,
+    "FUSE script 应能从 shadow file 虚拟出父目录条目"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /if has_shadow_descendant\(path\):\n\s+return virtual_dir_stat\(\)/,
+    "shadow file 的中间父目录应作为虚拟目录存在"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /def getattr\(self, path, fh=None\):[\s\S]*local_path = resolve_shadow_path\(path\)[\s\S]*os\.stat\(local_path\)/,
+    "shadow file getattr 应直接读取本地文件状态"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
+    /def read\(self, path, size, offset, fh\):\n\s+# Shadow file: 本地读取\n\s+local_path = resolve_shadow_path\(path\)\n\s+if local_path:/,
+    "shadow file read 应直接读取本地文件"
+  );
+  assert.match(
+    PYTHON_FUSE_HOST_SCRIPT,
     /def write\(self, path, data, offset, fh\):\n\s+local_path = resolve_shadow_path\(path\)\n\s+if local_path:/,
     "shadow file 写入应先命中本地路径分支"
   );
