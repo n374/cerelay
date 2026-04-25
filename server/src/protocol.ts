@@ -188,9 +188,158 @@ export interface CacheEntry {
 /** Server 端 manifest：按 scope 组织，每个 scope 下是 relativePath → CacheEntry 的映射。 */
 export interface CacheManifestData {
   entries: Record<string, CacheEntry>;
+  truncated?: boolean;
+}
+
+export interface CacheTaskManifestSnapshot {
+  revision: number;
+  scopes: Record<CacheScope, CacheManifestData>;
+}
+
+export type CacheTaskRole = "active" | "inactive";
+
+export type CacheTaskAssignmentReason =
+  | "elected"
+  | "standby"
+  | "failover"
+  | "resync"
+  | "server_restart"
+  | "capability_missing";
+
+export type CacheTaskPhase = "assigned-syncing" | "assigned-watching";
+
+export type CacheTaskFaultCode =
+  | "WATCHER_OVERFLOW"
+  | "WATCHER_PERMISSION_DENIED"
+  | "WATCHER_ROOT_MISSING"
+  | "LOCAL_SCAN_FAILED"
+  | "INTERNAL_ERROR";
+
+export type CacheTaskAckErrorCode =
+  | "STALE_ASSIGNMENT"
+  | "STALE_REVISION"
+  | "NOT_ACTIVE"
+  | "SHA256_MISMATCH"
+  | "STORE_WRITE_FAILED"
+  | "PAYLOAD_TOO_LARGE";
+
+export interface ClientHello {
+  type: "client_hello";
+  deviceId?: string;
+  cwd: string;
+  capabilities: {
+    cacheTaskV1?: {
+      protocolVersion: 1;
+      maxFileBytes: number;
+      maxBatchBytes: number;
+      debounceMs: number;
+      watcherBackend: "chokidar";
+    };
+  };
+}
+
+export interface CacheTaskAssignment {
+  type: "cache_task_assignment";
+  deviceId: string;
+  cwd: string;
+  assignmentId: string;
+  role: CacheTaskRole;
+  reason: CacheTaskAssignmentReason;
+  heartbeatIntervalMs: number;
+  heartbeatTimeoutMs: number;
+  manifest?: CacheTaskManifestSnapshot;
+}
+
+export interface CacheTaskMutationHintTarget {
+  scope: CacheScope;
+  path: string;
+}
+
+export interface CacheTaskMutationHint {
+  type: "cache_task_mutation_hint";
+  assignmentId: string;
+  mutationId: string;
+  targets: CacheTaskMutationHintTarget[];
+  issuedAt: number;
+}
+
+export interface CacheTaskUpsertChange {
+  kind: "upsert";
+  scope: CacheScope;
+  path: string;
+  size: number;
+  mtime: number;
+  sha256: string | null;
+  contentBase64?: string;
+  skipped?: boolean;
+  mutationId?: string;
+}
+
+export interface CacheTaskDeleteChange {
+  kind: "delete";
+  scope: CacheScope;
+  path: string;
+  mutationId?: string;
+}
+
+export type CacheTaskChange = CacheTaskUpsertChange | CacheTaskDeleteChange;
+
+export type CacheTaskDeltaMode = "initial" | "live";
+
+export interface CacheTaskDelta {
+  type: "cache_task_delta";
+  assignmentId: string;
+  batchId: string;
+  baseRevision: number;
+  mode: CacheTaskDeltaMode;
+  changes: CacheTaskChange[];
+  sentAt: number;
+}
+
+export interface CacheTaskDeltaAck {
+  type: "cache_task_delta_ack";
+  assignmentId: string;
+  batchId: string;
+  ok: boolean;
+  appliedRevision?: number;
+  errorCode?: CacheTaskAckErrorCode;
+  error?: string;
+  resyncRequired?: boolean;
+}
+
+export interface CacheTaskSyncComplete {
+  type: "cache_task_sync_complete";
+  assignmentId: string;
+  /**
+   * Client 完成 initial reconcile 时所知的最新 revision。
+   * 这个值可以是接收 assignment 时的 manifest.revision，
+   * 也可以是最后一次 cache_task_delta_ack.appliedRevision。
+   * Server 接受 baseRevision <= task.revision，只在 baseRevision 反常地超过当前 task.revision 时要求 resync。
+   */
+  baseRevision: number;
+  scannedAt: number;
+}
+
+export interface CacheTaskHeartbeat {
+  type: "cache_task_heartbeat";
+  assignmentId: string;
+  phase: CacheTaskPhase;
+  watcherHealth: "ok" | "degraded";
+  lastFlushAt?: number;
+  sentAt: number;
+}
+
+export interface CacheTaskFault {
+  type: "cache_task_fault";
+  assignmentId: string;
+  code: CacheTaskFaultCode;
+  fatal: boolean;
+  message: string;
+  sentAt: number;
 }
 
 /** Hand → Server：缓存握手，请求当前 Server 端的 manifest。 */
+/** @deprecated 保留旧版 cache handshake 流程兼容。 */
 export interface CacheHandshake {
   type: "cache_handshake";
   deviceId: string;
@@ -200,6 +349,7 @@ export interface CacheHandshake {
 }
 
 /** Server → Hand：返回 Server 端当前 manifest（新设备 / 新 cwd 时 entries 为空）。 */
+/** @deprecated 保留旧版 cache handshake 流程兼容。 */
 export interface CacheManifest {
   type: "cache_manifest";
   deviceId: string;
@@ -223,6 +373,7 @@ export interface CachePushEntry {
 }
 
 /** Hand → Server：推送增量。adds/deletes/skippedExtras 均为相对路径。 */
+/** @deprecated 保留旧版 cache push 流程兼容。 */
 export interface CachePush {
   type: "cache_push";
   deviceId: string;
@@ -243,6 +394,7 @@ export interface CachePush {
 }
 
 /** Server → Hand：推送 ack。 */
+/** @deprecated 保留旧版 cache push 流程兼容。 */
 export interface CachePushAck {
   type: "cache_push_ack";
   deviceId: string;
@@ -255,6 +407,9 @@ export interface CachePushAck {
 }
 
 export type ServerToHandMessage =
+  | CacheTaskAssignment
+  | CacheTaskMutationHint
+  | CacheTaskDeltaAck
   | CacheManifest
   | CachePushAck
   | Connected
@@ -267,6 +422,11 @@ export type ServerToHandMessage =
   | ToolCallComplete;
 
 export type HandToServerMessage =
+  | CacheTaskDelta
+  | CacheTaskFault
+  | CacheTaskHeartbeat
+  | CacheTaskSyncComplete
+  | ClientHello
   | CacheHandshake
   | CachePush
   | CloseSession
