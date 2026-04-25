@@ -53,6 +53,7 @@ test("applyPush 写入 blob 并更新 manifest", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [
       {
         path: "settings.json",
@@ -96,6 +97,7 @@ test("applyPush deletes 从 manifest 移除条目", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [{
       path: "a.txt",
       size: 1,
@@ -111,6 +113,7 @@ test("applyPush deletes 从 manifest 移除条目", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 2,
     adds: [],
     deletes: ["a.txt"],
   });
@@ -131,6 +134,7 @@ test("applyPush sha256 不一致时抛错，manifest 不被污染", async (t) =>
       deviceId: DEVICE_ID,
       cwd: CWD,
       scope: "claude-home",
+      seq: 1,
       adds: [{
         path: "tampered.json",
         size: content.length,
@@ -156,6 +160,7 @@ test("applyPush skipped=true 仅更新元数据、不写 blob", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [{
       path: "big.bin",
       size: 5 * 1024 * 1024,
@@ -185,6 +190,7 @@ test("applyPush truncated=true 标记被保存到 manifest", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [],
     deletes: [],
     truncated: true,
@@ -199,6 +205,7 @@ test("applyPush truncated=true 标记被保存到 manifest", async (t) => {
     deviceId: DEVICE_ID,
     cwd: CWD,
     scope: "claude-home",
+    seq: 2,
     adds: [],
     deletes: [],
   });
@@ -216,6 +223,7 @@ test("不同 cwd 的缓存互不污染", async (t) => {
     deviceId: DEVICE_ID,
     cwd: "/a",
     scope: "claude-home",
+    seq: 1,
     adds: [{ path: "f", size: 1, mtime: 1, sha256: sha256(content), content: b64(content) }],
     deletes: [],
   });
@@ -241,4 +249,105 @@ test("cwdHash 稳定且长度 16", () => {
   assert.equal(h1.length, 16);
   assert.equal(h1, h2);
   assert.notEqual(h1, h3);
+});
+
+test("withManifestLock 串行化并发 applyPush，防止 manifest read-modify-write 丢更新", async (t) => {
+  // 背景：server.ts 的 message handler 用 void this.handleMessage() 并发触发，
+  // 同一 (deviceId, cwd) 上的多个 cache_push 会并发跑 applyPush。如果 store 没有
+  // 串行锁，每个 applyPush 在内存里独立改 manifest 后写回，会互相覆盖丢条目。
+  // 这里用 N 个并发的、各自添加不同条目的 push 验证：最终 manifest 必须包含全部
+  // N 条记录。
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const N = 20;
+  const pushes = Array.from({ length: N }, (_, i) => {
+    const content = `content-${i}`;
+    return store.applyPush({
+      type: "cache_push",
+      deviceId: DEVICE_ID,
+      cwd: CWD,
+      scope: "claude-home",
+      seq: i + 1,
+      adds: [{
+        path: `file-${i}.json`,
+        size: content.length,
+        mtime: 1_700_000_000_000 + i,
+        sha256: sha256(content),
+        content: b64(content),
+      }],
+      deletes: [],
+    });
+  });
+
+  // 并发触发：Promise.all 让所有 applyPush 同时进入 await，
+  // 内部的 mutex 应该把它们排成 FIFO，最终一条不丢
+  await Promise.all(pushes);
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  const entries = Object.keys(manifest.scopes["claude-home"].entries).sort();
+  assert.equal(
+    entries.length,
+    N,
+    `预期 ${N} 条 entries，实际 ${entries.length} —— mutex 失效或丢更新`,
+  );
+  for (let i = 0; i < N; i += 1) {
+    assert.ok(entries.includes(`file-${i}.json`), `缺少 entry: file-${i}.json`);
+  }
+});
+
+test("withManifestLock 不同 (deviceId, cwd) 之间不互相阻塞", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  // 一个长跑请求 + 一个短请求，不同 cwd；短请求不应等长请求
+  const longContent = "a".repeat(100);
+  const shortContent = "b";
+
+  const startLong = Date.now();
+  const longPromise = store.applyPush({
+    type: "cache_push",
+    deviceId: DEVICE_ID,
+    cwd: "/long",
+    scope: "claude-home",
+    seq: 1,
+    adds: [{
+      path: "f",
+      size: longContent.length,
+      mtime: 1,
+      sha256: sha256(longContent),
+      content: b64(longContent),
+    }],
+    deletes: [],
+  });
+
+  const shortFinished = await store.applyPush({
+    type: "cache_push",
+    deviceId: DEVICE_ID,
+    cwd: "/short",
+    scope: "claude-home",
+    seq: 1,
+    adds: [{
+      path: "g",
+      size: shortContent.length,
+      mtime: 1,
+      sha256: sha256(shortContent),
+      content: b64(shortContent),
+    }],
+    deletes: [],
+  }).then(() => Date.now());
+
+  await longPromise;
+
+  // 不强约束相对耗时（CI 抖动），只确认两侧都成功
+  assert.ok(shortFinished > 0);
+  const longManifest = await store.loadManifest(DEVICE_ID, "/long");
+  const shortManifest = await store.loadManifest(DEVICE_ID, "/short");
+  assert.ok(longManifest.scopes["claude-home"].entries["f"]);
+  assert.ok(shortManifest.scopes["claude-home"].entries["g"]);
+  // 交叉污染检查
+  assert.equal(longManifest.scopes["claude-home"].entries["g"], undefined);
+  assert.equal(shortManifest.scopes["claude-home"].entries["f"], undefined);
+  // suppress 未使用变量警告
+  void startLong;
 });

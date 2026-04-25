@@ -45,9 +45,55 @@ export interface ApplyPushResult {
 
 export class ClientCacheStore {
   private readonly dataDir: string;
+  /**
+   * 按 (deviceId, cwd) 维护的串行锁。
+   *
+   * 背景：WebSocket message handler 是并发的（server.ts 里 void this.handleMessage(...)），
+   * 同一连接短时间内连续到达多个 cache_push 时，applyPush 会并发跑，manifest 的
+   * read-modify-write 之间没有同步原语，会互相覆盖丢更新。pipeline 模式下这个问题
+   * 必然触发，因此这里加 per-manifest（注意是 per-deviceId+cwd，不是 per-scope，
+   * 因为 manifest.json 是单文件存所有 scope）的串行锁。
+   *
+   * 实现是简单的 promise 链：每个新请求 await 上一个的结尾，自己再追加上去。
+   * 同 key 的请求严格 FIFO；不同 key 之间天然并发。
+   */
+  private readonly mutexChains = new Map<string, Promise<void>>();
 
   constructor(options: ClientCacheStoreOptions) {
     this.dataDir = options.dataDir;
+  }
+
+  /**
+   * 在 (deviceId, cwd) 锁下串行执行 fn。
+   * 实现：经典 promise 链——每次拿当前 tail 的 promise，await 它后自己再追加一节。
+   * Map 仅记录"最新尾节点 promise"，所以每个 key 永远只占一项；条目数受
+   * (deviceId, cwd) 的活跃组合数约束，不会无界增长。
+   */
+  private async withManifestLock<T>(
+    deviceId: string,
+    cwd: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const key = `${sanitizeDeviceId(deviceId)}\0${cwd}`;
+    const previous = this.mutexChains.get(key) ?? Promise.resolve();
+    let releaseSelf!: () => void;
+    const self = new Promise<void>((resolve) => {
+      releaseSelf = resolve;
+    });
+    // 新尾节点 = 上一节完成后等本节点
+    const newTail = previous.then(() => self);
+    this.mutexChains.set(key, newTail);
+    try {
+      // 上一节失败不影响后续：业务异常已经各自上报
+      await previous.catch(() => undefined);
+      return await fn();
+    } finally {
+      releaseSelf();
+      // 如果我们就是当前尾巴（没有后继接上来），清理 Map 防长留 settled promise
+      if (this.mutexChains.get(key) === newTail) {
+        this.mutexChains.delete(key);
+      }
+    }
   }
 
   /**
@@ -86,75 +132,79 @@ export class ClientCacheStore {
    * 应用一次推送：写 blobs、更新 manifest。原子性保证：
    * - manifest 写入使用 tmp + rename，避免半写状态
    * - blob 不需要原子性（sha256 内容寻址，同名即同内容）
+   * - 同一 (deviceId, cwd) 上的 applyPush / upsertEntry / removeEntry 通过
+   *   withManifestLock 串行化，避免 manifest 的 read-modify-write 竞态
    */
   async applyPush(push: CachePush): Promise<ApplyPushResult> {
-    const sessionDir = this.sessionDir(push.deviceId, push.cwd);
-    await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
+    return this.withManifestLock(push.deviceId, push.cwd, async () => {
+      const sessionDir = this.sessionDir(push.deviceId, push.cwd);
+      await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
 
-    const manifest = await this.loadManifest(push.deviceId, push.cwd);
-    const scopeData = manifest.scopes[push.scope];
+      const manifest = await this.loadManifest(push.deviceId, push.cwd);
+      const scopeData = manifest.scopes[push.scope];
 
-    // 删除
-    let deleted = 0;
-    for (const rel of push.deletes) {
-      if (scopeData.entries[rel]) {
-        delete scopeData.entries[rel];
-        deleted += 1;
+      // 删除
+      let deleted = 0;
+      for (const rel of push.deletes) {
+        if (scopeData.entries[rel]) {
+          delete scopeData.entries[rel];
+          deleted += 1;
+        }
       }
-    }
 
-    // 新增/更新
-    let written = 0;
-    let skippedContents = 0;
-    for (const entry of push.adds) {
-      if (entry.skipped) {
-        // 仅更新 manifest，不写 blob
+      // 新增/更新
+      let written = 0;
+      let skippedContents = 0;
+      for (const entry of push.adds) {
+        if (entry.skipped) {
+          // 仅更新 manifest，不写 blob
+          scopeData.entries[entry.path] = {
+            size: entry.size,
+            mtime: entry.mtime,
+            sha256: entry.sha256 || null,
+            skipped: true,
+          };
+          skippedContents += 1;
+          continue;
+        }
+
+        if (!entry.content) {
+          throw new Error(
+            `cache_push adds 条目缺少 content 字段: scope=${push.scope} path=${entry.path}`,
+          );
+        }
+        const buf = Buffer.from(entry.content, "base64");
+        const actualSha = sha256Hex(buf);
+        if (actualSha !== entry.sha256) {
+          throw new Error(
+            `cache_push 条目 sha256 校验失败: scope=${push.scope} path=${entry.path} ` +
+            `declared=${entry.sha256} actual=${actualSha}`,
+          );
+        }
+        await writeBlobIfMissing(sessionDir, actualSha, buf);
         scopeData.entries[entry.path] = {
           size: entry.size,
           mtime: entry.mtime,
-          sha256: entry.sha256 || null,
-          skipped: true,
+          sha256: actualSha,
         };
-        skippedContents += 1;
-        continue;
+        written += 1;
       }
 
-      if (!entry.content) {
-        throw new Error(
-          `cache_push adds 条目缺少 content 字段: scope=${push.scope} path=${entry.path}`,
-        );
+      // 标记 truncated 用于后续诊断；仍允许继续运行
+      if (push.truncated) {
+        scopeData.truncated = true;
+      } else {
+        delete scopeData.truncated;
       }
-      const buf = Buffer.from(entry.content, "base64");
-      const actualSha = sha256Hex(buf);
-      if (actualSha !== entry.sha256) {
-        throw new Error(
-          `cache_push 条目 sha256 校验失败: scope=${push.scope} path=${entry.path} ` +
-          `declared=${entry.sha256} actual=${actualSha}`,
-        );
-      }
-      await writeBlobIfMissing(sessionDir, actualSha, buf);
-      scopeData.entries[entry.path] = {
-        size: entry.size,
-        mtime: entry.mtime,
-        sha256: actualSha,
+
+      await writeManifestAtomic(this.manifestPath(push.deviceId, push.cwd), manifest);
+      return {
+        written,
+        deleted,
+        skippedContents,
+        manifest: scopeData,
       };
-      written += 1;
-    }
-
-    // 标记 truncated 用于后续诊断；仍允许继续运行
-    if (push.truncated) {
-      scopeData.truncated = true;
-    } else {
-      delete scopeData.truncated;
-    }
-
-    await writeManifestAtomic(this.manifestPath(push.deviceId, push.cwd), manifest);
-    return {
-      written,
-      deleted,
-      skippedContents,
-      manifest: scopeData,
-    };
+    });
   }
 
   /**
@@ -211,9 +261,11 @@ export class ClientCacheStore {
     relPath: string,
     entry: CacheEntry,
   ): Promise<void> {
-    const manifest = await this.loadManifest(deviceId, cwd);
-    manifest.scopes[scope].entries[relPath] = entry;
-    await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+    return this.withManifestLock(deviceId, cwd, async () => {
+      const manifest = await this.loadManifest(deviceId, cwd);
+      manifest.scopes[scope].entries[relPath] = entry;
+      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+    });
   }
 
   /**
@@ -225,11 +277,13 @@ export class ClientCacheStore {
     scope: CacheScope,
     relPath: string,
   ): Promise<void> {
-    const manifest = await this.loadManifest(deviceId, cwd);
-    if (scope in manifest.scopes && relPath in manifest.scopes[scope].entries) {
-      delete manifest.scopes[scope].entries[relPath];
-      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
-    }
+    return this.withManifestLock(deviceId, cwd, async () => {
+      const manifest = await this.loadManifest(deviceId, cwd);
+      if (scope in manifest.scopes && relPath in manifest.scopes[scope].entries) {
+        delete manifest.scopes[scope].entries[relPath];
+        await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+      }
+    });
   }
 
   /**

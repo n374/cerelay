@@ -868,6 +868,7 @@ export class CerelayServer {
         deviceId: message.deviceId,
         cwd: message.cwd,
         scope: message.scope,
+        seq: message.seq,
         written: result.written,
         deleted: result.deleted,
         skippedContents: result.skippedContents,
@@ -878,6 +879,7 @@ export class CerelayServer {
         deviceId: message.deviceId,
         cwd: message.cwd,
         scope: message.scope,
+        seq: message.seq,
         ok: true,
       };
     } catch (err) {
@@ -886,6 +888,7 @@ export class CerelayServer {
         deviceId: message.deviceId,
         cwd: message.cwd,
         scope: message.scope,
+        seq: message.seq,
         error: asError(err).message,
       });
       ack = {
@@ -893,6 +896,7 @@ export class CerelayServer {
         deviceId: message.deviceId,
         cwd: message.cwd,
         scope: message.scope,
+        seq: message.seq,
         ok: false,
         error: asError(err).message,
       };

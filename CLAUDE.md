@@ -298,6 +298,21 @@ hooks: {
 - 失败策略：缓存同步失败不阻塞 PTY session 启动——降级为"无 Server 缓存"，FUSE 读请求仍可穿透回 Client
 - Integration 测试通过 `CERELAY_DISABLE_INITIAL_CACHE_SYNC=true` 跳过该流程，避免 mock server 需要模拟该协议
 
+**启动期同步进度 UI 与 pipeline / Initial cache sync progress & pipeline**（`client/src/cache-sync.ts` + `client/src/ui.ts` + `server/src/client-cache-store.ts`）：
+
+- **Pipeline 发送**：每个有 content 的文件单独发一个 `cache_push`，发完不等 ack 立刻发下一个；ack 通过协议中的 `seq` 字段（单调递增）异步匹配 in-flight 队列
+- **流控水位**：`MAX_INFLIGHT_BYTES = 16 MB`。当 in-flight 字节累计超过该阈值时暂停 send，等任意 ack 释放配额后继续。本地/局域网下基本不触发，远程 RTT 200ms × 80MB/s ≈ 16MB 是流水线满载所需深度
+- **协议 `seq`**：`CachePush.seq` / `CachePushAck.seq` 都是 required；server 在 `handleCachePush` 中原样回显。pipeline 模式下同一 scope 可能有多个 push in-flight，只靠 scope 无法区分
+- **Server 端 manifest 串行锁**（`client-cache-store.ts: withManifestLock`）：按 `(deviceId, cwd)` 维护 promise 链 mutex，串行化 `applyPush` / `upsertEntry` / `removeEntry` 的 read-modify-write。**这是 pipeline 的硬性前提**：server 的 message handler 是并发的（`server.ts` 用 `void this.handleMessage()`），无锁状态下 manifest 写入会丢更新
+- **元数据批**（deletes + skipped）：每 scope 第一发，等 ack 后再开始 pipeline。这部分占用 in-flight 但 size 记 0，不消耗流控配额
+- **进度展示**（双行）：
+  - line1 = 跨 scope 合并总进度（spinner + 进度条 + 百分比 + 已 ack 文件/字节），按 ack 字节**精确计算**
+  - line2 = `→ 当前 ack 等待: <最早未 ack 的文件>  (in-flight K 文件 / X MB)`，无文件级进度条
+- **没有单文件进度条**：pipeline 后多个文件的字节同时滞留 OS 发送缓冲，`ws.bufferedAmount` 反映的是 in-flight 集合的总残留，无法分离到单个文件，所以放弃单文件进度（之前的 `bufferedBaseline` 字段也已删除）
+- 事件序列（`CacheSyncEvent`）：`skipped` | `scan_start` → `scan_done` → `upload_start` → 多对 `file_pushed` / `file_acked`（可乱序交叠）→ `upload_done`
+- 渲染节拍固定 100ms（10Hz）；事件只更新内部状态，不直接写 stdout
+- 仅 TTY 场景启用（`process.stdout.isTTY === true`）；非 TTY / CI 走纯 log，不输出 ANSI 控制序列
+
 **FUSE 读路径与 cache 协同**（`server/src/file-proxy-manager.ts`）：
 
 - `create_pty_session` 会把 Client 的 `deviceId` 带给 Server；`FileProxyManager` 收到 `cacheStore + deviceId` 后启用 cache 读优先

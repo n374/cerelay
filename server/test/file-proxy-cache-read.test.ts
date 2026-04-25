@@ -73,6 +73,7 @@ test("buildSnapshotFromManifest 生成目录 + 文件 + 嵌套子目录", async 
     deviceId: DEVICE_ID,
     cwd: CLIENT_CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [
       { path: "settings.json", size: 2, mtime: 1000, sha256: sha256("s1"), content: b64("s1") },
       { path: "subdir/nested.json", size: 2, mtime: 2000, sha256: sha256("n1"), content: b64("n1") },
@@ -83,6 +84,7 @@ test("buildSnapshotFromManifest 生成目录 + 文件 + 嵌套子目录", async 
     deviceId: DEVICE_ID,
     cwd: CLIENT_CWD,
     scope: "claude-json",
+    seq: 2,
     adds: [{ path: "", size: 2, mtime: 3000, sha256: sha256("j1"), content: b64("j1") }],
     deletes: [],
   }]);
@@ -135,6 +137,7 @@ test("buildSnapshotFromManifest 对 skipped 文件只有 stat 无 data", async (
     deviceId: DEVICE_ID,
     cwd: CLIENT_CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [{
       path: "history/big.log",
       size: 10 * 1024 * 1024,
@@ -171,6 +174,7 @@ test("tryServeReadFromCache 命中时直接写回、不发 file_proxy_request", 
     deviceId: DEVICE_ID,
     cwd: CLIENT_CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [{
       path: "settings.json",
       size: content.length,
@@ -216,6 +220,7 @@ test("tryServeReadFromCache 对 skipped 文件返回 false（让调用方穿透�
     deviceId: DEVICE_ID,
     cwd: CLIENT_CWD,
     scope: "claude-home",
+    seq: 1,
     adds: [{
       path: "big.log",
       size: 5_000_000,

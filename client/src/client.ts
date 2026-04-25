@@ -9,13 +9,15 @@ import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { FileProxyHandler } from "./file-proxy.js";
-import { UI } from "./ui.js";
+import { UI, CacheSyncProgressView } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
 import { getOrCreateDeviceId } from "./device-id.js";
 import { performInitialCacheSync } from "./cache-sync.js";
 import type {
   CacheHandshake,
+  CacheManifest,
   CachePush,
+  CachePushAck,
   CreatePtySession,
   FileProxyRequest,
   PtyExit,
@@ -478,13 +480,79 @@ export class CerelayClient {
       return;
     }
 
+    // 仅在 TTY 场景下挂进度视图。非 TTY（管道/CI）走纯 log，不输出 ANSI。
+    const ttyView = process.stdout.isTTY ? new CacheSyncProgressView() : null;
+
+    // pipeline 模式下需要长期监听 cache_push_ack（多个 ack 并发到达）+ 一次性收
+    // cache_manifest。这里挂一个长期 consumer 自己分流，不复用 waitForSpecificMessage
+    // 的"单次 consumer"模式。其他类型消息（pty_session_created 等）回流到
+    // pendingMessages，留给后续主流程处理。
+    let manifestResolve: ((m: CacheManifest) => void) | null = null;
+    const ackSubscribers = new Set<(ack: CachePushAck) => void>();
+
+    const onCacheMessage = (raw: string) => {
+      let parsed: { type?: string };
+      try {
+        parsed = JSON.parse(raw) as { type?: string };
+      } catch {
+        this.pendingMessages.push(raw);
+        return;
+      }
+      if (parsed.type === "cache_manifest" && manifestResolve) {
+        const r = manifestResolve;
+        manifestResolve = null;
+        r(parsed as CacheManifest);
+        return;
+      }
+      if (parsed.type === "cache_push_ack") {
+        // 复制订阅列表后再迭代，避免回调里 unsubscribe 引发副作用
+        for (const sub of Array.from(ackSubscribers)) {
+          try {
+            sub(parsed as CachePushAck);
+          } catch (subErr) {
+            log.warn("ack subscriber 抛错，已忽略", {
+              error: subErr instanceof Error ? subErr.message : String(subErr),
+            });
+          }
+        }
+        return;
+      }
+      this.pendingMessages.push(raw);
+    };
+
+    const releaseConsumer = this.attachMessageConsumer(onCacheMessage);
+    this.flushPendingMessages();
+
     try {
       const summaries = await performInitialCacheSync(
         {
           sendMessage: (msg: CacheHandshake | CachePush) => this.writeJSON(msg),
-          waitForServerMessage: <T>(predicate: (raw: string) => T | null, timeoutMs: number) =>
-            this.waitForSpecificMessage<T>(predicate, timeoutMs),
+          waitForServerMessage: <T>(predicate: (raw: string) => T | null, timeoutMs: number) => {
+            // 仅 cache_manifest 一次性场景：钩进上面的长期 consumer
+            return new Promise<T>((resolve, reject) => {
+              const timer = setTimeout(() => {
+                manifestResolve = null;
+                reject(new Error(`等待 cache_manifest 超时（${timeoutMs}ms）`));
+              }, timeoutMs);
+              manifestResolve = (msg) => {
+                clearTimeout(timer);
+                const matched = predicate(JSON.stringify(msg));
+                if (matched === null) {
+                  reject(new Error("manifest predicate 拒绝消息"));
+                  return;
+                }
+                resolve(matched);
+              };
+            });
+          },
+          subscribeAcks: (handler) => {
+            ackSubscribers.add(handler);
+            return () => {
+              ackSubscribers.delete(handler);
+            };
+          },
           homedir: os.homedir(),
+          onProgress: ttyView ? (event) => ttyView.handle(event) : undefined,
         },
         {
           deviceId: this.deviceId,
@@ -507,6 +575,9 @@ export class CerelayClient {
       log.warn("启动缓存同步异常，降级继续", {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      ttyView?.dispose();
+      releaseConsumer();
     }
   }
 

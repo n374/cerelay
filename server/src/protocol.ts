@@ -231,6 +231,11 @@ export interface CachePush {
   adds: CachePushEntry[];
   deletes: string[];
   /**
+   * 单调递增的请求号；Server 必须在 ack 中原样回显，Client 据此匹配 in-flight 请求。
+   * Pipeline 模式下同一 scope 可能有多个 push in-flight，仅靠 scope 无法区分。
+   */
+  seq: number;
+  /**
    * true 表示该 scope 累计大小超过 100MB 阈值，Hand 已放弃同步剩余文件。
    * Server 侧应保留此标记以便后续诊断（manifest.truncated）。
    */
@@ -243,6 +248,8 @@ export interface CachePushAck {
   deviceId: string;
   cwd: string;
   scope: CacheScope;
+  /** echo 自 cache_push.seq；Client 用此匹配请求 */
+  seq: number;
   ok: boolean;
   error?: string;
 }

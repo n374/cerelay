@@ -253,6 +253,11 @@ export interface CachePush {
   scope: CacheScope;
   adds: CachePushEntry[];
   deletes: string[];
+  /**
+   * 单调递增的请求号；Server 在 ack 中原样回显。
+   * Pipeline 模式下同一 scope 可能有多个 push in-flight，仅靠 scope 无法区分。
+   */
+  seq: number;
   truncated?: boolean;
 }
 
@@ -261,6 +266,8 @@ export interface CachePushAck {
   deviceId: string;
   cwd: string;
   scope: CacheScope;
+  /** echo 自 cache_push.seq；Client 用此匹配请求 */
+  seq: number;
   ok: boolean;
   error?: string;
 }
