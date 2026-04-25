@@ -18,6 +18,7 @@ import path from "node:path";
 import type {
   CacheEntry,
   CacheManifestData,
+  CacheTaskChange,
   CachePush,
   CachePushEntry,
   CacheScope,
@@ -27,6 +28,12 @@ export const CACHE_SCOPES: CacheScope[] = ["claude-home", "claude-json"];
 
 /** Server 侧完整 manifest：按 scope 分组；未初始化的 scope 视为空条目集。 */
 export interface PersistedManifest {
+  version: 2;
+  revision: number;
+  scopes: Record<CacheScope, CacheManifestData>;
+}
+
+interface PersistedManifestV1 {
   version: 1;
   scopes: Record<CacheScope, CacheManifestData & { truncated?: boolean }>;
 }
@@ -37,10 +44,18 @@ export interface ClientCacheStoreOptions {
 }
 
 export interface ApplyPushResult {
+  revision: number;
   written: number;
   deleted: number;
   skippedContents: number;
   manifest: CacheManifestData & { truncated?: boolean };
+}
+
+export interface ApplyDeltaResult {
+  revision: number;
+  written: number;
+  deleted: number;
+  skippedContents: number;
 }
 
 export class ClientCacheStore {
@@ -112,15 +127,12 @@ export class ClientCacheStore {
     const manifestPath = this.manifestPath(deviceId, cwd);
     try {
       const raw = await readFile(manifestPath, "utf8");
-      const parsed = JSON.parse(raw) as PersistedManifest;
+      const parsed = JSON.parse(raw) as PersistedManifest | PersistedManifestV1;
+      if (parsed?.version === 2 && parsed.scopes) {
+        return normalizeManifestV2(parsed);
+      }
       if (parsed?.version === 1 && parsed.scopes) {
-        // 补齐缺失 scope，避免调用方处理 undefined
-        for (const scope of CACHE_SCOPES) {
-          if (!parsed.scopes[scope]) {
-            parsed.scopes[scope] = { entries: {} };
-          }
-        }
-        return parsed;
+        return upgradeManifestV1(parsed);
       }
     } catch {
       // ENOENT / JSON 解析失败 → 回空
@@ -141,54 +153,12 @@ export class ClientCacheStore {
       await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
 
       const manifest = await this.loadManifest(push.deviceId, push.cwd);
+      const result = await this.applyChangesToManifest(
+        manifest,
+        sessionDir,
+        toDeltaChanges(push),
+      );
       const scopeData = manifest.scopes[push.scope];
-
-      // 删除
-      let deleted = 0;
-      for (const rel of push.deletes) {
-        if (scopeData.entries[rel]) {
-          delete scopeData.entries[rel];
-          deleted += 1;
-        }
-      }
-
-      // 新增/更新
-      let written = 0;
-      let skippedContents = 0;
-      for (const entry of push.adds) {
-        if (entry.skipped) {
-          // 仅更新 manifest，不写 blob
-          scopeData.entries[entry.path] = {
-            size: entry.size,
-            mtime: entry.mtime,
-            sha256: entry.sha256 || null,
-            skipped: true,
-          };
-          skippedContents += 1;
-          continue;
-        }
-
-        if (!entry.content) {
-          throw new Error(
-            `cache_push adds 条目缺少 content 字段: scope=${push.scope} path=${entry.path}`,
-          );
-        }
-        const buf = Buffer.from(entry.content, "base64");
-        const actualSha = sha256Hex(buf);
-        if (actualSha !== entry.sha256) {
-          throw new Error(
-            `cache_push 条目 sha256 校验失败: scope=${push.scope} path=${entry.path} ` +
-            `declared=${entry.sha256} actual=${actualSha}`,
-          );
-        }
-        await writeBlobIfMissing(sessionDir, actualSha, buf);
-        scopeData.entries[entry.path] = {
-          size: entry.size,
-          mtime: entry.mtime,
-          sha256: actualSha,
-        };
-        written += 1;
-      }
 
       // 标记 truncated 用于后续诊断；仍允许继续运行
       if (push.truncated) {
@@ -197,12 +167,36 @@ export class ClientCacheStore {
         delete scopeData.truncated;
       }
 
+      manifest.revision += 1;
       await writeManifestAtomic(this.manifestPath(push.deviceId, push.cwd), manifest);
       return {
-        written,
-        deleted,
-        skippedContents,
+        revision: manifest.revision,
+        written: result.written,
+        deleted: result.deleted,
+        skippedContents: result.skippedContents,
         manifest: scopeData,
+      };
+    });
+  }
+
+  async applyDelta(
+    deviceId: string,
+    cwd: string,
+    changes: CacheTaskChange[],
+  ): Promise<ApplyDeltaResult> {
+    return this.withManifestLock(deviceId, cwd, async () => {
+      const sessionDir = this.sessionDir(deviceId, cwd);
+      await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
+
+      const manifest = await this.loadManifest(deviceId, cwd);
+      const result = await this.applyChangesToManifest(manifest, sessionDir, changes);
+      manifest.revision += 1;
+      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+      return {
+        revision: manifest.revision,
+        written: result.written,
+        deleted: result.deleted,
+        skippedContents: result.skippedContents,
       };
     });
   }
@@ -264,6 +258,7 @@ export class ClientCacheStore {
     return this.withManifestLock(deviceId, cwd, async () => {
       const manifest = await this.loadManifest(deviceId, cwd);
       manifest.scopes[scope].entries[relPath] = entry;
+      manifest.revision += 1;
       await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
     });
   }
@@ -281,6 +276,7 @@ export class ClientCacheStore {
       const manifest = await this.loadManifest(deviceId, cwd);
       if (scope in manifest.scopes && relPath in manifest.scopes[scope].entries) {
         delete manifest.scopes[scope].entries[relPath];
+        manifest.revision += 1;
         await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
       }
     });
@@ -309,11 +305,73 @@ export class ClientCacheStore {
   private manifestPath(deviceId: string, cwd: string): string {
     return path.join(this.sessionDir(deviceId, cwd), "manifest.json");
   }
+
+  private async applyChangesToManifest(
+    manifest: PersistedManifest,
+    sessionDir: string,
+    changes: CacheTaskChange[],
+  ): Promise<Omit<ApplyDeltaResult, "revision">> {
+    let written = 0;
+    let deleted = 0;
+    let skippedContents = 0;
+
+    for (const change of changes) {
+      const scopeData = manifest.scopes[change.scope];
+      if (change.kind === "delete") {
+        if (scopeData.entries[change.path]) {
+          delete scopeData.entries[change.path];
+          deleted += 1;
+        }
+        continue;
+      }
+
+      if (change.skipped) {
+        scopeData.entries[change.path] = {
+          size: change.size,
+          mtime: change.mtime,
+          sha256: change.sha256 ?? null,
+          skipped: true,
+        };
+        skippedContents += 1;
+        continue;
+      }
+
+      if (!change.contentBase64) {
+        throw new Error(
+          `cache_task_delta upsert 条目缺少 contentBase64: scope=${change.scope} path=${change.path}`,
+        );
+      }
+      if (!change.sha256) {
+        throw new Error(
+          `cache_task_delta upsert 条目缺少 sha256: scope=${change.scope} path=${change.path}`,
+        );
+      }
+
+      const buf = Buffer.from(change.contentBase64, "base64");
+      const actualSha = sha256Hex(buf);
+      if (actualSha !== change.sha256) {
+        throw new Error(
+          `cache_task_delta 条目 sha256 校验失败: scope=${change.scope} path=${change.path} ` +
+          `declared=${change.sha256} actual=${actualSha}`,
+        );
+      }
+      await writeBlobIfMissing(sessionDir, actualSha, buf);
+      scopeData.entries[change.path] = {
+        size: change.size,
+        mtime: change.mtime,
+        sha256: actualSha,
+      };
+      written += 1;
+    }
+
+    return { written, deleted, skippedContents };
+  }
 }
 
 export function emptyManifest(): PersistedManifest {
   return {
-    version: 1,
+    version: 2,
+    revision: 0,
     scopes: {
       "claude-home": { entries: {} },
       "claude-json": { entries: {} },
@@ -392,4 +450,46 @@ export function pushEntryToCacheEntry(entry: CachePushEntry): CacheEntry {
     mtime: entry.mtime,
     sha256: entry.sha256,
   };
+}
+
+function normalizeManifestV2(manifest: PersistedManifest): PersistedManifest {
+  for (const scope of CACHE_SCOPES) {
+    if (!manifest.scopes[scope]) {
+      manifest.scopes[scope] = { entries: {} };
+    }
+  }
+  if (typeof manifest.revision !== "number" || Number.isNaN(manifest.revision)) {
+    manifest.revision = 0;
+  }
+  return manifest;
+}
+
+function upgradeManifestV1(manifest: PersistedManifestV1): PersistedManifest {
+  const upgraded = emptyManifest();
+  for (const scope of CACHE_SCOPES) {
+    upgraded.scopes[scope] = manifest.scopes[scope]
+      ? { entries: { ...manifest.scopes[scope].entries }, truncated: manifest.scopes[scope].truncated }
+      : { entries: {} };
+  }
+  return upgraded;
+}
+
+function toDeltaChanges(push: CachePush): CacheTaskChange[] {
+  return [
+    ...push.deletes.map((relPath) => ({
+      kind: "delete" as const,
+      scope: push.scope,
+      path: relPath,
+    })),
+    ...push.adds.map((entry) => ({
+      kind: "upsert" as const,
+      scope: push.scope,
+      path: entry.path,
+      size: entry.size,
+      mtime: entry.mtime,
+      sha256: entry.skipped ? entry.sha256 || null : entry.sha256,
+      contentBase64: entry.content,
+      skipped: entry.skipped,
+    })),
+  ];
 }

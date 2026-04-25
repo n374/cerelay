@@ -7,11 +7,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { ClientCacheStore, cwdHash, sanitizeDeviceId } from "../src/client-cache-store.js";
-import type { CachePush } from "../src/protocol.js";
+import type { CachePush, CacheTaskChange } from "../src/protocol.js";
 
 const DEVICE_ID = "device-abc";
 const CWD = "/Users/foo/project";
@@ -38,9 +38,41 @@ test("loadManifest 对新设备返回空 manifest", async (t) => {
   t.after(cleanup);
 
   const manifest = await store.loadManifest(DEVICE_ID, CWD);
-  assert.equal(manifest.version, 1);
+  assert.equal(manifest.version, 2);
+  assert.equal(manifest.revision, 0);
   assert.deepEqual(manifest.scopes["claude-home"].entries, {});
   assert.deepEqual(manifest.scopes["claude-json"].entries, {});
+});
+
+test("loadManifest 兼容读取 v1 manifest 并补 revision=0", async (t) => {
+  const { store, dataDir, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const manifestPath = path.join(dataDir, "client-cache", DEVICE_ID, cwdHash(CWD), "manifest.json");
+  await mkdir(path.dirname(manifestPath), { recursive: true });
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      scopes: {
+        "claude-home": {
+          entries: {
+            "legacy.txt": { size: 1, mtime: 1, sha256: "abc" },
+          },
+        },
+        "claude-json": { entries: {} },
+      },
+    }),
+    "utf8",
+  );
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.version, 2);
+  assert.equal(manifest.revision, 0);
+  assert.deepEqual(
+    manifest.scopes["claude-home"].entries["legacy.txt"],
+    { size: 1, mtime: 1, sha256: "abc" },
+  );
 });
 
 test("applyPush 写入 blob 并更新 manifest", async (t) => {
@@ -67,6 +99,7 @@ test("applyPush 写入 blob 并更新 manifest", async (t) => {
   };
 
   const result = await store.applyPush(push);
+  assert.equal(result.revision, 1);
   assert.equal(result.written, 1);
   assert.equal(result.deleted, 0);
 
@@ -77,6 +110,7 @@ test("applyPush 写入 blob 并更新 manifest", async (t) => {
 
   // Manifest 被更新
   const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.revision, 1);
   assert.deepEqual(
     manifest.scopes["claude-home"].entries["settings.json"],
     { size: content.length, mtime: 1700000000000, sha256: sha256(content) },
@@ -119,8 +153,10 @@ test("applyPush deletes 从 manifest 移除条目", async (t) => {
   });
 
   assert.equal(result.deleted, 1);
+  assert.equal(result.revision, 2);
   const manifest = await store.loadManifest(DEVICE_ID, CWD);
   assert.equal(manifest.scopes["claude-home"].entries["a.txt"], undefined);
+  assert.equal(manifest.revision, 2);
 });
 
 test("applyPush sha256 不一致时抛错，manifest 不被污染", async (t) => {
@@ -211,6 +247,101 @@ test("applyPush truncated=true 标记被保存到 manifest", async (t) => {
   });
   const manifest2 = await store.loadManifest(DEVICE_ID, CWD);
   assert.equal(manifest2.scopes["claude-home"].truncated, undefined);
+});
+
+test("applyDelta 每次成功应用后 revision 递增", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const changes: CacheTaskChange[] = [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "alpha.txt",
+      size: 5,
+      mtime: 10,
+      sha256: sha256("alpha"),
+      contentBase64: b64("alpha"),
+    },
+  ];
+  const first = await store.applyDelta(DEVICE_ID, CWD, changes);
+  assert.equal(first.revision, 1);
+
+  const second = await store.applyDelta(DEVICE_ID, CWD, [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "beta.txt",
+      size: 4,
+      mtime: 11,
+      sha256: sha256("beta"),
+      contentBase64: b64("beta"),
+    },
+  ]);
+  assert.equal(second.revision, 2);
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.revision, 2);
+});
+
+test("applyDelta 覆盖 delete、skipped 与 sha256 校验", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  await store.applyDelta(DEVICE_ID, CWD, [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "keep.txt",
+      size: 4,
+      mtime: 1,
+      sha256: sha256("keep"),
+      contentBase64: b64("keep"),
+    },
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "big.bin",
+      size: 8 * 1024 * 1024,
+      mtime: 2,
+      sha256: null,
+      skipped: true,
+    },
+  ]);
+
+  const result = await store.applyDelta(DEVICE_ID, CWD, [
+    {
+      kind: "delete",
+      scope: "claude-home",
+      path: "keep.txt",
+    },
+  ]);
+  assert.equal(result.deleted, 1);
+  assert.equal(result.revision, 2);
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.scopes["claude-home"].entries["keep.txt"], undefined);
+  assert.deepEqual(manifest.scopes["claude-home"].entries["big.bin"], {
+    size: 8 * 1024 * 1024,
+    mtime: 2,
+    sha256: null,
+    skipped: true,
+  });
+
+  await assert.rejects(
+    store.applyDelta(DEVICE_ID, CWD, [
+      {
+        kind: "upsert",
+        scope: "claude-home",
+        path: "bad.txt",
+        size: 3,
+        mtime: 3,
+        sha256: "deadbeef".repeat(8),
+        contentBase64: b64("bad"),
+      },
+    ]),
+    /sha256 校验失败/,
+  );
 });
 
 test("不同 cwd 的缓存互不污染", async (t) => {
