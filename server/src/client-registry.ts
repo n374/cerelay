@@ -7,6 +7,11 @@
 // ============================================================
 
 import WebSocket from "ws";
+import type { ClientHello } from "./protocol.js";
+
+function makeCacheKey(deviceId: string, cwd: string): string {
+  return `${deviceId}\0${cwd}`;
+}
 
 export interface ClientInfo {
   /** 唯一 ID */
@@ -21,10 +26,19 @@ export interface ClientInfo {
   remoteAddress: string;
   /** WebSocket 连接 */
   socket: WebSocket;
+  /** Client 上报的设备 ID */
+  deviceId?: string;
+  /** Client 上报的 cwd */
+  cwd?: string;
+  /** Client 上报的 cache 能力 */
+  cacheCapabilities?: ClientHello["capabilities"];
+  /** 最近一次 cache task heartbeat 时间 */
+  lastHeartbeatAt?: Date;
 }
 
 export class ClientRegistry {
   private readonly clients = new Map<string, ClientInfo>();
+  private readonly clientsByCacheKey = new Map<string, Set<string>>();
 
   /** 注册一个新的 Client 连接 */
   register(id: string, socket: WebSocket, tokenId: string, remoteAddress: string): ClientInfo {
@@ -42,6 +56,7 @@ export class ClientRegistry {
 
   /** 移除 Client 连接 */
   unregister(clientId: string): void {
+    this.detachCacheKey(clientId);
     this.clients.delete(clientId);
   }
 
@@ -74,6 +89,56 @@ export class ClientRegistry {
   /** 在线数量 */
   count(): number {
     return this.clients.size;
+  }
+
+  attachHello(clientId: string, hello: ClientHello): void {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      return;
+    }
+
+    this.detachCacheKey(clientId);
+    client.deviceId = hello.deviceId;
+    client.cwd = hello.cwd;
+    client.cacheCapabilities = hello.capabilities;
+
+    const cacheKey = this.cacheKeyOf(clientId);
+    if (!cacheKey) {
+      return;
+    }
+    const clientIds = this.clientsByCacheKey.get(cacheKey) ?? new Set<string>();
+    clientIds.add(clientId);
+    this.clientsByCacheKey.set(cacheKey, clientIds);
+  }
+
+  cacheKeyOf(clientId: string): string | undefined {
+    const client = this.clients.get(clientId);
+    if (!client?.deviceId || !client.cwd) {
+      return undefined;
+    }
+    return makeCacheKey(client.deviceId, client.cwd);
+  }
+
+  cacheKeysOf(clientId: string): string[] {
+    const key = this.cacheKeyOf(clientId);
+    return key ? [key] : [];
+  }
+
+  listClientsByCacheKey(cacheKey: string): ClientInfo[] {
+    const clientIds = this.clientsByCacheKey.get(cacheKey);
+    if (!clientIds) {
+      return [];
+    }
+    return Array.from(clientIds)
+      .map((clientId) => this.clients.get(clientId))
+      .filter((client): client is ClientInfo => Boolean(client));
+  }
+
+  setLastHeartbeat(clientId: string, at = new Date()): void {
+    const client = this.clients.get(clientId);
+    if (client) {
+      client.lastHeartbeatAt = at;
+    }
   }
 
   /**
@@ -116,5 +181,20 @@ export class ClientRegistry {
       tokenId: h.tokenId,
       remoteAddress: h.remoteAddress,
     }));
+  }
+
+  private detachCacheKey(clientId: string): void {
+    const cacheKey = this.cacheKeyOf(clientId);
+    if (!cacheKey) {
+      return;
+    }
+    const clientIds = this.clientsByCacheKey.get(cacheKey);
+    if (!clientIds) {
+      return;
+    }
+    clientIds.delete(clientId);
+    if (clientIds.size === 0) {
+      this.clientsByCacheKey.delete(cacheKey);
+    }
   }
 }

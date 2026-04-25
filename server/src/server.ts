@@ -18,10 +18,15 @@ import path from "node:path";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import type {
+  CacheTaskDelta,
+  CacheTaskFault,
+  CacheTaskHeartbeat,
+  CacheTaskSyncComplete,
   CacheHandshake,
   CacheManifest,
   CachePush,
   CachePushAck,
+  ClientHello,
   Connected,
   CloseSession,
   CreatePtySession,
@@ -35,6 +40,7 @@ import type {
 import { CACHE_SCOPES, ClientCacheStore } from "./client-cache-store.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
+import { CacheTaskManager } from "./cache-task-manager.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
@@ -87,6 +93,8 @@ export class CerelayServer {
   private readonly cacheStore = new ClientCacheStore({
     dataDir: process.env.CERELAY_DATA_DIR?.trim() || "/var/lib/cerelay",
   });
+  private readonly cacheTaskManager: CacheTaskManager;
+  private readonly cacheTaskSweepTimer: NodeJS.Timeout;
 
   // HTTP/WS 基础设施
   private readonly httpServer = createServer(this.handleHttpRequest.bind(this));
@@ -99,6 +107,13 @@ export class CerelayServer {
     this.port = options.port;
     this.cerelayKey = options.cerelayKey || undefined;
     this.auth = new TokenStore(options.authEnabled ?? false);
+    this.cacheTaskManager = new CacheTaskManager({
+      registry: this.clients,
+      store: this.cacheStore,
+      sendToClient: async (clientId, message) => {
+        await this.sendToClient(clientId, message);
+      },
+    });
 
     if (this.cerelayKey) {
       log.info("CERELAY_KEY 已配置，Client 连接需提供匹配的 key");
@@ -119,6 +134,13 @@ export class CerelayServer {
         log.debug("已清理过期或吊销的 token", { removed });
       }
     }, 60_000);
+    this.cacheTaskSweepTimer = setInterval(() => {
+      void this.cacheTaskManager.sweepHeartbeats().catch((error) => {
+        log.error("执行 cache task heartbeat sweep 失败", {
+          error: asError(error).message,
+        });
+      });
+    }, 5_000);
 
     this.httpServer.on("upgrade", this.handleUpgrade.bind(this));
     this.wsServer.on("connection", (socket, req) => {
@@ -160,6 +182,7 @@ export class CerelayServer {
     this.shuttingDown = true;
     log.info("开始优雅关闭...");
     clearInterval(this.tokenCleanupTimer);
+    clearInterval(this.cacheTaskSweepTimer);
     for (const [sessionId, entry] of Array.from(this.ptySessions.entries())) {
       this.destroyPtySession(sessionId, entry, "服务器关闭");
     }
@@ -496,21 +519,32 @@ export class CerelayServer {
     });
 
     socket.on("close", () => {
-      this.clients.unregister(clientId);
-      this.stats.onHandDisconnected();
-      log.info("Client 已断开", { clientId });
-      clientLog.debug("开始处理 Client 断开后的 session 状态", {
-        sessionCount: clientInfo.sessionIds.size,
-      });
+      void (async () => {
+        try {
+          await this.cacheTaskManager.handleDisconnect(clientId);
+        } catch (error) {
+          log.error("处理 Client cache task 断开失败", {
+            clientId,
+            error: asError(error).message,
+          });
+        } finally {
+          this.clients.unregister(clientId);
+          this.stats.onHandDisconnected();
+          log.info("Client 已断开", { clientId });
+          clientLog.debug("开始处理 Client 断开后的 session 状态", {
+            sessionCount: clientInfo.sessionIds.size,
+          });
 
-      // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
-      for (const sessionId of clientInfo.sessionIds) {
-        const ptyEntry = this.ptySessions.get(sessionId);
-        if (ptyEntry) {
-          clientLog.debug("Client 断开时销毁 PTY session", { sessionId });
-          this.destroyPtySession(sessionId, ptyEntry, "Client 断开");
+          // 活跃中的 session 无法安全恢复，直接关闭；空闲 session 进入短暂可恢复窗口。
+          for (const sessionId of clientInfo.sessionIds) {
+            const ptyEntry = this.ptySessions.get(sessionId);
+            if (ptyEntry) {
+              clientLog.debug("Client 断开时销毁 PTY session", { sessionId });
+              this.destroyPtySession(sessionId, ptyEntry, "Client 断开");
+            }
+          }
         }
-      }
+      })();
     });
 
     socket.on("error", (error) => {
@@ -566,6 +600,24 @@ export class CerelayServer {
           return;
         case "cache_push":
           await this.handleCachePush(clientId, JSON.parse(raw) as CachePush);
+          return;
+        case "client_hello":
+          await this.handleClientHello(clientId, JSON.parse(raw) as ClientHello);
+          return;
+        case "cache_task_delta":
+          await this.handleCacheTaskDelta(clientId, JSON.parse(raw) as CacheTaskDelta);
+          return;
+        case "cache_task_sync_complete":
+          await this.handleCacheTaskSyncComplete(
+            clientId,
+            JSON.parse(raw) as CacheTaskSyncComplete,
+          );
+          return;
+        case "cache_task_heartbeat":
+          await this.handleCacheTaskHeartbeat(clientId, JSON.parse(raw) as CacheTaskHeartbeat);
+          return;
+        case "cache_task_fault":
+          await this.handleCacheTaskFault(clientId, JSON.parse(raw) as CacheTaskFault);
           return;
         default:
           throw new Error(`未知消息类型: ${envelope.type}`);
@@ -902,6 +954,32 @@ export class CerelayServer {
       };
     }
     await this.sendToClient(clientId, ack);
+  }
+
+  private async handleClientHello(clientId: string, message: ClientHello): Promise<void> {
+    await this.cacheTaskManager.registerHello(clientId, message);
+  }
+
+  private async handleCacheTaskDelta(clientId: string, message: CacheTaskDelta): Promise<void> {
+    await this.cacheTaskManager.applyDelta(clientId, message);
+  }
+
+  private async handleCacheTaskSyncComplete(
+    clientId: string,
+    message: CacheTaskSyncComplete,
+  ): Promise<void> {
+    await this.cacheTaskManager.completeInitialSync(clientId, message);
+  }
+
+  private async handleCacheTaskHeartbeat(
+    clientId: string,
+    message: CacheTaskHeartbeat,
+  ): Promise<void> {
+    await this.cacheTaskManager.handleHeartbeat(clientId, message);
+  }
+
+  private async handleCacheTaskFault(clientId: string, message: CacheTaskFault): Promise<void> {
+    await this.cacheTaskManager.handleFault(clientId, message);
   }
 
   private getPtySessionEntry(sessionId: string): PtySessionEntry {
