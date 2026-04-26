@@ -2,9 +2,9 @@
 
 ## 概述 / Overview
 
-Axon Brain（即 Axon Server）可通过 Docker 打包为独立的可分发运行环境。Hand CLI 通过 WebSocket 连接到容器化的 Brain，无需在本地安装 Node.js、claude CLI 或任何服务端依赖。
+Cerelay Brain（即 Cerelay Server）可通过 Docker 打包为独立的可分发运行环境。Hand CLI 通过 WebSocket 连接到容器化的 Brain，无需在本地安装 Node.js、claude CLI 或任何服务端依赖。
 
-Axon Brain (the Axon Server) can be packaged as a standalone distributable runtime via Docker. The Hand CLI connects to the containerized Brain via WebSocket, requiring no local Node.js, claude CLI, or server-side dependencies.
+Cerelay Brain (the Cerelay Server) can be packaged as a standalone distributable runtime via Docker. The Hand CLI connects to the containerized Brain via WebSocket, requiring no local Node.js, claude CLI, or server-side dependencies.
 
 ## 架构说明 / Architecture
 
@@ -17,7 +17,7 @@ Hand CLI (本地 / local)
 │         Docker 容器                  │
 │                                     │
 │  docker-entrypoint.sh               │
-│    └─ axon-server (Node.js)         │
+│    └─ cerelay-server (Node.js)         │
 │         └─ claude CLI (per-session) │
 │              └─ mount namespace     │
 │                                     │
@@ -42,7 +42,7 @@ cp .env.example .env
 docker compose up -d --build
 
 # 查看日志
-docker compose logs -f axon-brain
+docker compose logs -f cerelay-brain
 
 # 检查健康状态
 curl http://localhost:8765/health
@@ -72,32 +72,32 @@ npm start -- --server 192.168.1.100:8765
 | `CLAUDE_CONFIG` | 空 | claude CLI 额外配置（JSON 字符串） |
 | `CLAUDE_CREDENTIALS` | 空 | 可选：首次 seed 的登录凭证 JSON 字符串（会写入 Data 目录） |
 | `CERELAY_DATA_DIR` | `/var/lib/cerelay` | 容器内持久化数据目录（挂载自 `cerelay-data` volume） |
-| `AXON_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 per-session mount namespace runtime |
-| `AXON_NAMESPACE_RUNTIME_ROOT` | `/opt/axon-runtime` | 容器内 session runtime 根目录 |
+| `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 per-session mount namespace runtime |
+| `CERELAY_NAMESPACE_RUNTIME_ROOT` | `/opt/cerelay-runtime` | 容器内 session runtime 根目录 |
 
 ## 手动 Docker 命令 / Manual Docker Commands
 
 ```bash
 # 构建镜像
-docker build -t axon-brain:latest .
+docker build -t cerelay-brain:latest .
 
 # 运行容器
 docker run -d \
-  --name axon-brain \
+  --name cerelay-brain \
   -p 8765:8765 \
   --cap-add SYS_ADMIN \
   -e ANTHROPIC_API_KEY=your-key \
   # 或者 / Or:
   # -e ANTHROPIC_AUTH_TOKEN=your-auth-token \
   # -e ANTHROPIC_BASE_URL=https://your-anthropic-compatible-endpoint \
-  axon-brain:latest
+  cerelay-brain:latest
 
 # 查看日志
-docker logs -f axon-brain
+docker logs -f cerelay-brain
 
 # 停止
-docker stop axon-brain
-docker rm axon-brain
+docker stop cerelay-brain
+docker rm cerelay-brain
 ```
 
 ## 数据持久化 / Persistence
@@ -120,7 +120,7 @@ This setup also enables a per-session mount namespace runtime by default. For ea
 - CC 启动时的工作目录路径必须等于 Hand/Client 上报的 `cwd`，例如 Client 在 `/repo/app` 启动时，CC 内部 `pwd` 也应显示 `/repo/app`。
 - 用户文件系统访问必须通过 `PreToolUse` hook 转发到 Client 执行。`Bash`、`Read`、`Write`、`Edit`、`MultiEdit`、`Grep`、`Glob` 应使用 Client 的真实 cwd 和真实绝对路径语义。
 - 不要把 Client 的项目根目录、Client 根目录或宿主机 `/` 通过 FUSE/bind mount 暴露给 CC。项目源码、cwd 上级目录和其他系统路径的读写能力来自 Client-routed tools。
-- FUSE file proxy 只投影 Claude 运行配置：`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`，其中 `{cwd}/.claude/settings.local.json` 必须保留用于注入 Axon 的 `PreToolUse` hook。
+- FUSE file proxy 只投影 Claude 运行配置：`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`，其中 `{cwd}/.claude/settings.local.json` 必须保留用于注入 Cerelay 的 `PreToolUse` hook。
 - Server 侧凭证必须以 `home-claude/.credentials.json` shadow file 形式出现在 runtime 中；读、写、truncate 都必须落到 `${CERELAY_DATA_DIR}/credentials/default/.credentials.json`，而不是转发给 Client。首次启动凭证文件可为空，CC `login` 时由 FUSE create 创建——因此 shadow file 映射必须**总是注入**，不得因为文件不存在而跳过。
 
 ## Namespace 前置条件 / Namespace Prerequisites
@@ -129,9 +129,9 @@ This setup also enables a per-session mount namespace runtime by default. For ea
 - 镜像内需要 `util-linux`，以提供 `unshare` / `nsenter`
 - 登录凭证由 `cerelay-data` volume 持久化，不再需要从宿主机挂载 `~/.claude`
 
-如果这些条件不满足，可以把 `AXON_ENABLE_MOUNT_NAMESPACE=false`，Brain 会回退到普通目录 runtime。
+如果这些条件不满足，可以把 `CERELAY_ENABLE_MOUNT_NAMESPACE=false`，Brain 会回退到普通目录 runtime。
 
-If these requirements are not available, set `AXON_ENABLE_MOUNT_NAMESPACE=false` and Brain will fall back to a plain directory runtime.
+If these requirements are not available, set `CERELAY_ENABLE_MOUNT_NAMESPACE=false` and Brain will fall back to a plain directory runtime.
 
 ## 健康检查 / Health Check
 
@@ -148,18 +148,18 @@ curl http://localhost:8765/health
 
 ```bash
 # 直接 WebSocket 连接（需要开放端口）
-axon-hand --server your-server.com:8765
+cerelay-hand --server your-server.com:8765
 
 # 通过 SSH 隧道（推荐，更安全）
 ssh -L 8765:localhost:8765 user@your-server.com -N &
-axon-hand --server localhost:8765
+cerelay-hand --server localhost:8765
 ```
 
 ## 文件说明 / File Locations
 
 | 文件 | 说明 |
 |------|------|
-| `Dockerfile` | 多阶段构建：Node.js + claude CLI + axon-server |
+| `Dockerfile` | 多阶段构建：Node.js + claude CLI + cerelay-server |
 | `docker-compose.yml` | 完整 compose 配置，含健康检查和日志限制 |
 | `docker-entrypoint.sh` | 容器入口：环境验证 + 启动 server |
 | `.env.example` | 环境变量模板 |

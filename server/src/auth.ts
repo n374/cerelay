@@ -50,17 +50,17 @@ export class TokenStore {
 
   /**
    * 生成新 token
-   * 格式：axon_<随机32字节hex>
+   * 格式：cerelay_<随机32字节hex>
    * 返回原始 token（仅此一次，之后只存哈希）
    */
   create(label: string, ttlSeconds?: number): { tokenId: string; token: string } {
-    const raw = `axon_${randomBytes(32).toString("hex")}`;
+    const raw = `cerelay_${randomBytes(32).toString("hex")}`;
     return this.storeToken(raw, label, ttlSeconds);
   }
 
   createFixed(label: string, rawToken: string, ttlSeconds?: number): { tokenId: string; token: string } {
-    if (!rawToken.startsWith("axon_")) {
-      throw new Error("Token 必须以 axon_ 开头");
+    if (!rawToken.startsWith("cerelay_")) {
+      throw new Error("Token 必须以 cerelay_ 开头");
     }
 
     return this.storeToken(rawToken, label, ttlSeconds);
@@ -88,7 +88,7 @@ export class TokenStore {
    * 返回 null 表示无效，否则返回对应的 tokenId
    */
   verify(rawToken: string): string | null {
-    if (!rawToken || !rawToken.startsWith("axon_")) {
+    if (!rawToken || !rawToken.startsWith("cerelay_")) {
       return null;
     }
 

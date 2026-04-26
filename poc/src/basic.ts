@@ -5,12 +5,12 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 async function main() {
-  console.log("=== Axon POC: 基本通信验证 ===\n");
+  console.log("=== Cerelay POC: 基本通信验证 ===\n");
 
   const startTime = Date.now();
 
   const q = query({
-    prompt: "回复 'Axon POC 成功' 这五个字，不要说其他任何内容",
+    prompt: "回复 'Cerelay POC 成功' 这五个字，不要说其他任何内容",
     options: {
       cwd: process.cwd(),
       model: "claude-haiku-4-5-20251001",

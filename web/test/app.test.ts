@@ -133,7 +133,7 @@ test("web app saves and pushes configurable Client tool routing from settings", 
   runtime.dom.serverUrlInput.value = "ws://app.test/ws";
   runtime.dom.cwdInput.value = "/workspace";
   runtime.dom.modelInput.value = "claude-test";
-  runtime.dom.adminTokenInput.value = "axon_admin";
+  runtime.dom.adminTokenInput.value = "cerelay_admin";
   runtime.dom.clientToolNamesInput.value = "WebFetch\nWebSearch";
   runtime.dom.clientToolPrefixesInput.value = "mcp__\nconnector__";
 
@@ -142,7 +142,7 @@ test("web app saves and pushes configurable Client tool routing from settings", 
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0]?.url, "/admin/tool-routing");
   assert.equal(fetchCalls[0]?.init?.method, "PUT");
-  assert.equal((fetchCalls[0]?.init?.headers ?? {})["Authorization"], "Bearer axon_admin");
+  assert.equal((fetchCalls[0]?.init?.headers ?? {})["Authorization"], "Bearer cerelay_admin");
   assert.deepEqual(JSON.parse(String(fetchCalls[0]?.init?.body)), {
     clientToolNames: ["WebFetch", "WebSearch"],
     clientToolPrefixes: ["mcp__", "connector__"],

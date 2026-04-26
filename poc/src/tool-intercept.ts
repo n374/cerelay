@@ -7,13 +7,13 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 async function main() {
-  console.log("=== Axon POC: 工具拦截验证 (hooks.PreToolUse) ===\n");
+  console.log("=== Cerelay POC: 工具拦截验证 (hooks.PreToolUse) ===\n");
 
   const interceptedTools: Array<{ tool: string; input: unknown; timestamp: number }> = [];
   const startTime = Date.now();
 
   const q = query({
-    prompt: "请执行 `echo hello-axon` 命令，然后告诉我当前目录下有哪些文件",
+    prompt: "请执行 `echo hello-cerelay` 命令，然后告诉我当前目录下有哪些文件",
     options: {
       cwd: process.cwd(),
       model: "claude-haiku-4-5-20251001",

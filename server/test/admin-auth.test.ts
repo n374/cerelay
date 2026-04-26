@@ -4,8 +4,8 @@ import { once } from "node:events";
 import WebSocket from "ws";
 import { CerelayServer } from "../src/server.js";
 
-const ADMIN_TOKEN = "axon_admin_auth_test_token_0123456789abcdef";
-const WS_TOKEN = "axon_ws_auth_test_token_0123456789abcdef";
+const ADMIN_TOKEN = "cerelay_admin_auth_test_token_0123456789abcdef";
+const WS_TOKEN = "cerelay_ws_auth_test_token_0123456789abcdef";
 
 function restoreEnvVar(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -32,7 +32,7 @@ test("admin APIs require a valid token and expose token management", async (t) =
 
   const forbidden = await fetch(`${baseUrl}/admin/stats`, {
     headers: {
-      Authorization: "Bearer axon_invalid_token",
+      Authorization: "Bearer cerelay_invalid_token",
     },
   });
   assert.equal(forbidden.status, 403);
@@ -92,7 +92,7 @@ test("admin APIs require a valid token and expose token management", async (t) =
   });
   assert.equal(createToken.status, 201);
   const created = await createToken.json() as { tokenId: string; token: string };
-  assert.match(created.token, /^axon_/);
+  assert.match(created.token, /^cerelay_/);
 
   const tokens = await fetch(`${baseUrl}/admin/tokens`, {
     headers: {

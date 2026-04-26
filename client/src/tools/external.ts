@@ -31,10 +31,10 @@ export async function executeExternalTool(
 }
 
 async function resolveToolScript(toolName: string, cwd: string): Promise<string> {
-  const toolDir = process.env.AXON_TOOL_PROXY_DIR?.trim()
-    || process.env.AXON_MCP_PROXY_DIR?.trim()
+  const toolDir = process.env.CERELAY_TOOL_PROXY_DIR?.trim()
+    || process.env.CERELAY_MCP_PROXY_DIR?.trim()
     || process.env.CLAUDE_PROXY_DIR?.trim()
-    || path.resolve(cwd, ".axon-tools");
+    || path.resolve(cwd, ".cerelay-tools");
 
   const exact = path.join(toolDir, `${toolName}.sh`);
   if (await isExecutable(exact)) {
@@ -76,7 +76,7 @@ function runScript(
       cwd,
       env: {
         ...process.env,
-        AXON_TOOL_NAME: toolName,
+        CERELAY_TOOL_NAME: toolName,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });

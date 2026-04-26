@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-test("mergePreToolUseHook prepends Axon hook while preserving existing settings", () => {
+test("mergePreToolUseHook prepends Cerelay hook while preserving existing settings", () => {
   const merged = mergePreToolUseHook(
     JSON.stringify({
       permissions: {
@@ -68,7 +68,7 @@ test("mergePreToolUseHook keeps project agent definitions so sub-agents inherit 
         allow: ["Task"],
       },
     }),
-    "node axon-hook.mjs"
+    "node cerelay-hook.mjs"
   );
 
   assert.deepEqual(merged.agents, {
@@ -89,7 +89,7 @@ test("mergePreToolUseHook keeps project agent definitions so sub-agents inherit 
     hooks: [
       {
         type: "command",
-        command: "node axon-hook.mjs",
+        command: "node cerelay-hook.mjs",
       },
     ],
   });

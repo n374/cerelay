@@ -63,7 +63,7 @@ npm install
 #### 方式 A：Docker（推荐） / Docker (Recommended)
 
 ```bash
-npm run server:up          # 启动 Axon Server 容器
+npm run server:up          # 启动 Cerelay Server 容器
 npm run server:logs        # 查看日志
 npm run server:down        # 停止容器
 ```
@@ -160,7 +160,7 @@ LOG_JSON=true npm run server:up
 ## 项目结构 / Project Structure
 
 ```
-axon/
+cerelay/
 ├── server/                          # Brain Server（Claude Agent SDK）
 │   ├── src/
 │   │   ├── index.ts                # CLI 入口，解析 --port / --model

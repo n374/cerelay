@@ -1,4 +1,4 @@
-# Axon 执行规划
+# Cerelay 执行规划
 
 ## 架构全景
 
@@ -15,7 +15,7 @@
 └─────────────┼────────────────────────────────┼───────────────┘
               │                                │
 ┌─────────────▼────────────────────────────────▼───────────────┐
-│                    Axon Server (TypeScript)                  │
+│                    Cerelay Server (TypeScript)                  │
 │                                                              │
 │  - Session 管理                                               │
 │  - `query()` 驱动 Claude Code                                │
@@ -33,13 +33,13 @@
 
 补充：
 - 整个项目为纯 TypeScript（Node.js），使用 npm workspaces 管理
-- `proxy/` 的 Axon relay 模式已实现，但不是主路径
+- `proxy/` 的 Cerelay relay 模式已实现，但不是主路径
 ```
 
 ## 交互时序
 
 ```text
-Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
+Hand CLI (TS)         Cerelay Server (TS)            Claude Agent SDK / claude CLI
   │                           │                                 │
   │ ── WS create_session ───→ │                                 │
   │ ←─ WS session_created ─── │                                 │
@@ -60,7 +60,7 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 
 | 组件 | 当前方案 | 说明 |
 |------|----------|------|
-| Axon Server | TypeScript (Node.js) | 当前主实现，直接使用 `@anthropic-ai/claude-agent-sdk` |
+| Cerelay Server | TypeScript (Node.js) | 当前主实现，直接使用 `@anthropic-ai/claude-agent-sdk` |
 | Hand CLI | TypeScript (Node.js) | 终端交互与本地工具执行 |
 | Hand Web | TypeScript | 浏览器端已实现，持续补可靠性 |
 | 编辑器集成 | ACP Server | 已由 Hand 侧暴露 |
@@ -131,7 +131,7 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 - Web UI
 - Session 管理
 - 工具执行状态展示
-- 与 Axon Server 的 WebSocket 集成
+- 与 Cerelay Server 的 WebSocket 集成
 
 **依赖**：Phase 2
 
@@ -173,5 +173,5 @@ Hand CLI (TS)         Axon Server (TS)            Claude Agent SDK / claude CLI
 | **M1: 端到端主链路** | 1 + 2 | Hand CLI 输入 → TS Server 推理 → Hand 执行工具 → 结果返回 |
 | **M2: 可分发 Brain** | 3 | `docker run` 一键启动 Brain |
 | **M3: 编辑器集成** | 4 | Zed / VS Code 可通过 ACP 连接 Hand |
-| **M4: Web 端** | 5 | 浏览器中使用 Axon |
+| **M4: Web 端** | 5 | 浏览器中使用 Cerelay |
 | **M5: 生产就绪** | 6 | 安全、多 Hand、可监控 |

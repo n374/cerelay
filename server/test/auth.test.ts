@@ -10,7 +10,7 @@ test("TokenStore can create, verify, revoke, and cleanup tokens", async () => {
   const store = new TokenStore(true);
   const { tokenId, token } = store.createFixed(
     "fixed",
-    "axon_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
+    "cerelay_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
   );
 
   assert.equal(store.verify(token), tokenId);
@@ -33,10 +33,10 @@ test("TokenStore expires ttl tokens", async () => {
 });
 
 test("token extractors parse valid values", () => {
-  assert.equal(extractBearerToken("Bearer axon_token"), "axon_token");
-  assert.equal(extractBearerToken("bearer axon_token"), "axon_token");
+  assert.equal(extractBearerToken("Bearer cerelay_token"), "cerelay_token");
+  assert.equal(extractBearerToken("bearer cerelay_token"), "cerelay_token");
   assert.equal(extractBearerToken("Basic abc"), null);
-  assert.equal(extractQueryToken("/ws?token=axon_token"), "axon_token");
+  assert.equal(extractQueryToken("/ws?token=cerelay_token"), "cerelay_token");
   assert.equal(extractQueryToken(undefined), null);
 });
 

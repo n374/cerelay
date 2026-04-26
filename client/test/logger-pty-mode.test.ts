@@ -86,7 +86,7 @@ test("Logger writes to file even when console is disabled", async (t) => {
 
   // 创建临时日志文件
   const tmpDir = os.tmpdir();
-  const testLogFile = path.join(tmpDir, `axon-test-${Date.now()}.log`);
+  const testLogFile = path.join(tmpDir, `cerelay-test-${Date.now()}.log`);
 
   t.after(async () => {
     try {

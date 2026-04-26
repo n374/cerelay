@@ -280,7 +280,7 @@ def stat_from_resp(st):
 # FUSE Operations
 # ============================================================
 
-class AxonFuseOps(Operations):
+class CerelayFuseOps(Operations):
 
     def getattr(self, path, fh=None):
         # 虚拟根目录
@@ -726,7 +726,7 @@ os.makedirs(MOUNT_POINT, exist_ok=True)
 
 try:
     fuse_instance = FUSE(
-        AxonFuseOps(),
+        CerelayFuseOps(),
         MOUNT_POINT,
         foreground=True,
         nothreads=False,

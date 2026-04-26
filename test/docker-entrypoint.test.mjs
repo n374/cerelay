@@ -227,7 +227,7 @@ test("docker entrypoint fail-closes when SOCKS proxy endpoint becomes unreachabl
 });
 
 async function createSandbox() {
-  const rootDir = await mkdtemp(path.join(tmpdir(), "axon-entrypoint-"));
+  const rootDir = await mkdtemp(path.join(tmpdir(), "cerelay-entrypoint-"));
   const binDir = path.join(rootDir, "bin");
   const homeDir = path.join(rootDir, "home");
   const tunFlag = path.join(rootDir, "tun-ready");

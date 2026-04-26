@@ -38,9 +38,9 @@ if [[ "$TOOL_NAME" =~ [^a-zA-Z0-9_-] ]]; then
   exit 0
 fi
 
-# Axon relay 模式：若设置了回调地址，优先把工具调用转发给 Axon Server
-# Axon relay mode: when callback URL is set, forward the tool call before local proxy dispatch
-if [[ -n "${AXON_CALLBACK_URL:-}" ]]; then
+# Cerelay relay 模式：若设置了回调地址，优先把工具调用转发给 Cerelay Server
+# Cerelay relay mode: when callback URL is set, forward the tool call before local proxy dispatch
+if [[ -n "${CERELAY_CALLBACK_URL:-}" ]]; then
   TOOL_INPUT_JSON=""
 
   if command -v jq &>/dev/null; then
@@ -62,7 +62,7 @@ except Exception:
   fi
 
   printf '{"session_id":"%s","tool_name":"%s","tool_use_id":"","tool_input":%s}\n' \
-    "${AXON_SESSION_ID:-}" "$TOOL_NAME" "$TOOL_INPUT_JSON" | proxy_relay_to_server
+    "${CERELAY_SESSION_ID:-}" "$TOOL_NAME" "$TOOL_INPUT_JSON" | proxy_relay_to_server
   exit 0
 fi
 

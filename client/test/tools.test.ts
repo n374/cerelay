@@ -230,7 +230,7 @@ test("ToolExecutor executes WebFetch locally", async (t) => {
   const server = (await import("node:http")).createServer((_req, res) => {
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8",
-      "X-Axon-Test": "ok",
+      "X-Cerelay-Test": "ok",
     });
     res.end("hello from hand");
   });
@@ -259,7 +259,7 @@ test("ToolExecutor executes WebFetch locally", async (t) => {
   assert.equal("status" in result, true);
   assert.equal((result as { status: number }).status, 200);
   assert.equal((result as { body: string }).body, "hello from hand");
-  assert.equal((result as { headers: Record<string, string> }).headers["x-axon-test"], "ok");
+  assert.equal((result as { headers: Record<string, string> }).headers["x-cerelay-test"], "ok");
   responses.push(summarizeToolResult("WebFetch", result));
   assert.match(responses[0] ?? "", /status=200/);
 });

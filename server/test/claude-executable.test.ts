@@ -36,7 +36,7 @@ test("resolveClaudeCodeExecutable: 自动探测命中第一个存在的候选路
   const original = process.env.CLAUDE_CODE_EXECUTABLE;
   delete process.env.CLAUDE_CODE_EXECUTABLE;
 
-  const tempDir = await mkdtemp(path.join(tmpdir(), "axon-resolve-exec-"));
+  const tempDir = await mkdtemp(path.join(tmpdir(), "cerelay-resolve-exec-"));
   try {
     const fakeBin = path.join(tempDir, "claude");
     await writeFile(fakeBin, "#!/bin/sh\n", "utf8");

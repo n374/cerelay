@@ -6,7 +6,7 @@
  * - 转发给 "Hand" 模拟执行
  * - 通过 deny + additionalContext 将 Hand 的结果注入给 LLM
  *
- * 这是 Axon 远程执行的核心机制验证。
+ * 这是 Cerelay 远程执行的核心机制验证。
  */
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
@@ -37,7 +37,7 @@ class MockHandExecutor {
           result =
             "total 5\ndrwxr-xr-x  proxy/\n-rw-r--r--  README.md\ndrwxr-xr-x  poc/\n-rw-r--r--  .gitignore\ndrwxr-xr-x  .claude/";
         } else if (cmd.includes("pwd")) {
-          result = "/Users/remote-user/projects/axon";
+          result = "/Users/remote-user/projects/cerelay";
         } else {
           result = `[Hand Mock] 已执行: ${cmd}\nexit code: 0`;
         }
@@ -47,7 +47,7 @@ class MockHandExecutor {
         const path = String(input.file_path || "");
         console.log(`  [Hand] 读取文件: ${path}`);
         if (path.includes("README")) {
-          result = "# Axon\n\nClaude Code 的分体式架构";
+          result = "# Cerelay\n\nClaude Code 的分体式架构";
         } else {
           result = `[Hand Mock] 文件内容: ${path}`;
         }
@@ -85,7 +85,7 @@ class MockHandExecutor {
 }
 
 async function main() {
-  console.log("=== Axon POC: 远程执行模拟 (deny + additionalContext) ===\n");
+  console.log("=== Cerelay POC: 远程执行模拟 (deny + additionalContext) ===\n");
 
   const hand = new MockHandExecutor();
   const startTime = Date.now();
@@ -124,7 +124,7 @@ async function main() {
                   hookEventName: "PreToolUse" as const,
                   permissionDecision: "deny" as const,
                   permissionDecisionReason:
-                    "Tool executed remotely via Axon Hand",
+                    "Tool executed remotely via Cerelay Hand",
                   additionalContext: result,
                 };
               },

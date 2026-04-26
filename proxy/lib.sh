@@ -263,13 +263,13 @@ proxy_audit_log() {
 }
 
 # ============================================================================
-# Axon Hook Relay
+# Cerelay Hook Relay
 # ============================================================================
 
 proxy_emit_deny() {
   # 输出官方 hookSpecificOutput deny JSON / Emit official hookSpecificOutput deny JSON
   # 用法 / Usage: proxy_emit_deny "reason" ["additionalContext"]
-  local reason="${1:-Access denied by Axon proxy}"
+  local reason="${1:-Access denied by Cerelay proxy}"
   local additional_context="${2:-}"
   local escaped_reason escaped_context
 
@@ -299,19 +299,19 @@ proxy_emit_allow() {
 }
 
 proxy_relay_to_server() {
-  # 中继 Hook 请求到 Axon Server；失败时返回 deny / Relay Hook request to Axon Server; deny on failure
+  # 中继 Hook 请求到 Cerelay Server；失败时返回 deny / Relay Hook request to Cerelay Server; deny on failure
   # 用法 / Usage: proxy_relay_to_server
   local request_body
   local response_body
   local http_code
 
-  if [[ -z "${AXON_CALLBACK_URL:-}" ]]; then
-    proxy_emit_deny "AXON_CALLBACK_URL 未设置 / AXON_CALLBACK_URL is not set"
+  if [[ -z "${CERELAY_CALLBACK_URL:-}" ]]; then
+    proxy_emit_deny "CERELAY_CALLBACK_URL 未设置 / CERELAY_CALLBACK_URL is not set"
     return 0
   fi
 
   request_body=$(cat)
-  response_body=$(mktemp "${TMPDIR:-/tmp}/axon-hook-response.XXXXXX") || {
+  response_body=$(mktemp "${TMPDIR:-/tmp}/cerelay-hook-response.XXXXXX") || {
     proxy_emit_deny "创建临时文件失败 / Failed to create temp file"
     return 0
   }
@@ -320,9 +320,9 @@ proxy_relay_to_server() {
     -X POST \
     -H 'Content-Type: application/json' \
     --data-binary "$request_body" \
-    "$AXON_CALLBACK_URL" 2>/dev/null) || {
+    "$CERELAY_CALLBACK_URL" 2>/dev/null) || {
       rm -f "$response_body"
-      proxy_emit_deny "Axon relay 网络错误或超时 / Axon relay network error or timeout"
+      proxy_emit_deny "Cerelay relay 网络错误或超时 / Cerelay relay network error or timeout"
       return 0
     }
 
@@ -333,5 +333,5 @@ proxy_relay_to_server() {
   fi
 
   rm -f "$response_body"
-  proxy_emit_deny "Axon relay 返回非 200 状态 / Axon relay returned non-200 status"
+  proxy_emit_deny "Cerelay relay 返回非 200 状态 / Cerelay relay returned non-200 status"
 }

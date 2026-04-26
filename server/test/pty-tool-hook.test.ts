@@ -8,7 +8,7 @@ test("ClaudePtySession relays PreToolUse through Client and rewrites Server-loca
 
   session = new ClaudePtySession({
     id: "pty-hook-test",
-    cwd: "/Users/n374/Documents/Code/axon",
+    cwd: "/Users/n374/Documents/Code/cerelay",
     runtime: {
       cwd: "/tmp/cerelay-claude-pty-hook-test",
       env: {
@@ -31,7 +31,7 @@ test("ClaudePtySession relays PreToolUse through Client and rewrites Server-loca
         queueMicrotask(() => {
           session.resolveToolResult(requestId, {
             output: {
-              stdout: "/Users/n374/Documents/Code/axon\n",
+              stdout: "/Users/n374/Documents/Code/cerelay\n",
               stderr: "",
               exit_code: 0,
             },
@@ -63,14 +63,14 @@ test("ClaudePtySession relays PreToolUse through Client and rewrites Server-loca
   assert.equal(result.hookSpecificOutput?.permissionDecision, "deny");
   assert.equal(
     result.hookSpecificOutput?.additionalContext,
-    "stdout:\n/Users/n374/Documents/Code/axon\n\nexit_code: 0"
+    "stdout:\n/Users/n374/Documents/Code/cerelay\n\nexit_code: 0"
   );
   assert.deepEqual(sent[0], {
     type: "tool_call",
     requestId: sent[0]?.requestId,
     toolName: "Bash",
     input: {
-      command: "cd /Users/n374/Documents/Code/axon && cat /Users/n374/.claude.json && pwd",
+      command: "cd /Users/n374/Documents/Code/cerelay && cat /Users/n374/.claude.json && pwd",
     },
   });
   assert.deepEqual(sent[1], {
