@@ -90,6 +90,30 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
   const serverURL = buildServerURL(server, key);
   const client = new CerelayClient(serverURL, cwd, { interactiveOutput: false });
 
+  // Cooked 模式下（cache sync 还没把 stdin 让给 raw 模式之前）Ctrl+C 直接产生 SIGINT。
+  // raw 模式下 client.runPtyPassthrough 会把 \x03 字节回送 SIGINT 给本进程。
+  // 两条路径都汇到这里走优雅关闭：abort cache sync → 关闭 WS → 退出。
+  let interrupting = false;
+  const handleInterrupt = (signal: NodeJS.Signals) => {
+    if (interrupting) {
+      // 用户连按两次 Ctrl+C：放弃优雅退出，立刻硬退
+      process.stderr.write("\n\x1b[31m[强制退出]\x1b[0m\n");
+      process.exit(130);
+    }
+    interrupting = true;
+    process.stderr.write(`\n\x1b[33m[已中断 ${signal}, 正在退出...]\x1b[0m\n`);
+    try {
+      client.close();
+    } catch {
+      // ignore
+    }
+    process.exitCode = 130;
+    // 给 WS close + 缓存 onDisconnected 一点时间走完，但不等太久；用户已经在催了
+    setTimeout(() => process.exit(130), 500).unref();
+  };
+  process.on("SIGINT", handleInterrupt);
+  process.on("SIGTERM", handleInterrupt);
+
   try {
     await client.connect();
     const sessionId = await client.sendCreatePtySession(cwd);
@@ -103,6 +127,8 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
     process.stderr.write(`\x1b[31mPTY passthrough 失败: ${err instanceof Error ? err.message : String(err)}\x1b[0m\n`);
     process.exitCode = 1;
   } finally {
+    process.off("SIGINT", handleInterrupt);
+    process.off("SIGTERM", handleInterrupt);
     client.close();
   }
 }

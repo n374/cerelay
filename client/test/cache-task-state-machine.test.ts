@@ -299,6 +299,49 @@ test("CacheTaskStateMachine 收到 inactive assignment 后停止 watcher 并回�
   assert.equal(watcher.stopped, true);
 });
 
+test("CacheTaskStateMachine.isInitialSyncActive 反映 assigned-syncing 阶段", async () => {
+  const watcher = new FakeWatcher();
+  let pushResolve: (() => void) | undefined;
+  let pushStarted = false;
+
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    disableCacheTask: false,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    watcherFactory: () => watcher,
+    walkScope: walkNothing,
+    hashScope: hashNothing,
+    pushInitialDeltaBatches: async () => {
+      pushStarted = true;
+      await new Promise<void>((resolve) => {
+        pushResolve = resolve;
+      });
+      return { baseRevision: 4, summaries: [] };
+    },
+  });
+
+  // 未连接：false
+  assert.equal(sm.isInitialSyncActive(), false);
+
+  await sm.onConnected(async () => undefined);
+  // connected-passive：false
+  assert.equal(sm.isInitialSyncActive(), false);
+
+  const activePromise = sm.onMessage(makeActiveAssignment());
+  await waitFor(() => pushStarted);
+  // assigned-syncing：true（push 还没 resolve，sync_complete 也没发出）
+  assert.equal(sm.getState(), "assigned-syncing");
+  assert.equal(sm.isInitialSyncActive(), true);
+
+  pushResolve?.();
+  await activePromise;
+  // assigned-watching：false（init sync 已结束，进入实时 watcher 阶段）
+  assert.equal(sm.getState(), "assigned-watching");
+  assert.equal(sm.isInitialSyncActive(), false);
+});
+
 test("CacheTaskStateMachine 收到 inactive assignment 时会中断进行中的 initial sync", async () => {
   const watcher = new FakeWatcher();
   let abortSignal: AbortSignal | undefined;

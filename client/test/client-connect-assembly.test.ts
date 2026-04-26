@@ -11,6 +11,7 @@ import type { ScanCacheStore } from "../src/scan-cache.js";
 class FakeCacheTaskStateMachine {
   onConnectedCalls = 0;
   onDisconnectedCalls = 0;
+  initialSyncActive = false;
 
   async onConnected(): Promise<void> {
     this.onConnectedCalls += 1;
@@ -21,6 +22,10 @@ class FakeCacheTaskStateMachine {
   }
 
   async onMessage(): Promise<void> {}
+
+  isInitialSyncActive(): boolean {
+    return this.initialSyncActive;
+  }
 }
 
 function makeScanCacheStore(): ScanCacheStore {
@@ -214,4 +219,42 @@ test("CerelayClient connect 装配成功时把 config 和 scanCache 传给 state
   assert.equal(factoryOptions?.config, config);
   assert.equal(factoryOptions?.scanCache, scanCache);
   assert.equal(stateMachine.onConnectedCalls, 1);
+});
+
+test("CerelayClient.isCacheSyncActive 委托给 state machine 的 isInitialSyncActive", async (t) => {
+  const brain = await startFakeBrain();
+  t.after(async () => {
+    await stopFakeBrain(brain);
+  });
+  brain.ws.on("connection", (socket: WebSocket) => {
+    socket.send(JSON.stringify({ type: "connected" }));
+  });
+
+  const stateMachine = new FakeCacheTaskStateMachine();
+  const client = new CerelayClient(brain.url, "/repo", {
+    interactiveOutput: false,
+    deviceId: "device-1",
+    homedir: "/tmp/cerelay-home",
+    loadConfig: async () => ({ scan: { excludeDirs: [] } }),
+    openScanCache: async () => makeScanCacheStore(),
+    cacheTaskStateMachineFactory: () => stateMachine,
+  });
+  t.after(() => {
+    client.close();
+  });
+
+  // 未连接：state machine 还没装配，应当返回 false
+  assert.equal(client.isCacheSyncActive(), false);
+
+  await client.connect();
+
+  // state machine 默认 initialSyncActive=false
+  assert.equal(client.isCacheSyncActive(), false);
+
+  // 切到 active：客户端应反映 true（这是 raw 模式下拦截 \x03 的判定依据）
+  stateMachine.initialSyncActive = true;
+  assert.equal(client.isCacheSyncActive(), true);
+
+  stateMachine.initialSyncActive = false;
+  assert.equal(client.isCacheSyncActive(), false);
 });

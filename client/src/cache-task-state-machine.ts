@@ -157,6 +157,17 @@ export class CacheTaskStateMachine {
     return this.state;
   }
 
+  /**
+   * 启动期初始同步（walk/hash/upload）正在执行时返回 true。
+   *
+   * Why: PTY 进入 raw 模式后终端不再把 Ctrl+C 转成 SIGINT，
+   * 而是直接送出 \x03 字节；客户端需要在 cache sync 仍然在跑的窗口内
+   * 把这个字节拦下来转回本地中断，否则 sync 没有任何外部 abort 触发。
+   */
+  isInitialSyncActive(): boolean {
+    return this.state === "assigned-syncing";
+  }
+
   async onConnected(send: SendFn): Promise<void> {
     this.send = send;
     this.state = "connected-passive";

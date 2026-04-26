@@ -57,6 +57,7 @@ interface CacheTaskStateMachineLike {
   onConnected(send: (message: import("./protocol.js").HandToServerMessage) => Promise<void>): Promise<void>;
   onDisconnected(): Promise<void>;
   onMessage(message: CacheTaskAssignment | CacheTaskDeltaAck | CacheTaskMutationHint | { type: "cache_task_heartbeat_ack" }): Promise<void>;
+  isInitialSyncActive(): boolean;
 }
 
 export class CerelayClient {
@@ -208,6 +209,11 @@ export class CerelayClient {
 
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** 启动期 cache 初始同步是否仍在 walk/hash/upload；false 则 \x03 应直通给远端 PTY */
+  isCacheSyncActive(): boolean {
+    return this.cacheTaskStateMachine?.isInitialSyncActive() ?? false;
   }
 
   private waitForPtySessionReady(): Promise<string> {
@@ -491,6 +497,13 @@ export class CerelayClient {
 
       const onInput = (chunk: Buffer | string) => {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        // raw 模式下终端不再产生 SIGINT，Ctrl+C 只剩下 \x03 字节；如果此时 cache 同步还在跑，
+        // 字节会被原样转发给远端 PTY，本地 walk/hash/upload 永远收不到 abort 信号 → 用户卡死。
+        // 在 sync 活跃窗口里把 \x03 转回 SIGINT，让顶层 handler 走 client.close + exit 路径。
+        if (this.isCacheSyncActive() && buffer.includes(0x03)) {
+          process.kill(process.pid, "SIGINT");
+          return;
+        }
         const payload: PtyInput = {
           type: "pty_input",
           sessionId,
