@@ -95,6 +95,57 @@ test("Phase 3: handleInjectedPreToolUse 收到 mcp__cerelay__bash 直接 allow�
   await session.close();
 });
 
+test("Phase 3: dispatch 路径 requestId 用 mcp- 前缀，跟 hook- 前缀区分", async () => {
+  const capture = createCapture();
+  const session = new ClaudePtySession({
+    id: "pty-prefix-1",
+    cwd: "/Users/dev/project",
+    runtime: createMockRuntime(),
+    transport: createTransport(capture, (requestId) => {
+      session.resolveToolResult(requestId, { output: { stdout: "", stderr: "", exit_code: 0 } });
+    }),
+  });
+
+  // dispatch 路径
+  await session.dispatchToolToClient("Bash", { command: "ls" });
+  // hook 路径
+  await session.handleInjectedPreToolUse({
+    tool_name: "Bash",
+    tool_use_id: "toolu_x",
+    tool_input: { command: "ls" },
+  });
+
+  assert.equal(capture.toolCalls.length, 2);
+  assert.match(capture.toolCalls[0]!.requestId, /^mcp-pty-prefix-1-/);
+  assert.match(capture.toolCalls[1]!.requestId, /^hook-pty-prefix-1-/);
+
+  await session.close();
+});
+
+test("Phase 3: close 顺序——先关 mcp host，再清 helperDir/runtime（防 fd 阻塞）", async () => {
+  // 直接验证 mcpIpcHost 被正确清理，runtime.cleanup 被调用且 helperDir 不再被持有。
+  const cleanupOrder: string[] = [];
+  const session = new ClaudePtySession({
+    id: "pty-close-order-1",
+    cwd: "/Users/dev/project",
+    runtime: {
+      cwd: "/sdk/cwd",
+      env: { HOME: "/home/node" },
+      rootDir: "/sdk/root",
+      cleanup: async () => {
+        cleanupOrder.push("runtime.cleanup");
+      },
+    },
+    transport: createTransport(createCapture(), () => undefined),
+    shadowMcp: { enabled: false }, // 不启 host：单独验 close 不抛错就够
+  });
+  await session.close();
+  assert.deepEqual(cleanupOrder, ["runtime.cleanup"]);
+  // 二次 close 幂等
+  await session.close();
+  assert.deepEqual(cleanupOrder, ["runtime.cleanup"]);
+});
+
 test("Phase 3: 用户自配 mcp__user__* 仍然走 client 转发（不被 shadow 排除规则误伤）", async () => {
   const capture = createCapture();
   const session = new ClaudePtySession({

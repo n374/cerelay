@@ -45,11 +45,17 @@ export interface ClaudePtySessionOptions {
    * 1. 启动 per-session MCPIpcHost（unix socket）
    * 2. spawn CC 时追加 --mcp-config / --append-system-prompt / --disallowedTools
    * 3. session 关闭时关 host
-   * 默认 enabled=true；测试或 CERELAY_PTY_COMMAND override 时可关掉。
+   *
+   * 默认从 CERELAY_ENABLE_SHADOW_MCP env 读，缺省 false（Phase 3 灰度阶段保守
+   * 关闭，避免 ALL 用户 PTY session 受影响）。Phase 6 落地 e2e 守护后再翻
+   * 默认值。CERELAY_PTY_COMMAND override 路径下永远 disabled。
    */
   shadowMcp?: {
     enabled: boolean;
-    /** unix socket 父目录，默认 /tmp。 */
+    /**
+     * unix socket 父目录。优先级：options.socketDir > CERELAY_SHADOW_MCP_SOCKET_DIR env >
+     * `${CERELAY_DATA_DIR}/sockets/` > `/tmp` 兜底。
+     */
     socketDir?: string;
   };
 }
@@ -91,8 +97,8 @@ export class ClaudePtySession {
     this.termProgramVersion = options.termProgramVersion;
     this.clientHomeDir = options.clientHomeDir?.trim() || undefined;
     this.shouldRouteToolToClient = options.shouldRouteToolToClient ?? ((toolName) => isClientRoutedToolName(toolName));
-    this.shadowMcpEnabled = options.shadowMcp?.enabled ?? true;
-    this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? "/tmp";
+    this.shadowMcpEnabled = options.shadowMcp?.enabled ?? readShadowMcpEnvDefault();
+    this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? resolveShadowMcpSocketDir();
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -267,7 +273,7 @@ export class ClaudePtySession {
    * - 没有 toolUseId（MCP tools/call 本身不用 anthropic tool_use_id）
    */
   async dispatchToolToClient(toolName: string, input: unknown): Promise<RemoteToolResult> {
-    return this.executeToolViaClient(toolName, input);
+    return this.executeToolViaClient(toolName, input, undefined, "mcp");
   }
 
   async handleInjectedPreToolUse(input: HookInput): Promise<SyncHookJsonOutput> {
@@ -368,7 +374,13 @@ export class ClaudePtySession {
     }
   }
 
-  private async executeToolViaClient(toolName: string, toolInput: unknown, toolUseId?: string): Promise<RemoteToolResult> {
+  private async executeToolViaClient(
+    toolName: string,
+    toolInput: unknown,
+    toolUseId?: string,
+    /** 调用来源标签，用于 requestId 前缀区分 PreToolUse hook 与 MCP dispatch 路径。 */
+    origin: "hook" | "mcp" = "hook",
+  ): Promise<RemoteToolResult> {
     if (this.closed) {
       throw new Error("会话已关闭");
     }
@@ -379,7 +391,7 @@ export class ClaudePtySession {
       serverCwd: this.runtime.cwd,
       clientCwd: this.cwd,
     });
-    const requestId = `hook-${this.id}-${randomUUID()}`;
+    const requestId = `${origin}-${this.id}-${randomUUID()}`;
     const pending = this.relay.createPending(requestId, toolName);
     void pending.catch(() => undefined);
 
@@ -443,6 +455,34 @@ function previewText(text: string, maxLength: number): string {
 
 function defaultSpawnInRuntime(options: SpawnOptions): SpawnedProcess {
   throw new Error(`session runtime does not support PTY spawn: ${options.command}`);
+}
+
+/**
+ * 从 CERELAY_ENABLE_SHADOW_MCP env 读默认开关。Phase 3 阶段缺省 false（保守，
+ * 避免上线全量翻车），Phase 6 e2e 守护建立后改成默认 true。
+ */
+function readShadowMcpEnvDefault(): boolean {
+  const raw = process.env.CERELAY_ENABLE_SHADOW_MCP?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * 解析 shadow MCP unix socket 父目录：
+ *   1. CERELAY_SHADOW_MCP_SOCKET_DIR env（运维显式覆盖）
+ *   2. ${CERELAY_DATA_DIR}/sockets/（与项目其他持久化路径对齐）
+ *   3. /tmp 兜底
+ * 注意：buildMcpIpcSocketPath 自身有 macOS 104 byte 长度硬限制，过长目录会抛错。
+ */
+function resolveShadowMcpSocketDir(): string {
+  const explicit = process.env.CERELAY_SHADOW_MCP_SOCKET_DIR?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const dataDir = process.env.CERELAY_DATA_DIR?.trim();
+  if (dataDir) {
+    return path.join(dataDir, "sockets");
+  }
+  return "/tmp";
 }
 
 function buildClaudeCommandArgs(model: string | undefined, extraArgs: string[] = []): string[] {
