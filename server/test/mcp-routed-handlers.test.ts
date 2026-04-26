@@ -107,12 +107,12 @@ test("edit handler: input 透传（含 replace_all） + 渲染 output.path", asy
   assert.equal((result.content[0] as { text: string }).text, "/abs/x.ts");
 });
 
-test("multi_edit handler: edits 数组透传 + 渲染 output.path", async () => {
+test("multi_edit handler: edits 数组透传（不含 replace_all，与 client 实现一致） + 渲染 output.path", async () => {
   const { client, calls } = createMockIpc(async () => ({ output: { path: "/abs/y.ts" } }));
   const def = buildShadowToolHandler(SHADOW_TOOLS[4]!, client); // multi_edit
   const edits = [
     { old_string: "a", new_string: "A" },
-    { old_string: "b", new_string: "B", replace_all: true },
+    { old_string: "b", new_string: "B" },
   ];
   const result = await def.handler({ file_path: "/abs/y.ts", edits });
   assert.equal(calls[0]?.builtinName, "MultiEdit");
@@ -161,16 +161,22 @@ test("handler: dispatcher 返回 error 时 isError:true 且 content 为 error �
   assert.equal((result.content[0] as { text: string }).text, "permission denied");
 });
 
-test("handler: 渲染为空字符串时使用占位符避免空 content（保持 isError 不变）", async () => {
-  const { client } = createMockIpc(async () => ({ output: { stdout: "", stderr: "", exit_code: 0 } }));
-  const def = buildShadowToolHandler(SHADOW_TOOLS[0]!, client); // bash with empty
-  const result = await def.handler({ command: "true" });
+test("handler: 空渲染保持空字符串，不再补 (empty) 占位（Plan §4.6 要求）", async () => {
+  const { client } = createMockIpc(async () => ({}));
+  const def = buildShadowToolHandler(SHADOW_TOOLS[1]!, client); // read with empty result
+  const result = await def.handler({ file_path: "/x" });
   assert.equal(result.isError, false);
-  // renderToolResultForClaude 对 stdout="" stderr="" exit_code=0 渲染成 "exit_code: 0"，非空。
-  // 这里更直接测：output undefined 才是真正的空路径。
-  const { client: c2 } = createMockIpc(async () => ({}));
-  const def2 = buildShadowToolHandler(SHADOW_TOOLS[1]!, c2);
-  const r2 = await def2.handler({ file_path: "/x" });
-  assert.equal(r2.isError, false);
-  assert.equal((r2.content[0] as { text: string }).text, "(empty)");
+  assert.equal((result.content[0] as { text: string }).text, "");
+});
+
+test("handler: ipc.callTool 抛错时收敛为 isError:true，不向 SDK 抛出 raw stack", async () => {
+  const client = {
+    async callTool(): Promise<never> {
+      throw new Error("dispatcher exploded");
+    },
+  } as unknown as IpcClient;
+  const def = buildShadowToolHandler(SHADOW_TOOLS[0]!, client);
+  const result = await def.handler({ command: "ls" });
+  assert.equal(result.isError, true);
+  assert.equal((result.content[0] as { text: string }).text, "dispatcher exploded");
 });

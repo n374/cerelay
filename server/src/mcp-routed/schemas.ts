@@ -21,12 +21,14 @@ export interface ShadowToolSchema {
   inputSchema: Record<string, unknown>;
 }
 
+// MultiEdit 内部条目 schema：与 client 的 MultiEditItem 对齐——目前 client 不
+// 支持每条 edit 单独 replace_all（硬编码 false），所以 schema 不暴露该字段，
+// 防止模型期望被实际忽略的功能。
 const editEntrySchema = {
   type: "object",
   properties: {
     old_string: { type: "string" },
     new_string: { type: "string" },
-    replace_all: { type: "boolean", default: false },
   },
   required: ["old_string", "new_string"],
   additionalProperties: false,
@@ -37,13 +39,14 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "bash",
     builtinName: "Bash",
     description:
-      "Execute a shell command on the user's actual workspace. Mirrors the standard Bash tool; use this in place of Bash in this sandboxed runtime.",
+      "Execute a shell command on the user's actual workspace. Use this in place of the Bash tool in this sandboxed runtime—standard Bash is not available.",
     inputSchema: {
       type: "object",
       properties: {
         command: { type: "string", description: "Shell command to execute" },
-        description: { type: "string", description: "Short human-readable description" },
-        timeout: { type: "number", description: "Optional timeout in milliseconds" },
+        // 注意：client/src/tools/bash.ts 把 timeout 解释为秒（DEFAULT 120s），
+        // schema 描述必须与实现一致，避免模型按 ms 传值。
+        timeout: { type: "number", description: "Timeout in seconds (default 120)" },
       },
       required: ["command"],
       additionalProperties: false,
@@ -53,13 +56,14 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "read",
     builtinName: "Read",
     description:
-      "Read a file from the user's actual workspace. Mirrors the standard Read tool; use this in place of Read in this sandboxed runtime.",
+      "Read a file from the user's actual workspace. Use this in place of the Read tool in this sandboxed runtime.",
     inputSchema: {
       type: "object",
       properties: {
         file_path: { type: "string", description: "Absolute path to the file" },
-        offset: { type: "number", description: "Line offset to start reading from" },
-        limit: { type: "number", description: "Number of lines to read" },
+        // 注意：client 按 Unicode 字符切片（rune-aligned），不是按行。
+        offset: { type: "number", description: "Character offset to start reading from" },
+        limit: { type: "number", description: "Number of characters to read" },
       },
       required: ["file_path"],
       additionalProperties: false,
@@ -69,7 +73,7 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "write",
     builtinName: "Write",
     description:
-      "Write a file in the user's actual workspace. Mirrors the standard Write tool; use this in place of Write in this sandboxed runtime.",
+      "Write a file in the user's actual workspace. Use this in place of the Write tool in this sandboxed runtime.",
     inputSchema: {
       type: "object",
       properties: {
@@ -84,7 +88,7 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "edit",
     builtinName: "Edit",
     description:
-      "Replace exact text in a file in the user's actual workspace. Mirrors the standard Edit tool.",
+      "Replace exact text in a file in the user's actual workspace. Use this in place of the Edit tool in this sandboxed runtime.",
     inputSchema: {
       type: "object",
       properties: {
@@ -101,7 +105,7 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "multi_edit",
     builtinName: "MultiEdit",
     description:
-      "Apply multiple edits to a single file in the user's actual workspace. Mirrors the standard MultiEdit tool.",
+      "Apply multiple edits to a single file in the user's actual workspace. Use this in place of the MultiEdit tool in this sandboxed runtime.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,7 +124,7 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "glob",
     builtinName: "Glob",
     description:
-      "List files matching a glob pattern in the user's actual workspace. Mirrors the standard Glob tool.",
+      "List files matching a glob pattern in the user's actual workspace. Use this in place of the Glob tool in this sandboxed runtime.",
     inputSchema: {
       type: "object",
       properties: {
@@ -135,24 +139,17 @@ export const SHADOW_TOOLS: readonly ShadowToolSchema[] = [
     shortName: "grep",
     builtinName: "Grep",
     description:
-      "Search file contents with ripgrep in the user's actual workspace. Mirrors the standard Grep tool.",
+      "Search file contents in the user's actual workspace. Use this in place of the Grep tool in this sandboxed runtime. Returns line-level matches; use bash + grep/rg for advanced flags.",
     inputSchema: {
+      // 注意：client 当前实现仅支持 pattern/path/glob 三个字段；CC 内置 Grep 的
+      // 其他 flag（-i / -n / -A / -B / -C / context / multiline / output_mode /
+      // head_limit / offset / type）一律不支持，故不暴露——避免模型期望被
+      // 实际忽略的功能。如需扩展，需先扩 client/src/tools/search.ts。
       type: "object",
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
         glob: { type: "string" },
-        type: { type: "string" },
-        output_mode: { type: "string", enum: ["content", "files_with_matches", "count"] },
-        "-i": { type: "boolean" },
-        "-n": { type: "boolean" },
-        "-A": { type: "number" },
-        "-B": { type: "number" },
-        "-C": { type: "number" },
-        context: { type: "number" },
-        multiline: { type: "boolean" },
-        head_limit: { type: "number" },
-        offset: { type: "number" },
       },
       required: ["pattern"],
       additionalProperties: false,

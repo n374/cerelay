@@ -5,8 +5,8 @@
 // 设计 / Design:
 // - 用 SDK 的 Server class + setRequestHandler 注册 tools/list 与 tools/call，
 //   schema 直接写 JSON Schema 对象，避免引入 zod 依赖。
-// - Phase 1 仅注册一个内置 echo 工具用于端到端 IPC 联调；Phase 2 起把镜像工具
-//   接入到 IpcClient 的 callTool 路径上。
+// - 工具集合通过 RoutedToolDefinition 由调用方注入（生产用 buildAllShadowToolHandlers，
+//   测试可注入自定义集合）。
 // ============================================================
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";

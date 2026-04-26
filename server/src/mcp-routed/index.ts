@@ -28,11 +28,10 @@ const ENV_SOCKET = "CERELAY_MCP_IPC_SOCKET";
 const ENV_TOKEN = "CERELAY_MCP_IPC_TOKEN";
 const ENV_SESSION = "CERELAY_MCP_SESSION_ID";
 
-// 子进程运行配置，留给 Phase 2 注入真实 tool 列表。
 export interface RunRoutedMcpServerOptions {
-  /** override toolset for tests; production 用默认 echo + handlers */
+  /** 测试用：注入自定义工具集合（默认 buildAllShadowToolHandlers） */
   buildTools?: (ipc: IpcClient) => RoutedToolDefinition[];
-  /** override env reader（测试用） */
+  /** 测试用：override env reader */
   env?: NodeJS.ProcessEnv;
 }
 
