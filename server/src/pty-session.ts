@@ -151,7 +151,12 @@ export class ClaudePtySession {
     });
     this.child.on("exit", (code, signal) => {
       clearTimeout(startupDiagTimer);
-      this.log.debug("Claude PTY 会话退出", {
+      // 注意：此处的 child 是 pty_host.py helper，不是 CC 本身；helper 在 CC 死后
+      // 还要走 master_fd close + thread join(0.2s ×2) + proc.wait + sys.exit，
+      // 因此 'exit' 比 CC 实际退出晚约 400-500ms。这条日志记录 helper 退出时间，
+      // 与下方 'close' 触发的 "PTY Session 已销毁" 之间的差值即 stdio drain 耗时，
+      // 用于诊断退出延迟究竟在 CC、helper 还是 Node stdio 三段中的哪一段。
+      this.log.info("Claude PTY helper 进程退出", {
         exitCode: code ?? undefined,
         signal: signal ?? undefined,
       });
