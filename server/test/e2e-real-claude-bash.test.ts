@@ -234,6 +234,18 @@ test(
       "tool_result.content 不能退化为 'Tool response ready' 占位字符串——这正是修复前的 bug 表征"
     );
 
+    // ★ Plan D 路径对照：legacy hook 路径走 deny+permissionDecisionReason，CC binary
+    // 在该协议分支下硬编码把 tool_result.is_error 设为 true（plan §1.4）。这条断言
+    // 把这个事实固化下来，跟 e2e-mcp-shadow-bash.test.ts 的 is_error: false 形成对照——
+    // 两条 e2e 都过，证明 Plan D 用 stdio MCP 路径绕开了这条硬协议约束。
+    assert.equal(
+      tr.is_error,
+      true,
+      "Legacy PreToolUse hook 路径下 tool_result.is_error 必然为 true（CC 协议硬约束）；" +
+      "如果这里观察到 false，说明 hook 协议行为变了或 cerelay 误用了别的路径，" +
+      "需要立刻重新评估 Plan D 是否仍然必要。"
+    );
+
     for (const marker of markerFiles) {
       assert.ok(
         tr.content.includes(marker),
