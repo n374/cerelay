@@ -61,10 +61,12 @@ test("ClaudePtySession relays PreToolUse through Client and rewrites Server-loca
   });
 
   assert.equal(result.hookSpecificOutput?.permissionDecision, "deny");
-  assert.equal(
-    result.hookSpecificOutput?.additionalContext,
-    "stdout:\n/Users/n374/Documents/Code/cerelay\n\nexit_code: 0"
-  );
+  // 真实 tool 输出必须装进 permissionDecisionReason —— CC 在 deny 分支会把它
+  // 作为 tool_result.content 反馈给 Claude；additionalContext 走 isMeta 元消息
+  // 通道会被过滤，不能作为唯一回注通道。这里两条字段携带同一份内容。
+  const expectedRendered = "stdout:\n/Users/n374/Documents/Code/cerelay\n\nexit_code: 0";
+  assert.equal(result.hookSpecificOutput?.permissionDecisionReason, expectedRendered);
+  assert.equal(result.hookSpecificOutput?.additionalContext, expectedRendered);
   assert.deepEqual(sent[0], {
     type: "tool_call",
     requestId: sent[0]?.requestId,

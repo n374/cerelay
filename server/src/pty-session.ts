@@ -243,12 +243,23 @@ export class ClaudePtySession {
     }
 
     const result = await this.executeToolViaClient(input.tool_name, input.tool_input, input.tool_use_id);
+    const rendered = renderToolResultForClaude(input.tool_name, result);
+    // CC `cli.js` 在 deny 分支会把 permissionDecisionReason 直接写进
+    // tool_result.content（is_error: true）反馈给模型；additionalContext 走
+    // 独立的 <system-reminder> 文本块。两条都会到达 LLM，但 tool_result 是
+    // 模型最直接的反馈通道，additionalContext 则被裹在 "PreToolUse:Bash hook
+    // additional context: ..." 的元消息前缀里，模型不一定能稳定地把它当成
+    // 工具的真实输出来用——实测会出现 tool_result.is_error=true 让 Claude
+    // 判定工具失败、再忽略 system-reminder 的情况。
+    // 因此把渲染后的工具结果同步塞进 permissionDecisionReason，让
+    // tool_result.content 自身就携带真实数据；additionalContext 保留作为
+    // 冗余通道。空输出时回退到占位串以保 deny 协议非空 reason 不变量。
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "Tool response ready",
-        additionalContext: renderToolResultForClaude(input.tool_name, result),
+        permissionDecisionReason: rendered.length > 0 ? rendered : "Tool response ready",
+        additionalContext: rendered,
       },
     };
   }

@@ -3,7 +3,7 @@
  *
  * 针对 "BashTool 查看当前目录文件返回空" 的四个嫌疑场景编写测试：
  *
- * 嫌疑 1: PTY 模式 permissionDecisionReason 不能为空（必须是 "Tool response ready"）
+ * 嫌疑 1: PTY 模式 permissionDecisionReason 必须装载真实 tool 输出
  * 嫌疑 2: Passthrough 模式当 Client cwd 不存在时回退到空的 runtimeRoot
  * 嫌疑 3: Mount namespace bootstrap 后 cwd 内无项目文件（只有 .claude/）
  * 嫌疑 4: PTY hook 链路断裂时的错误处理（transport 失败 / session 关闭 / 超时）
@@ -79,10 +79,18 @@ function createEmptyCapture(): MockTransportCapture {
 }
 
 // ============================================================
-// 嫌疑 1: PTY permissionDecisionReason 不能为空
+// 嫌疑 1: PTY permissionDecisionReason 必须装载真实 tool 输出
 // ============================================================
+//
+// CC `cli.js` deny 分支：
+//   tool_result.content = m.message = permissionDecisionReason
+//   additionalContext 走独立的 isMeta=true 元消息通道，会被多处过滤掉，
+//   并不会进入 LLM 的 conversation context。
+//
+// 所以真实 tool 输出必须直接放进 permissionDecisionReason，否则 Claude
+// 只能看到形如 "Tool response ready" 的空壳，无法据此回答用户。
 
-test("嫌疑1: PTY handleInjectedPreToolUse 对 client-routed 工具应返回 'Tool response ready'", async () => {
+test("嫌疑1: PTY handleInjectedPreToolUse 把真实 tool 输出装进 permissionDecisionReason", async () => {
   const capture = createEmptyCapture();
   const ptySession = new ClaudePtySession({
     id: "pty-bug-test-1",
@@ -108,14 +116,30 @@ test("嫌疑1: PTY handleInjectedPreToolUse 对 client-routed 工具应返回 'T
     tool_input: { command: "ls" },
   });
 
-  // ★ 核心断言：permissionDecisionReason 必须是 "Tool response ready"
-  // CC 的 hook 协议：deny + 空 reason 可能被解读为 "工具被策略拒绝"，
-  // 而非 "结果已注入"，会导致 CC 重新 fallback 本地执行。
+  const reason = hookResult.hookSpecificOutput?.permissionDecisionReason;
+  assert.ok(reason, "permissionDecisionReason 不能为空");
+  assert.match(
+    reason!,
+    /file1\.ts/,
+    "permissionDecisionReason 必须包含 Client 返回的真实 stdout，否则" +
+    " Claude 看到的 tool_result.content 只有空壳"
+  );
+  assert.match(
+    reason!,
+    /file2\.ts/,
+    "permissionDecisionReason 必须完整包含 Client stdout"
+  );
+  assert.match(
+    reason!,
+    /exit_code: 0/,
+    "permissionDecisionReason 应包含 exit_code 元数据"
+  );
+
+  // additionalContext 作为冗余通道仍然写入相同内容，便于将来 SDK 行为变化时仍可用
   assert.equal(
-    hookResult.hookSpecificOutput?.permissionDecisionReason,
-    "Tool response ready",
-    "PTY 的 permissionDecisionReason 必须为 'Tool response ready'；" +
-    "空串会让 CC 把 deny 解读为策略拒绝而非结果已注入"
+    hookResult.hookSpecificOutput?.additionalContext,
+    reason,
+    "additionalContext 与 permissionDecisionReason 应同步携带真实 tool 输出"
   );
 
   await ptySession.close();
@@ -638,19 +662,149 @@ test("嫌疑4g: PTY hook 响应的 JSON 格式应被 CC 正确解读为工具结
   assert.equal(output.permissionDecision, "deny",
     "必须是 deny 才能阻止 CC 本地执行工具");
 
-  // 3. additionalContext 必须包含工具结果
-  assert.ok(output.additionalContext?.includes("src/"),
-    "additionalContext 应包含 ls 结果");
-  assert.ok(output.additionalContext?.includes("package.json"),
-    "additionalContext 应包含 ls 结果中的文件名");
-
-  // 4. ★ permissionDecisionReason 不应为空
-  //    CC 可能将空 reason + deny 解释为 "工具被策略拒绝"（而非 "结果已注入"）
+  // 3. ★ permissionDecisionReason 必须包含真实工具输出
+  //    CC 在 deny 分支中：tool_result.content = m.message = permissionDecisionReason，
+  //    is_error: true。Claude 实际只能从这里读到 tool 输出。
   assert.ok(
-    output.permissionDecisionReason && output.permissionDecisionReason.length > 0,
-    `permissionDecisionReason 不应为空串，当前值: "${output.permissionDecisionReason}"。` +
-    "空串可能导致 CC 认为工具被拒绝而非结果已注入"
+    output.permissionDecisionReason?.includes("src/"),
+    `permissionDecisionReason 必须包含 ls 结果。当前值: "${output.permissionDecisionReason}"`
+  );
+  assert.ok(
+    output.permissionDecisionReason?.includes("package.json"),
+    "permissionDecisionReason 必须包含 ls 结果中的文件名"
+  );
+  assert.ok(
+    output.permissionDecisionReason?.includes("README.md"),
+    "permissionDecisionReason 必须完整包含 ls 结果"
+  );
+
+  // 4. additionalContext 同步保留作为冗余通道（虽 CC 当前会过滤掉 isMeta，
+  //    但保留以便将来 SDK 行为变化时仍能工作）
+  assert.equal(
+    output.additionalContext,
+    output.permissionDecisionReason,
+    "additionalContext 与 permissionDecisionReason 应携带相同的真实 tool 输出"
   );
 
   await ptySession.close();
+});
+
+// ============================================================
+// 回归: 用户实测场景 —— Bash ls -la 的 stdout 必须完整反馈给 Claude
+// ============================================================
+//
+// 用户报告：CC 通过 PTY hook 转发 Bash `ls -la` 给 Client，Server log 显示
+// Client 正确返回了目录详细列表，但 CC 最终回答用户时只看到 FUSE 挂载的
+// `.claude/settings.local.json`，仿佛 Bash 调用失败。根因是旧实现把
+// `"Tool response ready"` 字面量塞进 permissionDecisionReason，把真实 stdout
+// 塞进 additionalContext；而 CC `cli.js` deny 分支只把 permissionDecisionReason
+// 装进 tool_result.content，additionalContext 走 isMeta 元消息会被过滤掉。
+//
+// 这条测试以用户日志中的真实 stdout 为输入，验证修复后 stdout 全文都能落到
+// permissionDecisionReason，且不再出现 "Tool response ready" 这种空壳。
+
+test("回归: Bash ls -la 真实 stdout 必须完整出现在 permissionDecisionReason", async () => {
+  const realLsOutput = [
+    "total 16",
+    "drwxr-xr-x@ 9 n374 staff 288 Apr 26 15:20 .",
+    "drwxr-xr-x@ 27 n374 staff 864 Apr 26 15:50 ..",
+    "drwxr-xr-x@ 3 n374 staff 96 Apr 26 14:10 .claude",
+    "-rw-r--r--@ 1 n374 staff 1234 Apr 26 12:00 package.json",
+    "drwxr-xr-x@ 5 n374 staff 160 Apr 26 13:22 src",
+    "drwxr-xr-x@ 4 n374 staff 128 Apr 26 14:55 test",
+    "-rw-r--r--@ 1 n374 staff  890 Apr 26 11:30 tsconfig.json",
+    "",
+  ].join("\n");
+
+  const capture = createEmptyCapture();
+  const ptySession = new ClaudePtySession({
+    id: "pty-regression-bash-ls-la",
+    cwd: "/Users/n374/Documents/Code/cerelay/client",
+    runtime: createMockRuntime({
+      cwd: "/Users/n374/Documents/Code/cerelay/client",
+      env: { HOME: "/home/node" },
+    }),
+    transport: createMockTransport(capture, {
+      onToolCall: (requestId) => {
+        ptySession.resolveToolResult(requestId, {
+          output: { stdout: realLsOutput, stderr: "", exit_code: 0 },
+          summary: "ls 成功",
+        });
+      },
+    }),
+  });
+
+  const hookResult = await ptySession.handleInjectedPreToolUse({
+    tool_name: "Bash",
+    tool_use_id: "toolu_017wzsgJdNNBzxacvzhtTHnK",
+    tool_input: { command: "ls -la", description: "列出当前目录的详细内容" },
+  });
+
+  const reason = hookResult.hookSpecificOutput?.permissionDecisionReason;
+  assert.ok(reason, "permissionDecisionReason 不能缺失");
+
+  // 用户日志里出现的每个文件都必须能被 Claude 看到
+  for (const fragment of [
+    "total 16",
+    "package.json",
+    "tsconfig.json",
+    "src",
+    "test",
+    ".claude",
+  ]) {
+    assert.ok(
+      reason!.includes(fragment),
+      `permissionDecisionReason 必须包含 "${fragment}"，否则 Claude 看不到这条条目。当前 reason: ${reason}`
+    );
+  }
+
+  // 旧实现的占位字符串绝不能再成为 reason 的整体内容
+  assert.notEqual(
+    reason,
+    "Tool response ready",
+    "permissionDecisionReason 不能再退化为 'Tool response ready' 字面量空壳"
+  );
+
+  await ptySession.close();
+});
+
+// ============================================================
+// 防御性: 当 renderToolResultForClaude 返回空字符串时仍要给一个非空 reason
+// ============================================================
+//
+// CC 协议下 deny 必须带非空 reason，否则会被解读为 "策略拒绝" 而非
+// "结果已注入"。当 tool result 真的没有任何 stdout/stderr/输出（极端情况），
+// renderToolResultForClaude 可能返回空串，此时仍需要回退到占位字符串。
+
+test("防御: tool 输出为空时 permissionDecisionReason 仍非空", async () => {
+  const capture = createEmptyCapture();
+  const ptySession = new ClaudePtySession({
+    id: "pty-empty-output-fallback",
+    cwd: "/Users/developer/project",
+    runtime: createMockRuntime({
+      cwd: "/Users/developer/project",
+      env: { HOME: "/home/node" },
+    }),
+    transport: createMockTransport(capture, {
+      onToolCall: (requestId) => {
+        // 模拟 Bash 命令真的没有任何输出
+        ptySession.resolveToolResult(requestId, {
+          output: { stdout: "", stderr: "", exit_code: 0 },
+          summary: "no output",
+        });
+      },
+    }),
+  });
+
+  const hookResult = await ptySession.handleInjectedPreToolUse({
+    tool_name: "Bash",
+    tool_use_id: "toolu_empty",
+    tool_input: { command: "true" },
+  });
+
+  const reason = hookResult.hookSpecificOutput?.permissionDecisionReason;
+  assert.ok(
+    reason && reason.length > 0,
+    "tool 真无输出时 reason 仍必须非空（否则 CC 会解读为策略拒绝）"
+  );
 });

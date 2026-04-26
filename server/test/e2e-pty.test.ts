@@ -118,11 +118,12 @@ test("E2E PTY: fake-claude 通过 hook bridge 触发 Bash 工具调用，Client 
 
   await harness.waitForMessage("tool_call_complete");
 
-  // fake-claude 拿到 hook 响应后会把 additionalContext 打印到 PTY stdout，
-  // server 通过 PTY stdout 捕获后以 pty_output 发回。
+  // fake-claude 把整段 hook JSON 响应打印到 PTY stdout。修复后真实 tool 输出
+  // 同时出现在 permissionDecisionReason 和 additionalContext 两个字段里。
   const toolResultLine = await harness.expectPtyOutput("FAKE_CLAUDE_TOOL_RESULT");
   assert.match(toolResultLine, /stdout:\\n\/virtual\/client\/cwd/);
-  assert.match(toolResultLine, /Tool response ready/);
+  assert.match(toolResultLine, /"permissionDecisionReason":"stdout:/);
+  assert.match(toolResultLine, /"additionalContext":"stdout:/);
 
   // 脚本第二步：让 fake-claude 主动退出
   await appendFile(ctx.fake.scriptFile, JSON.stringify({ op: "exit", code: 0 }) + "\n", "utf8");
