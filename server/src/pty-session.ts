@@ -483,12 +483,18 @@ function defaultSpawnInRuntime(options: SpawnOptions): SpawnedProcess {
 }
 
 /**
- * 从 CERELAY_ENABLE_SHADOW_MCP env 读默认开关。Phase 3 阶段缺省 false（保守，
- * 避免上线全量翻车），Phase 6 e2e 守护建立后改成默认 true。
+ * 从 CERELAY_ENABLE_SHADOW_MCP env 读默认开关。
+ *
+ * 默认 true（Plan D 已经在 server workspace 159 单测 + e2e-mcp-shadow-bash 守护下
+ * 稳定）。只有显式设为 "false" / "0" / "no" / "off" 才会关闭——主要给以下场景：
+ *   - 老用户回退到 legacy hook 路径排查问题
+ *   - 不希望注入 --disallowedTools 的特殊环境
+ * CERELAY_PTY_COMMAND override 路径下永远 disabled（与 mcp 注入无关的 stub 测试）。
  */
 function readShadowMcpEnvDefault(): boolean {
   const raw = process.env.CERELAY_ENABLE_SHADOW_MCP?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+  if (raw === undefined || raw === "") return true;
+  return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
 }
 
 /**

@@ -163,6 +163,50 @@ test("Phase 4: 7 个 shadowed builtin 都触发引导文案", async () => {
   await session.close();
 });
 
+test("Phase 6: CERELAY_ENABLE_SHADOW_MCP env 解析（默认 true，仅显式 0/false/no/off 关）", async () => {
+  // 借助一个独立 ClaudePtySession 检查默认值——构造时不传 shadowMcp，依赖 env。
+  const cases: Array<[string | undefined, boolean]> = [
+    [undefined, true],
+    ["", true],
+    ["true", true],
+    ["1", true],
+    ["yes", true],
+    ["TRUE", true],
+    ["false", false],
+    ["0", false],
+    ["no", false],
+    ["OFF", false],
+  ];
+  const original = process.env.CERELAY_ENABLE_SHADOW_MCP;
+  try {
+    for (const [value, expected] of cases) {
+      if (value === undefined) {
+        delete process.env.CERELAY_ENABLE_SHADOW_MCP;
+      } else {
+        process.env.CERELAY_ENABLE_SHADOW_MCP = value;
+      }
+      const session = new ClaudePtySession({
+        id: `pty-env-${expected}-${value ?? "unset"}`,
+        cwd: "/Users/dev/project",
+        runtime: createMockRuntime(),
+        transport: createTransport(createCapture(), () => undefined),
+      });
+      assert.equal(
+        (session as unknown as { shadowMcpEnabled: boolean }).shadowMcpEnabled,
+        expected,
+        `CERELAY_ENABLE_SHADOW_MCP=${JSON.stringify(value)} 应解析为 ${expected}`,
+      );
+      await session.close();
+    }
+  } finally {
+    if (original === undefined) {
+      delete process.env.CERELAY_ENABLE_SHADOW_MCP;
+    } else {
+      process.env.CERELAY_ENABLE_SHADOW_MCP = original;
+    }
+  }
+});
+
 test("Phase 4: shadow MCP 未启用时 hook 路径仍走旧的 client 转发逻辑（不引导）", async () => {
   const capture = createCapture();
   const session = new ClaudePtySession({

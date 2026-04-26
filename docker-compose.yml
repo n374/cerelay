@@ -41,8 +41,12 @@ services:
       - CERELAY_SOCKS_DNS_SERVER=${CERELAY_SOCKS_DNS_SERVER:-1.1.1.1}
       - CERELAY_SOCKS_TUN_ADDRESS=${CERELAY_SOCKS_TUN_ADDRESS:-172.19.0.1/30}
       - CERELAY_SOCKS_TUN_MTU=${CERELAY_SOCKS_TUN_MTU:-9000}
-      # 容器持久化数据目录：凭证与 Client 缓存均存放于此
+      # 容器持久化数据目录：凭证、Client 缓存、shadow MCP unix socket 均存放于此
       - CERELAY_DATA_DIR=${CERELAY_DATA_DIR:-/var/lib/cerelay}
+      # Plan D shadow MCP tools 总开关（默认 true）。设为 false/0/no/off 可
+      # 回退到 legacy PreToolUse hook 路径（is_error 协议硬约束 = true）。
+      # 详见 docs/plan-d-mcp-shadow-tools.md 与 CLAUDE.md "Shadow MCP Tools" 章节。
+      - CERELAY_ENABLE_SHADOW_MCP=${CERELAY_ENABLE_SHADOW_MCP:-true}
 
     # 端口映射：宿主机端口 → 容器内端口
     ports:
