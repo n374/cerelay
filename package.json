@@ -1,6 +1,7 @@
 {
   "name": "cerelay",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "scripts": {
     "typecheck": "npm run typecheck:workspaces",
     "typecheck:workspaces": "npm run typecheck --workspaces --if-present",

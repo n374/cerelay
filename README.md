@@ -394,6 +394,18 @@ cd web && npm test
 | `ALL_PROXY` | — | 代理通用回退（优先级低于上面两个） |
 | `NO_PROXY` | — | 不走代理的地址列表（逗号分隔） |
 
-## License
+## 许可证 / License
 
-MIT
+本项目采用 [PolyForm Noncommercial License 1.0.0](./LICENSE) 发布。
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](./LICENSE).
+
+**Copyright (c) 2026 n374**
+
+简要说明 / Summary（**以 LICENSE 全文为准 / the full LICENSE text governs**）：
+
+- ✅ **允许 / Permitted**：个人学习、研究、教育、慈善、政府等任何 **非商业用途** 下的使用、修改、再分发 / use, modify, and redistribute for any **noncommercial purpose** (personal study, research, education, charity, government, etc.).
+- ❌ **禁止 / Prohibited**：任何形式的商业用途 / any form of **commercial use**.
+- ✍️ **必须保留署名 / Attribution required**：分发本项目（含修改版本与衍生作品）时必须保留版权声明、本许可证全文以及 `Required Notice: Copyright (c) 2026 n374` / when redistributing the project (including modifications and derivative works), you must keep the copyright notice, the full license text, and the `Required Notice: Copyright (c) 2026 n374` line.
+
+如需商业授权，请联系作者 / For commercial licensing, please contact the author.
