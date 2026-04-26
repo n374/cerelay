@@ -233,6 +233,44 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
   }
 });
 
+test("CacheTaskStateMachine initial pipeline 失败时仍会 flush scan cache", async () => {
+  const watcher = new FakeWatcher();
+  const scanCache = new FakeScanCache();
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    config: TEST_CONFIG,
+    scanCache,
+    disableCacheTask: false,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    watcherFactory: () => watcher,
+    walkScope: async ({ scope }) => scope === "claude-home"
+      ? [{
+        relPath: "a.json",
+        absPath: "/tmp/a.json",
+        size: 1,
+        mtime: 1,
+      }]
+      : [],
+    hashScope: async ({ scope, locals, onHashProgress }) => {
+      for (const _local of locals) {
+        onHashProgress?.();
+      }
+      return makeEmptyPlan(scope, locals.length);
+    },
+    pushInitialDeltaBatches: async () => {
+      throw new Error("pipeline failed");
+    },
+  });
+
+  await sm.onConnected(async () => undefined);
+  await sm.onMessage(makeActiveAssignment());
+
+  assert.equal(scanCache.flushCalls, 1);
+  assert.equal(sm.getState(), "connected-passive");
+});
+
 test("CacheTaskStateMachine 收到 inactive assignment 后停止 watcher 并回到 passive", async () => {
   const watcher = new FakeWatcher();
   const sm = new CacheTaskStateMachine({

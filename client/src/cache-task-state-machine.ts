@@ -349,6 +349,8 @@ export class CacheTaskStateMachine {
       elapsedMs: this.now() - scanStartedAt,
     });
 
+    await this.flushScanCache();
+
     if (!this.isGenerationCurrent(generation, message.assignmentId)) {
       return;
     }
@@ -371,11 +373,6 @@ export class CacheTaskStateMachine {
       this.initialSyncAbortController = null;
     }
 
-    if (!this.isGenerationCurrent(generation, message.assignmentId)) {
-      return;
-    }
-
-    await this.flushScanCache();
     if (!this.isGenerationCurrent(generation, message.assignmentId)) {
       return;
     }
