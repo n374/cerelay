@@ -155,13 +155,10 @@ export interface FileProxyResponse {
 
 // ============================================================
 // Client 文件缓存同步协议
-// Hand 连接 Server 时，先用 deviceId + cwd 作为 key 做一次缓存握手：
-//   1. Hand → Server: cache_handshake，声明要同步哪些 scope
-//   2. Server → Hand: cache_manifest，返回 Server 当前已持有的文件元数据
-//   3. Hand 本地扫描 + diff，只上传 add/delete
-//   4. Hand → Server: cache_push；Server → Hand: cache_push_ack
-//
-// 单文件上限 1MB、目录累计上限 100MB（按 mtime 倒序挑选），超限文件标记 skipped。
+// Server 以 (deviceId, cwd) 为 key 维护 cache task，active client 负责：
+//   1. 收到 cache_task_assignment 后执行 initial reconcile
+//   2. 持续发送 cache_task_delta 增量更新
+//   3. 在 watcher 建立后发送 cache_task_sync_complete 切到 ready
 // ============================================================
 
 /** 缓存覆盖的路径子集。claude-home = `~/.claude/` 目录，claude-json = `~/.claude.json` 单文件。 */
@@ -338,80 +335,10 @@ export interface CacheTaskFault {
   sentAt: number;
 }
 
-/** Hand → Server：缓存握手，请求当前 Server 端的 manifest。 */
-/** @deprecated 保留旧版 cache handshake 流程兼容。 */
-export interface CacheHandshake {
-  type: "cache_handshake";
-  deviceId: string;
-  /** Hand 本次启动的工作目录绝对路径 */
-  cwd: string;
-  scopes: CacheScope[];
-}
-
-/** Server → Hand：返回 Server 端当前 manifest（新设备 / 新 cwd 时 entries 为空）。 */
-/** @deprecated 保留旧版 cache handshake 流程兼容。 */
-export interface CacheManifest {
-  type: "cache_manifest";
-  deviceId: string;
-  cwd: string;
-  /** key = scope */
-  manifests: Record<CacheScope, CacheManifestData>;
-}
-
-/** 单次推送中的一条新增/更新条目。 */
-export interface CachePushEntry {
-  /** 相对路径；claude-json scope 固定为 "" */
-  path: string;
-  size: number;
-  mtime: number;
-  /** 文件内容 sha256，skipped 的文件可选 */
-  sha256: string;
-  /** base64 编码的文件内容；skipped = true 时不携带 */
-  content?: string;
-  /** true 表示该文件超过大小阈值，仅更新元数据，Server 不保存 blob */
-  skipped?: boolean;
-}
-
-/** Hand → Server：推送增量。adds/deletes/skippedExtras 均为相对路径。 */
-/** @deprecated 保留旧版 cache push 流程兼容。 */
-export interface CachePush {
-  type: "cache_push";
-  deviceId: string;
-  cwd: string;
-  scope: CacheScope;
-  adds: CachePushEntry[];
-  deletes: string[];
-  /**
-   * 单调递增的请求号；Server 必须在 ack 中原样回显，Client 据此匹配 in-flight 请求。
-   * Pipeline 模式下同一 scope 可能有多个 push in-flight，仅靠 scope 无法区分。
-   */
-  seq: number;
-  /**
-   * true 表示该 scope 累计大小超过 100MB 阈值，Hand 已放弃同步剩余文件。
-   * Server 侧应保留此标记以便后续诊断（manifest.truncated）。
-   */
-  truncated?: boolean;
-}
-
-/** Server → Hand：推送 ack。 */
-/** @deprecated 保留旧版 cache push 流程兼容。 */
-export interface CachePushAck {
-  type: "cache_push_ack";
-  deviceId: string;
-  cwd: string;
-  scope: CacheScope;
-  /** echo 自 cache_push.seq；Client 用此匹配请求 */
-  seq: number;
-  ok: boolean;
-  error?: string;
-}
-
 export type ServerToHandMessage =
   | CacheTaskAssignment
   | CacheTaskMutationHint
   | CacheTaskDeltaAck
-  | CacheManifest
-  | CachePushAck
   | Connected
   | FileProxyRequest
   | PtySessionCreated
@@ -427,8 +354,6 @@ export type HandToServerMessage =
   | CacheTaskHeartbeat
   | CacheTaskSyncComplete
   | ClientHello
-  | CacheHandshake
-  | CachePush
   | CloseSession
   | CreatePtySession
   | FileProxyResponse

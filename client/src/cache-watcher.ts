@@ -11,6 +11,7 @@ export const DEBOUNCE_MS = 250;
 export const DEFAULT_SUPPRESS_TTL_MS = 10_000;
 
 type FsEventName = "add" | "addDir" | "change" | "unlink" | "unlinkDir";
+type SuppressionHint = { mutationId: string; expiresAt: number };
 
 export interface CacheWatcherFault {
   code: CacheTaskFaultCode;
@@ -60,7 +61,7 @@ export class CacheWatcher {
   private readonly setTimeoutFn: typeof setTimeout;
   private readonly clearTimeoutFn: typeof clearTimeout;
   private readonly dirtyPathSet = new Set<string>();
-  private readonly suppressions = new Map<string, number>();
+  private readonly suppressions = new Map<string, SuppressionHint>();
   private readonly localIndex = new Map<string, LocalEntry>();
   private handle: WatchHandle | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -122,10 +123,13 @@ export class CacheWatcher {
     await this.flushChain.catch(() => undefined);
   }
 
-  suppressPaths(paths: string[], ttlMs: number): void {
+  suppressPaths(paths: Array<{ absPath: string; mutationId: string }>, ttlMs: number): void {
     const expiresAt = this.now() + ttlMs;
-    for (const fsPath of paths) {
-      this.suppressions.set(path.resolve(fsPath), expiresAt);
+    for (const target of paths) {
+      this.suppressions.set(path.resolve(target.absPath), {
+        mutationId: target.mutationId,
+        expiresAt,
+      });
     }
   }
 
@@ -146,9 +150,6 @@ export class CacheWatcher {
       return;
     }
     const absPath = path.resolve(filePath);
-    if (this.isSuppressed(absPath)) {
-      return;
-    }
     this.dirtyPathSet.add(absPath);
     this.scheduleFlush();
   }
@@ -175,10 +176,11 @@ export class CacheWatcher {
       const deduped = new Map<string, CacheTaskChange>();
 
       for (const absPath of dirtyPaths) {
-        if (this.isSuppressed(absPath)) {
-          continue;
-        }
+        const suppression = this.lookupSuppression(absPath);
         for (const change of await this.buildChangesForPath(absPath)) {
+          if (suppression) {
+            change.mutationId = suppression.mutationId;
+          }
           deduped.set(this.changeKey(change), change);
         }
       }
@@ -304,18 +306,21 @@ export class CacheWatcher {
     this.callbacks.onFault?.({ code, fatal, message });
   }
 
-  private isSuppressed(absPath: string): boolean {
+  private lookupSuppression(absPath: string): SuppressionHint | null {
     const now = this.now();
-    for (const [suppressedPath, expiresAt] of Array.from(this.suppressions.entries())) {
-      if (expiresAt <= now) {
+    let bestMatch: { pathLength: number; hint: SuppressionHint } | null = null;
+    for (const [suppressedPath, hint] of Array.from(this.suppressions.entries())) {
+      if (hint.expiresAt <= now) {
         this.suppressions.delete(suppressedPath);
         continue;
       }
       if (absPath === suppressedPath || absPath.startsWith(`${suppressedPath}${path.sep}`)) {
-        return true;
+        if (!bestMatch || suppressedPath.length > bestMatch.pathLength) {
+          bestMatch = { pathLength: suppressedPath.length, hint };
+        }
       }
     }
-    return false;
+    return bestMatch?.hint ?? null;
   }
 
   private toScopePath(absPath: string): { scope: CacheScope; path: string } | null {

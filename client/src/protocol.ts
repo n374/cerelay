@@ -208,6 +208,10 @@ export interface FileProxyResponse {
 
 // ============================================================
 // Client 文件缓存同步协议（与 server/src/protocol.ts 对齐）
+// Server 以 (deviceId, cwd) 为 key 维护 cache task，active client 负责：
+//   1. 收到 cache_task_assignment 后执行 initial reconcile
+//   2. 持续发送 cache_task_delta 增量更新
+//   3. 在 watcher 建立后发送 cache_task_sync_complete 切到 ready
 // ============================================================
 
 export type CacheScope = "claude-home" | "claude-json";
@@ -371,59 +375,6 @@ export interface CacheTaskFault {
   sentAt: number;
 }
 
-/** @deprecated 保留旧版 cache handshake 流程兼容。 */
-export interface CacheHandshake {
-  type: "cache_handshake";
-  deviceId: string;
-  cwd: string;
-  scopes: CacheScope[];
-}
-
-/** @deprecated 保留旧版 cache handshake 流程兼容。 */
-export interface CacheManifest {
-  type: "cache_manifest";
-  deviceId: string;
-  cwd: string;
-  manifests: Record<CacheScope, CacheManifestData>;
-}
-
-export interface CachePushEntry {
-  path: string;
-  size: number;
-  mtime: number;
-  sha256: string;
-  content?: string;
-  skipped?: boolean;
-}
-
-/** @deprecated 保留旧版 cache push 流程兼容。 */
-export interface CachePush {
-  type: "cache_push";
-  deviceId: string;
-  cwd: string;
-  scope: CacheScope;
-  adds: CachePushEntry[];
-  deletes: string[];
-  /**
-   * 单调递增的请求号；Server 在 ack 中原样回显。
-   * Pipeline 模式下同一 scope 可能有多个 push in-flight，仅靠 scope 无法区分。
-   */
-  seq: number;
-  truncated?: boolean;
-}
-
-/** @deprecated 保留旧版 cache push 流程兼容。 */
-export interface CachePushAck {
-  type: "cache_push_ack";
-  deviceId: string;
-  cwd: string;
-  scope: CacheScope;
-  /** echo 自 cache_push.seq；Client 用此匹配请求 */
-  seq: number;
-  ok: boolean;
-  error?: string;
-}
-
 // ============================================================
 // Union 类型
 // ============================================================
@@ -432,8 +383,6 @@ export type ServerToHandMessage =
   | CacheTaskAssignment
   | CacheTaskMutationHint
   | CacheTaskDeltaAck
-  | CacheManifest
-  | CachePushAck
   | Connected
   | FileProxyRequest
   | PtySessionCreated
@@ -449,8 +398,6 @@ export type HandToServerMessage =
   | CacheTaskHeartbeat
   | CacheTaskSyncComplete
   | ClientHello
-  | CacheHandshake
-  | CachePush
   | CloseSession
   | CreatePtySession
   | FileProxyResponse

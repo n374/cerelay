@@ -287,11 +287,11 @@ hooks: {
   - `manifest.json`：按 scope（`claude-home` / `claude-json`）记录 `path → {size, mtime, sha256, skipped}`
   - `blobs/<sha256>`：实际内容，内容寻址、天然去重
 - `deviceId`：Client 首次启动生成 UUIDv4，持久化到 `~/.config/cerelay/device-id`；Server 侧按 (deviceId, cwdHash) 隔离缓存，因此同一设备切换 cwd 不会互相污染
-- 协议（见 `server/src/protocol.ts` 的 Cache* 类型）：
-  1. Client → Server：`cache_handshake { deviceId, cwd, scopes }`
-  2. Server → Client：`cache_manifest` 返回当前持久化的元数据
-  3. Client 扫本地 → 对比 → 只推送差异：`cache_push { adds, deletes, truncated? }`
-  4. Server → Client：`cache_push_ack`
+- 协议（见 `server/src/protocol.ts` 的 CacheTask* 类型）：
+  1. Client → Server：`client_hello` 上报 `deviceId/cwd/capabilities`
+  2. Server → Client：`cache_task_assignment` 指派 active/inactive 角色并携带 manifest 快照
+  3. Active Client：发送 `cache_task_delta`，initial 完成后发 `cache_task_sync_complete`
+  4. Server → Client：用 `cache_task_delta_ack` / `cache_task_mutation_hint` 协调 revision 与读穿透
 - 大小限制：
   - 单文件 > 1MB（`MAX_FILE_BYTES`）：标记 `skipped`，仅同步元数据
   - 单 scope 累计 > 100MB（`MAX_SCOPE_BYTES`）：按 mtime 倒序截断，后面的文件完全丢弃，manifest 记录 `truncated: true` 用于诊断
@@ -300,10 +300,10 @@ hooks: {
 
 **启动期同步进度 UI 与 pipeline / Initial cache sync progress & pipeline**（`client/src/cache-sync.ts` + `client/src/ui.ts` + `server/src/client-cache-store.ts`）：
 
-- **Pipeline 发送**：每个有 content 的文件单独发一个 `cache_push`，发完不等 ack 立刻发下一个；ack 通过协议中的 `seq` 字段（单调递增）异步匹配 in-flight 队列
+- **Pipeline 发送**：每个有 content 的文件单独发一个 `cache_task_delta` change，发完不等 ack 立刻发下一个 batch；ack 通过 `batchId + appliedRevision` 异步匹配 in-flight 队列
 - **流控水位**：`MAX_INFLIGHT_BYTES = 16 MB`。当 in-flight 字节累计超过该阈值时暂停 send，等任意 ack 释放配额后继续。本地/局域网下基本不触发，远程 RTT 200ms × 80MB/s ≈ 16MB 是流水线满载所需深度
-- **协议 `seq`**：`CachePush.seq` / `CachePushAck.seq` 都是 required；server 在 `handleCachePush` 中原样回显。pipeline 模式下同一 scope 可能有多个 push in-flight，只靠 scope 无法区分
-- **Server 端 manifest 串行锁**（`client-cache-store.ts: withManifestLock`）：按 `(deviceId, cwd)` 维护 promise 链 mutex，串行化 `applyPush` / `upsertEntry` / `removeEntry` 的 read-modify-write。**这是 pipeline 的硬性前提**：server 的 message handler 是并发的（`server.ts` 用 `void this.handleMessage()`），无锁状态下 manifest 写入会丢更新
+- **协议批次标识**：`CacheTaskDelta.batchId` 必填；server 用 `cache_task_delta_ack` 回传 `appliedRevision`，pipeline 模式下靠 `batchId` 区分 in-flight 批次
+- **Server 端 manifest 串行锁**（`client-cache-store.ts: withManifestLock`）：按 `(deviceId, cwd)` 维护 promise 链 mutex，串行化 `applyDelta` / `upsertEntry` / `removeEntry` 的 read-modify-write。**这是 pipeline 的硬性前提**：server 的 message handler 是并发的（`server.ts` 用 `void this.handleMessage()`），无锁状态下 manifest 写入会丢更新
 - **元数据批**（deletes + skipped）：每 scope 第一发，等 ack 后再开始 pipeline。这部分占用 in-flight 但 size 记 0，不消耗流控配额
 - **进度展示**（双行）：
   - line1 = 跨 scope 合并总进度（spinner + 进度条 + 百分比 + 已 ack 文件/字节），按 ack 字节**精确计算**

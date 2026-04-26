@@ -30,6 +30,8 @@ interface CacheTaskRecord {
   revision: number;
   candidateClientIds: Set<string>;
   pendingReadBypass: Map<string, { mutationId: string; expiresAt: number }>;
+  recentMutationIds: Set<string>;
+  recentMutationOrder: string[];
   lastHeartbeatAt: number | null;
   lastFailoverAt: number | null;
 }
@@ -53,6 +55,7 @@ interface OutboundMessage {
 }
 
 export class CacheTaskManager {
+  private static readonly RECENT_MUTATION_ID_CAP = 64;
   private readonly registry: ClientRegistry;
   private readonly store: ClientCacheStore;
   private readonly sendToClientImpl: (clientId: string, message: ServerToHandMessage) => Promise<void>;
@@ -210,9 +213,21 @@ export class CacheTaskManager {
       }
 
       try {
-        const result = await this.store.applyDelta(task.deviceId, task.cwd, delta.changes);
+        const changesToApply = this.filterDuplicateMutationChanges(task, delta.changes);
+        if (changesToApply.length === 0) {
+          return {
+            type: "cache_task_delta_ack",
+            assignmentId: delta.assignmentId,
+            batchId: delta.batchId,
+            ok: true,
+            appliedRevision: task.revision,
+          } satisfies CacheTaskDeltaAck;
+        }
+
+        const result = await this.store.applyDelta(task.deviceId, task.cwd, changesToApply);
         task.revision = result.revision;
-        this.clearReadBypass(task, delta.changes);
+        this.rememberMutationIds(task, changesToApply);
+        this.clearReadBypass(task, changesToApply);
         return {
           type: "cache_task_delta_ack",
           assignmentId: delta.assignmentId,
@@ -406,6 +421,8 @@ export class CacheTaskManager {
         revision: 0,
         candidateClientIds: new Set(),
         pendingReadBypass: new Map(),
+        recentMutationIds: new Set(),
+        recentMutationOrder: [],
         lastHeartbeatAt: null,
         lastFailoverAt: null,
       };
@@ -589,6 +606,36 @@ export class CacheTaskManager {
       }
       if (!change.mutationId || change.mutationId === pending.mutationId) {
         task.pendingReadBypass.delete(key);
+      }
+    }
+  }
+
+  private filterDuplicateMutationChanges(
+    task: CacheTaskRecord,
+    changes: CacheTaskChange[],
+  ): CacheTaskChange[] {
+    const filtered: CacheTaskChange[] = [];
+    for (const change of changes) {
+      if (change.mutationId && task.recentMutationIds.has(change.mutationId)) {
+        continue;
+      }
+      filtered.push(change);
+    }
+    return filtered;
+  }
+
+  private rememberMutationIds(task: CacheTaskRecord, changes: CacheTaskChange[]): void {
+    for (const change of changes) {
+      if (!change.mutationId || task.recentMutationIds.has(change.mutationId)) {
+        continue;
+      }
+      task.recentMutationIds.add(change.mutationId);
+      task.recentMutationOrder.push(change.mutationId);
+      if (task.recentMutationOrder.length > CacheTaskManager.RECENT_MUTATION_ID_CAP) {
+        const evicted = task.recentMutationOrder.shift();
+        if (evicted) {
+          task.recentMutationIds.delete(evicted);
+        }
       }
     }
   }

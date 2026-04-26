@@ -11,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const CLIENT_WORKDIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// 这批 integration 测试使用 fake brain，不模拟 cache_handshake/cache_push_ack。
+// 这批 integration 测试使用 fake brain，不覆盖 cache task 调度消息。
 // 开启 env var 跳过启动缓存同步，避免 60s 等待超时。真正的 cache sync 路径由
 // test/cache-sync.test.ts 独立覆盖。
 process.env.CERELAY_DISABLE_INITIAL_CACHE_SYNC = "true";

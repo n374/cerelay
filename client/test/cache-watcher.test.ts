@@ -106,7 +106,7 @@ test("CacheWatcher 目录删除会展开 localIndex 后代为 delete changes", a
   assert.ok(emitted[0]?.every((change) => change.kind === "delete"));
 });
 
-test("CacheWatcher suppressPaths 会跳过对应路径事件", async (t) => {
+test("CacheWatcher suppressPaths 不丢事件，而是附带 mutationId 后去重推送", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);
   const backend = new FakeWatchBackend();
@@ -121,12 +121,16 @@ test("CacheWatcher suppressPaths 会跳过对应路径事件", async (t) => {
     onChanges: (batch) => emitted.push(batch),
   });
   await watcher.start();
-  watcher.suppressPaths([filePath], 1_000);
+  watcher.suppressPaths([{ absPath: filePath, mutationId: "mutation-1" }], 1_000);
 
+  backend.handle.emitAll("change", filePath);
   backend.handle.emitAll("change", filePath);
   await sleep(60);
 
-  assert.equal(emitted.length, 0);
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0]?.length, 1);
+  assert.equal(emitted[0]?.[0]?.mutationId, "mutation-1");
+  assert.equal(emitted[0]?.[0]?.path, "");
 });
 
 test("CacheWatcher 大文件标记 skipped", async (t) => {

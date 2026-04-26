@@ -22,10 +22,6 @@ import type {
   CacheTaskFault,
   CacheTaskHeartbeat,
   CacheTaskSyncComplete,
-  CacheHandshake,
-  CacheManifest,
-  CachePush,
-  CachePushAck,
   ClientHello,
   Connected,
   CloseSession,
@@ -37,7 +33,7 @@ import type {
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
-import { CACHE_SCOPES, ClientCacheStore } from "./client-cache-store.js";
+import { ClientCacheStore } from "./client-cache-store.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
 import { CacheTaskManager } from "./cache-task-manager.js";
@@ -595,12 +591,6 @@ export class CerelayServer {
         case "close_session":
           await this.handleCloseSession(clientId, JSON.parse(raw) as CloseSession);
           return;
-        case "cache_handshake":
-          await this.handleCacheHandshake(clientId, JSON.parse(raw) as CacheHandshake);
-          return;
-        case "cache_push":
-          await this.handleCachePush(clientId, JSON.parse(raw) as CachePush);
-          return;
         case "client_hello":
           await this.handleClientHello(clientId, JSON.parse(raw) as ClientHello);
           return;
@@ -697,6 +687,7 @@ export class CerelayServer {
         // 未上报则 FileProxyManager 退化为纯穿透模式，功能不变。
         cacheStore: message.deviceId ? this.cacheStore : undefined,
         deviceId: message.deviceId,
+        cacheTaskManager: message.deviceId ? this.cacheTaskManager : undefined,
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
       // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，
@@ -871,89 +862,6 @@ export class CerelayServer {
     }
     this.destroyPtySession(message.sessionId, ptyEntry, "客户端主动关闭");
     log.info("PTY Session 已关闭", { sessionId: message.sessionId, clientId });
-  }
-
-  // ============================================================
-  // Client 文件缓存
-  // ============================================================
-
-  private async handleCacheHandshake(clientId: string, message: CacheHandshake): Promise<void> {
-    const requested = new Set(message.scopes?.length ? message.scopes : CACHE_SCOPES);
-    const manifests = {
-      "claude-home": { entries: {} },
-      "claude-json": { entries: {} },
-    } as CacheManifest["manifests"];
-
-    const persisted = await this.cacheStore.loadManifest(message.deviceId, message.cwd);
-    for (const scope of CACHE_SCOPES) {
-      if (requested.has(scope)) {
-        manifests[scope] = { entries: persisted.scopes[scope].entries };
-      }
-    }
-
-    const entryCounts = Object.fromEntries(
-      CACHE_SCOPES.map((scope) => [scope, Object.keys(manifests[scope].entries).length]),
-    );
-    log.info("收到 cache_handshake，已返回 manifest", {
-      clientId,
-      deviceId: message.deviceId,
-      cwd: message.cwd,
-      scopes: Array.from(requested),
-      entryCounts,
-    });
-
-    const resp: CacheManifest = {
-      type: "cache_manifest",
-      deviceId: message.deviceId,
-      cwd: message.cwd,
-      manifests,
-    };
-    await this.sendToClient(clientId, resp);
-  }
-
-  private async handleCachePush(clientId: string, message: CachePush): Promise<void> {
-    let ack: CachePushAck;
-    try {
-      const result = await this.cacheStore.applyPush(message);
-      log.info("处理 cache_push 完成", {
-        clientId,
-        deviceId: message.deviceId,
-        cwd: message.cwd,
-        scope: message.scope,
-        seq: message.seq,
-        written: result.written,
-        deleted: result.deleted,
-        skippedContents: result.skippedContents,
-        truncated: Boolean(message.truncated),
-      });
-      ack = {
-        type: "cache_push_ack",
-        deviceId: message.deviceId,
-        cwd: message.cwd,
-        scope: message.scope,
-        seq: message.seq,
-        ok: true,
-      };
-    } catch (err) {
-      log.error("处理 cache_push 失败", {
-        clientId,
-        deviceId: message.deviceId,
-        cwd: message.cwd,
-        scope: message.scope,
-        seq: message.seq,
-        error: asError(err).message,
-      });
-      ack = {
-        type: "cache_push_ack",
-        deviceId: message.deviceId,
-        cwd: message.cwd,
-        scope: message.scope,
-        seq: message.seq,
-        ok: false,
-        error: asError(err).message,
-      };
-    }
-    await this.sendToClient(clientId, ack);
   }
 
   private async handleClientHello(clientId: string, message: ClientHello): Promise<void> {

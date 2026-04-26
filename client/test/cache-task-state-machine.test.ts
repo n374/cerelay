@@ -14,7 +14,7 @@ class FakeWatcher {
   started = false;
   stopped = false;
   flushNowCalls = 0;
-  suppressed: Array<{ paths: string[]; ttlMs: number }> = [];
+  suppressed: Array<{ paths: Array<{ absPath: string; mutationId: string }>; ttlMs: number }> = [];
 
   async start(): Promise<void> {
     this.started = true;
@@ -28,7 +28,7 @@ class FakeWatcher {
     this.flushNowCalls += 1;
   }
 
-  suppressPaths(paths: string[], ttlMs: number): void {
+  suppressPaths(paths: Array<{ absPath: string; mutationId: string }>, ttlMs: number): void {
     this.suppressed.push({ paths, ttlMs });
   }
 
@@ -277,6 +277,46 @@ test("CacheTaskStateMachine task token mismatch ack 会退回 passive", async ()
 
   assert.equal(sm.getState(), "connected-passive");
   assert.equal(watcher.stopped, true);
+});
+
+test("CacheTaskStateMachine mutation hint 会把 absPath 和 mutationId 传给 watcher", async () => {
+  const watcher = new FakeWatcher();
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    homedir: "/Users/tester",
+    disableCacheTask: false,
+    suppressTtlMs: 1_234,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    watcherFactory: () => watcher,
+    buildScopePlan: async ({ scope }) => ({
+      scope,
+      uploads: [],
+      metaChanges: [],
+      truncated: false,
+      totalLocal: 0,
+    }),
+    pushInitialDeltaBatches: async () => ({ baseRevision: 3, summaries: [] }),
+  });
+
+  await sm.onConnected(async () => undefined);
+  await sm.onMessage(makeActiveAssignment());
+  await sm.onMessage({
+    type: "cache_task_mutation_hint",
+    assignmentId: "assignment-1",
+    mutationId: "mutation-1",
+    targets: [{ scope: "claude-home", path: "settings.json" }],
+    issuedAt: 1,
+  });
+
+  assert.deepEqual(watcher.suppressed, [{
+    paths: [{
+      absPath: "/Users/tester/.claude/settings.json",
+      mutationId: "mutation-1",
+    }],
+    ttlMs: 1_234,
+  }]);
 });
 
 test("CacheTaskStateMachine 使用 assignment 指定的 heartbeatIntervalMs", async () => {

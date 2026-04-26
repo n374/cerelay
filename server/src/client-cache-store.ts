@@ -19,8 +19,6 @@ import type {
   CacheEntry,
   CacheManifestData,
   CacheTaskChange,
-  CachePush,
-  CachePushEntry,
   CacheScope,
 } from "./protocol.js";
 
@@ -43,14 +41,6 @@ export interface ClientCacheStoreOptions {
   dataDir: string;
 }
 
-export interface ApplyPushResult {
-  revision: number;
-  written: number;
-  deleted: number;
-  skippedContents: number;
-  manifest: CacheManifestData & { truncated?: boolean };
-}
-
 export interface ApplyDeltaResult {
   revision: number;
   written: number;
@@ -64,9 +54,9 @@ export class ClientCacheStore {
    * 按 (deviceId, cwd) 维护的串行锁。
    *
    * 背景：WebSocket message handler 是并发的（server.ts 里 void this.handleMessage(...)），
-   * 同一连接短时间内连续到达多个 cache_push 时，applyPush 会并发跑，manifest 的
-   * read-modify-write 之间没有同步原语，会互相覆盖丢更新。pipeline 模式下这个问题
-   * 必然触发，因此这里加 per-manifest（注意是 per-deviceId+cwd，不是 per-scope，
+   * 同一 (deviceId, cwd) 的多个 delta / 单条目更新可能并发落盘，manifest 的
+   * read-modify-write 之间没有同步原语，会互相覆盖丢更新。因此这里加 per-manifest
+   * 串行锁（注意是 per-deviceId+cwd，不是 per-scope，
    * 因为 manifest.json 是单文件存所有 scope）的串行锁。
    *
    * 实现是简单的 promise 链：每个新请求 await 上一个的结尾，自己再追加上去。
@@ -138,45 +128,6 @@ export class ClientCacheStore {
       // ENOENT / JSON 解析失败 → 回空
     }
     return emptyManifest();
-  }
-
-  /**
-   * 应用一次推送：写 blobs、更新 manifest。原子性保证：
-   * - manifest 写入使用 tmp + rename，避免半写状态
-   * - blob 不需要原子性（sha256 内容寻址，同名即同内容）
-   * - 同一 (deviceId, cwd) 上的 applyPush / upsertEntry / removeEntry 通过
-   *   withManifestLock 串行化，避免 manifest 的 read-modify-write 竞态
-   */
-  async applyPush(push: CachePush): Promise<ApplyPushResult> {
-    return this.withManifestLock(push.deviceId, push.cwd, async () => {
-      const sessionDir = this.sessionDir(push.deviceId, push.cwd);
-      await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
-
-      const manifest = await this.loadManifest(push.deviceId, push.cwd);
-      const result = await this.applyChangesToManifest(
-        manifest,
-        sessionDir,
-        toDeltaChanges(push),
-      );
-      const scopeData = manifest.scopes[push.scope];
-
-      // 标记 truncated 用于后续诊断；仍允许继续运行
-      if (push.truncated) {
-        scopeData.truncated = true;
-      } else {
-        delete scopeData.truncated;
-      }
-
-      manifest.revision += 1;
-      await writeManifestAtomic(this.manifestPath(push.deviceId, push.cwd), manifest);
-      return {
-        revision: manifest.revision,
-        written: result.written,
-        deleted: result.deleted,
-        skippedContents: result.skippedContents,
-        manifest: scopeData,
-      };
-    });
   }
 
   async applyDelta(
@@ -435,23 +386,6 @@ export function createBlobReadStream(blobPath: string): NodeJS.ReadableStream {
   return createReadStream(blobPath);
 }
 
-/** 把 PushEntry 转为 manifest 层面的 CacheEntry，便于调用方统一处理 */
-export function pushEntryToCacheEntry(entry: CachePushEntry): CacheEntry {
-  if (entry.skipped) {
-    return {
-      size: entry.size,
-      mtime: entry.mtime,
-      sha256: entry.sha256 || null,
-      skipped: true,
-    };
-  }
-  return {
-    size: entry.size,
-    mtime: entry.mtime,
-    sha256: entry.sha256,
-  };
-}
-
 function normalizeManifestV2(manifest: PersistedManifest): PersistedManifest {
   for (const scope of CACHE_SCOPES) {
     if (!manifest.scopes[scope]) {
@@ -472,24 +406,4 @@ function upgradeManifestV1(manifest: PersistedManifestV1): PersistedManifest {
       : { entries: {} };
   }
   return upgraded;
-}
-
-function toDeltaChanges(push: CachePush): CacheTaskChange[] {
-  return [
-    ...push.deletes.map((relPath) => ({
-      kind: "delete" as const,
-      scope: push.scope,
-      path: relPath,
-    })),
-    ...push.adds.map((entry) => ({
-      kind: "upsert" as const,
-      scope: push.scope,
-      path: entry.path,
-      size: entry.size,
-      mtime: entry.mtime,
-      sha256: entry.skipped ? entry.sha256 || null : entry.sha256,
-      contentBase64: entry.content,
-      skipped: entry.skipped,
-    })),
-  ];
 }

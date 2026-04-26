@@ -14,6 +14,7 @@ import type {
   FileProxyStat,
 } from "./protocol.js";
 import type { ClientCacheStore, PersistedManifest } from "./client-cache-store.js";
+import type { CacheTaskManager } from "./cache-task-manager.js";
 
 const log = createLogger("file-proxy-manager");
 
@@ -39,6 +40,11 @@ interface Deferred {
   timer: ReturnType<typeof setTimeout>;
 }
 
+type CacheTaskReadGate = Pick<
+  CacheTaskManager,
+  "registerMutationHintForPath" | "shouldUseCacheSnapshot" | "shouldBypassCacheRead"
+>;
+
 export interface FileProxyManagerOptions {
   runtimeRoot: string;
   clientHomeDir: string;
@@ -60,6 +66,8 @@ export interface FileProxyManagerOptions {
   cacheStore?: ClientCacheStore;
   /** Client 本机 deviceId，用于定位 cache session 目录 */
   deviceId?: string;
+  /** Cache task ready gate / mutation hint 协调器 */
+  cacheTaskManager?: CacheTaskReadGate;
 }
 
 /**
@@ -89,6 +97,8 @@ export class FileProxyManager {
   private readonly cacheStore: ClientCacheStore | undefined;
   /** Client 本机 deviceId；无 cacheStore 时忽略 */
   private readonly deviceId: string | undefined;
+  /** Cache task ready gate / mutation hint 协调器 */
+  private readonly cacheTaskManager: CacheTaskReadGate | undefined;
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -99,6 +109,7 @@ export class FileProxyManager {
     this.shadowFiles = options.shadowFiles ?? {};
     this.cacheStore = options.cacheStore;
     this.deviceId = options.deviceId;
+    this.cacheTaskManager = options.cacheTaskManager;
 
     this.roots = {
       "home-claude": path.join(this.clientHomeDir, ".claude"),
@@ -110,6 +121,15 @@ export class FileProxyManager {
   /** 判断是否启用了 cache 读优先路径。二者同时存在才算启用。 */
   private cacheAvailable(): boolean {
     return Boolean(this.cacheStore && this.deviceId);
+  }
+
+  private shouldUseCacheSnapshot(): boolean {
+    if (!this.cacheAvailable()) {
+      return false;
+    }
+    return this.cacheTaskManager
+      ? this.cacheTaskManager.shouldUseCacheSnapshot(this.deviceId!, this.clientCwd)
+      : true;
   }
 
   get mountPoint(): string {
@@ -279,8 +299,9 @@ export class FileProxyManager {
     const rootsToFetchFromClient: Array<[string, string]> = [];
     const cachedEntries: FileProxySnapshotEntry[] = [];
     let cachedEntryCount = 0;
+    const shouldUseCacheSnapshot = this.shouldUseCacheSnapshot();
 
-    if (this.cacheAvailable()) {
+    if (shouldUseCacheSnapshot) {
       const manifest = await this.cacheStore!.loadManifest(this.deviceId!, this.clientCwd);
       const built = this.buildSnapshotFromManifest(manifest);
       cachedEntries.push(...built);
@@ -293,7 +314,9 @@ export class FileProxyManager {
     }
 
     for (const [rootName, clientPath] of Object.entries(this.roots)) {
-      if (this.cacheAvailable() && cacheCoveredRoots.has(rootName)) continue;
+      if (cacheCoveredRoots.has(rootName) && shouldUseCacheSnapshot) {
+        continue;
+      }
       rootsToFetchFromClient.push([rootName, clientPath]);
     }
 
@@ -344,6 +367,7 @@ export class FileProxyManager {
       sessionId: this.sessionId,
       entryCount,
       cachedEntryCount,
+      usedCacheSnapshot: shouldUseCacheSnapshot,
       clientFetchedRoots: rootsToFetchFromClient.map(([r]) => r),
       durationMs: Date.now() - startedAt,
     });
@@ -436,8 +460,22 @@ export class FileProxyManager {
     if (!this.cacheStore || !this.deviceId) return false;
     const scope = rootToCacheScope(req.root);
     if (!scope) return false;
+    if (this.cacheTaskManager && !this.cacheTaskManager.shouldUseCacheSnapshot(this.deviceId, this.clientCwd)) {
+      return false;
+    }
 
     const cacheRelPath = toCacheRelPath(scope, req.relPath);
+    if (
+      this.cacheTaskManager &&
+      this.cacheTaskManager.shouldBypassCacheRead(
+        this.deviceId,
+        this.clientCwd,
+        scope,
+        cacheRelPath,
+      )
+    ) {
+      return false;
+    }
     const entry = await this.cacheStore.lookupEntry(
       this.deviceId,
       this.clientCwd,
@@ -660,15 +698,31 @@ export class FileProxyManager {
         : undefined,
     };
 
-    // 注册 pending，等待 Client 响应
-    const deferred = this.createDeferred(reqId);
-    this.pendingRequests.set(reqId, deferred);
+    const mutationTargets = this.collectMutationHintTargets(req);
+    let deferred: Deferred | undefined;
 
     try {
+      if (
+        mutationTargets.length > 0 &&
+        this.cacheTaskManager &&
+        this.deviceId
+      ) {
+        await this.cacheTaskManager.registerMutationHintForPath(
+          this.deviceId,
+          this.clientCwd,
+          mutationTargets,
+        );
+      }
+
+      // 注册 pending，等待 Client 响应
+      deferred = this.createDeferred(reqId);
+      this.pendingRequests.set(reqId, deferred);
       await this.sendToClient(clientReq);
     } catch (err) {
-      this.pendingRequests.delete(reqId);
-      clearTimeout(deferred.timer);
+      if (deferred) {
+        this.pendingRequests.delete(reqId);
+        clearTimeout(deferred.timer);
+      }
       this.writeToDaemon({
         reqId,
         error: { code: 5, message: `EIO: failed to send to Client: ${err}` },
@@ -747,7 +801,52 @@ export class FileProxyManager {
     }
   }
 
+  private collectMutationHintTargets(
+    req: FuseRequest,
+  ): Array<{ scope: CacheScope; path: string }> {
+    if (!CACHE_MUTATING_OPS.has(req.op)) {
+      return [];
+    }
+
+    const dedup = new Set<string>();
+    const targets: Array<{ scope: CacheScope; path: string }> = [];
+    const addTarget = (root: string | undefined, relPath: string | undefined) => {
+      if (typeof relPath !== "string") {
+        return;
+      }
+      const scope = rootToCacheScope(root ?? "");
+      if (!scope) {
+        return;
+      }
+      const cachePath = toCacheRelPath(scope, relPath);
+      const key = `${scope}\0${cachePath}`;
+      if (dedup.has(key)) {
+        return;
+      }
+      dedup.add(key);
+      targets.push({ scope, path: cachePath });
+    };
+
+    addTarget(req.root, req.relPath);
+    if (req.op === "rename") {
+      addTarget(req.newRoot ?? req.root, req.newRelPath);
+    }
+    return targets;
+  }
+
 }
+
+const CACHE_MUTATING_OPS = new Set<string>([
+  "write",
+  "create",
+  "unlink",
+  "mkdir",
+  "rmdir",
+  "rename",
+  "truncate",
+  "setattr",
+  "chmod",
+]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

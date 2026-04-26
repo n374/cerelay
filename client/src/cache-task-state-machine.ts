@@ -65,7 +65,7 @@ export interface CacheWatcherLike {
   start(): Promise<void>;
   stop(): Promise<void>;
   flushNow(): Promise<void>;
-  suppressPaths(paths: string[], ttlMs: number): void;
+  suppressPaths(paths: Array<{ absPath: string; mutationId: string }>, ttlMs: number): void;
   clearSuppressor(): void;
 }
 
@@ -366,7 +366,10 @@ export class CacheTaskStateMachine {
       return;
     }
     this.watcher.suppressPaths(
-      message.targets.map((target) => resolveTargetPath(this.homedir, target.scope, target.path)),
+      message.targets.map((target) => ({
+        absPath: resolveTargetPath(this.homedir, target.scope, target.path),
+        mutationId: message.mutationId,
+      })),
       this.suppressTtlMs,
     );
   }

@@ -229,6 +229,95 @@ test("sync_complete moves task to ready", async (t) => {
   assert.equal(harness.manager.shouldUseCacheSnapshot(DEVICE_ID, CWD), true);
 });
 
+test("mutation hint TTL 过期后 shouldBypassCacheRead 返回 false", async (t) => {
+  const harness = await createHarness();
+  t.after(harness.cleanup);
+
+  const client = harness.addClient("client-1");
+  await harness.manager.registerHello("client-1", capableHello());
+  const assignment = latestAssignment(client.messages);
+  await harness.manager.completeInitialSync("client-1", {
+    type: "cache_task_sync_complete",
+    assignmentId: assignment.assignmentId,
+    baseRevision: assignment.manifest?.revision ?? 0,
+    scannedAt: harness.clock.now,
+  });
+
+  await harness.manager.registerMutationHintForPath(DEVICE_ID, CWD, [
+    { scope: "claude-home", path: "settings.json" },
+  ]);
+
+  assert.equal(
+    harness.manager.shouldBypassCacheRead(DEVICE_ID, CWD, "claude-home", "settings.json"),
+    true,
+  );
+
+  harness.clock.now += 10_001;
+
+  assert.equal(
+    harness.manager.shouldBypassCacheRead(DEVICE_ID, CWD, "claude-home", "settings.json"),
+    false,
+  );
+});
+
+test("重复 mutationId 的 delta 会直接 ack，不重复推进 revision", async (t) => {
+  const harness = await createHarness();
+  t.after(harness.cleanup);
+
+  const client = harness.addClient("client-1");
+  await harness.manager.registerHello("client-1", capableHello());
+  const assignment = latestAssignment(client.messages);
+
+  await harness.manager.applyDelta("client-1", {
+    type: "cache_task_delta",
+    assignmentId: assignment.assignmentId,
+    batchId: "batch-1",
+    baseRevision: assignment.manifest?.revision ?? 0,
+    mode: "live",
+    sentAt: harness.clock.now,
+    changes: [{
+      kind: "upsert",
+      scope: "claude-home",
+      path: "settings.json",
+      size: 5,
+      mtime: 1,
+      sha256: sha256("alpha"),
+      contentBase64: b64("alpha"),
+      mutationId: "mutation-1",
+    }],
+  });
+
+  const firstAck = latestAck(client.messages);
+  assert.equal(firstAck.ok, true);
+  assert.equal(firstAck.appliedRevision, 1);
+
+  await harness.manager.applyDelta("client-1", {
+    type: "cache_task_delta",
+    assignmentId: assignment.assignmentId,
+    batchId: "batch-2",
+    baseRevision: firstAck.appliedRevision ?? 0,
+    mode: "live",
+    sentAt: harness.clock.now,
+    changes: [{
+      kind: "upsert",
+      scope: "claude-home",
+      path: "settings.json",
+      size: 5,
+      mtime: 1,
+      sha256: sha256("alpha"),
+      contentBase64: b64("alpha"),
+      mutationId: "mutation-1",
+    }],
+  });
+
+  const secondAck = latestAck(client.messages);
+  assert.equal(secondAck.ok, true);
+  assert.equal(secondAck.appliedRevision, 1);
+
+  const manifest = await harness.store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.revision, 1);
+});
+
 async function createHarness() {
   const dataDir = await mkdtemp(path.join(tmpdir(), "cerelay-cache-task-manager-"));
   const registry = new ClientRegistry();
