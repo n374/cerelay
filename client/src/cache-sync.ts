@@ -91,12 +91,14 @@ export interface ScanOptions {
   exclude?: (relPath: string) => boolean;
   scanCache?: ScanCacheStore;
   onHashProgress?: () => void;
+  shouldAbort?: () => boolean;
 }
 
 export interface WalkScopeArgs {
   scope: CacheScope;
   homedir: string;
   exclude?: (relPath: string) => boolean;
+  shouldAbort?: () => boolean;
 }
 
 export interface HashScopeArgs {
@@ -105,6 +107,7 @@ export interface HashScopeArgs {
   remote?: CacheManifestData;
   scanCache?: ScanCacheStore;
   onHashProgress?: () => void;
+  shouldAbort?: () => boolean;
 }
 
 interface PendingAck {
@@ -466,11 +469,12 @@ export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
     remote: args.remote,
     scanCache: args.scanCache,
     onHashProgress: args.onHashProgress,
+    shouldAbort: args.shouldAbort,
   });
 }
 
 export async function walkScope(args: WalkScopeArgs): Promise<LocalEntry[]> {
-  return scanLocalFiles(args.scope, args.homedir, args.exclude);
+  return scanLocalFiles(args.scope, args.homedir, args.exclude, args.shouldAbort);
 }
 
 export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
@@ -480,6 +484,9 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
 
   const adds: CacheTaskUpsertChange[] = [];
   for (const local of args.locals) {
+    if (args.shouldAbort?.()) {
+      break;
+    }
     const remoteEntry = remoteEntries[local.relPath];
     if (remoteEntry && remoteEntry.size === local.size && remoteEntry.mtime === local.mtime) {
       args.onHashProgress?.();
@@ -528,6 +535,7 @@ export async function scanLocalFiles(
   scope: CacheScope,
   homedir: string,
   exclude?: (relPath: string) => boolean,
+  shouldAbort?: () => boolean,
 ): Promise<LocalEntry[]> {
   if (scope === "claude-json") {
     const abs = path.join(homedir, ".claude.json");
@@ -556,7 +564,7 @@ export async function scanLocalFiles(
   }
 
   const results: LocalEntry[] = [];
-  await walkDir(rootAbs, rootAbs, results, exclude);
+  await walkDir(rootAbs, rootAbs, results, exclude, shouldAbort);
   return results;
 }
 
@@ -565,7 +573,12 @@ async function walkDir(
   current: string,
   out: LocalEntry[],
   exclude?: (relPath: string) => boolean,
+  shouldAbort?: () => boolean,
 ): Promise<void> {
+  if (shouldAbort?.()) {
+    return;
+  }
+
   let entries;
   try {
     entries = await readdir(current, { withFileTypes: true });
@@ -574,13 +587,16 @@ async function walkDir(
   }
 
   for (const entry of entries) {
+    if (shouldAbort?.()) {
+      return;
+    }
     const abs = path.join(current, entry.name);
     const relPath = path.relative(root, abs).split(path.sep).join("/");
     if (entry.isDirectory()) {
       if (exclude?.(relPath)) {
         continue;
       }
-      await walkDir(root, abs, out, exclude);
+      await walkDir(root, abs, out, exclude, shouldAbort);
       continue;
     }
     if (!entry.isFile()) {

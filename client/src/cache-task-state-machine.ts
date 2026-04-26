@@ -303,6 +303,7 @@ export class CacheTaskStateMachine {
         scope,
         homedir: this.homedir,
         exclude: this.exclude,
+        shouldAbort: () => !this.isGenerationCurrent(generation, message.assignmentId),
       });
       walkedScopes.push({ scope, locals });
       totalFiles += locals.length;
@@ -322,6 +323,7 @@ export class CacheTaskStateMachine {
         locals: walked.locals,
         remote: message.manifest?.scopes[walked.scope],
         scanCache: this.scanCache,
+        shouldAbort: () => !this.isGenerationCurrent(generation, message.assignmentId),
         onHashProgress: () => {
           completedFiles += 1;
           this.onProgress?.({

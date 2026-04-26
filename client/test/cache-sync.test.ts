@@ -280,6 +280,28 @@ test("walkScope/hashScope 中 walk_done 必须先于所有 hash_progress", async
   assert.ok(events.slice(1).every((event) => event.kind === "hash_progress"));
 });
 
+test("walkScope 在 shouldAbort 触发后提前返回当前 partial 结果", async (t) => {
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  await mkdir(path.join(home, ".claude", "a"), { recursive: true });
+  await mkdir(path.join(home, ".claude", "b"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "a", "first.json"), "a", "utf8");
+  await writeFile(path.join(home, ".claude", "b", "second.json"), "b", "utf8");
+
+  let abortChecks = 0;
+  const locals = await walkScope({
+    scope: "claude-home",
+    homedir: home,
+    shouldAbort: () => {
+      abortChecks += 1;
+      return abortChecks >= 2;
+    },
+  });
+
+  assert.deepEqual(locals, []);
+  assert.equal(abortChecks >= 2, true);
+});
+
 test("pushInitialDeltaBatches 保留 file_pushed/file_acked 事件契约并预分配 baseRevision", async () => {
   const sent: CacheTaskDelta[] = [];
   const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
