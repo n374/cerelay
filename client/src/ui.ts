@@ -224,7 +224,7 @@ export class CacheSyncProgressView {
       case "upload_done":
         this.stopTimer();
         this.clearLines();
-        if (this.uploadTotalFiles > 0) {
+        if (!event.aborted && this.uploadTotalFiles > 0) {
           this.out.write(
             `${colorGreen}✓${colorReset} 同步完成 (${event.totalFiles} 文件, ${formatBytes(event.totalBytes)}, ${formatDuration(event.elapsedMs)})\n`,
           );

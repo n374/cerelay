@@ -1,531 +1,417 @@
-/**
- * cache-sync 单元测试：本地扫描、大小预算截断、pipeline 发送、seq ack 匹配、
- * 流控水位、进度事件序列。
- */
-
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile, utimes } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import {
-  ALL_SCOPES,
+  InitialSyncAbortedError,
   MAX_FILE_BYTES,
-  MAX_INFLIGHT_BYTES,
-  MAX_SCOPE_BYTES,
   applyScopeBudget,
-  performInitialCacheSync,
+  buildScopePlan,
+  pushInitialDeltaBatches,
   scanLocalFiles,
 } from "../src/cache-sync.js";
-import type { CacheSyncDeps, CacheSyncEvent } from "../src/cache-sync.js";
-import type {
-  CacheHandshake,
-  CacheManifest,
-  CachePush,
-  CachePushAck,
-  CachePushEntry,
-} from "../src/protocol.js";
+import type { CacheSyncEvent } from "../src/cache-sync.js";
+import type { CacheTaskDelta, CacheTaskDeltaAck, CacheTaskUpsertChange } from "../src/protocol.js";
 
 async function makeTempHome() {
   const home = await mkdtemp(path.join(tmpdir(), "cerelay-home-"));
   return { home, cleanup: () => rm(home, { recursive: true, force: true }) };
 }
 
-/**
- * 构造一个可控的 mock deps：
- * - sendMessage：记录所有出站消息
- * - subscribeAcks：保存订阅者，测试用 ackController 主动派发
- * - waitForServerMessage：第一次返回 manifest
- *
- * ackController 提供：
- *   - autoAck = true：每收到一个 push 立即按 seq 回一个 ok=true 的 ack
- *   - autoAck = false：测试手动 ackByLastPush() / ackBySeq() 控制时机
- */
-function makeControllableDeps(opts: {
-  manifest: CacheManifest;
-  homedir: string;
-  onProgress?: (event: CacheSyncEvent) => void;
-  autoAck?: boolean;
-  failByPath?: (path: string) => string | undefined;
-}) {
-  const sent: Array<CacheHandshake | CachePush> = [];
-  const ackSubs = new Set<(ack: CachePushAck) => void>();
-  let manifestSent = false;
-  const autoAck = opts.autoAck !== false;
-
-  const dispatchAck = (push: CachePush) => {
-    const failReason = push.adds[0] && opts.failByPath?.(push.adds[0].path);
-    const ack: CachePushAck = {
-      type: "cache_push_ack",
-      deviceId: opts.manifest.deviceId,
-      cwd: opts.manifest.cwd,
-      scope: push.scope,
-      seq: push.seq,
-      ok: !failReason,
-      error: failReason,
-    };
-    for (const sub of Array.from(ackSubs)) sub(ack);
-  };
-
-  const deps: CacheSyncDeps = {
-    sendMessage: async (msg) => {
-      sent.push(msg);
-      if (autoAck && msg.type === "cache_push") {
-        // 异步派发 ack（next microtask），模拟真实异步路径
-        Promise.resolve().then(() => dispatchAck(msg));
-      }
-    },
-    waitForServerMessage: async (predicate) => {
-      if (manifestSent) {
-        throw new Error("waitForServerMessage 在 pipeline 模式下应只调用一次（manifest）");
-      }
-      manifestSent = true;
-      const parsed = predicate(JSON.stringify(opts.manifest));
-      if (parsed === null) throw new Error("predicate 拒绝 manifest");
-      return parsed;
-    },
-    subscribeAcks: (handler) => {
-      ackSubs.add(handler);
-      return () => {
-        ackSubs.delete(handler);
-      };
-    },
-    homedir: opts.homedir,
-    onProgress: opts.onProgress,
-  };
-
-  return {
-    sent,
-    deps,
-    /** 手动派发与最近一次 push 对应的 ack（autoAck=false 模式） */
-    ackLast: (override?: Partial<CachePushAck>) => {
-      const lastPush = sent.filter((m): m is CachePush => m.type === "cache_push").at(-1);
-      if (!lastPush) throw new Error("没有可 ack 的 push");
-      const ack: CachePushAck = {
-        type: "cache_push_ack",
-        deviceId: opts.manifest.deviceId,
-        cwd: opts.manifest.cwd,
-        scope: lastPush.scope,
-        seq: lastPush.seq,
-        ok: true,
-        ...override,
-      };
-      for (const sub of Array.from(ackSubs)) sub(ack);
-    },
-    /** 按 seq 派发 ack，可乱序 */
-    ackBySeq: (seq: number, override?: Partial<CachePushAck>) => {
-      const push = sent.find((m): m is CachePush => m.type === "cache_push" && m.seq === seq);
-      if (!push) throw new Error(`没有 seq=${seq} 的 push`);
-      const ack: CachePushAck = {
-        type: "cache_push_ack",
-        deviceId: opts.manifest.deviceId,
-        cwd: opts.manifest.cwd,
-        scope: push.scope,
-        seq,
-        ok: true,
-        ...override,
-      };
-      for (const sub of Array.from(ackSubs)) sub(ack);
-    },
-  };
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("waitFor timeout");
+    }
+    await delay(0);
+  }
 }
 
-// ================== scanLocalFiles ==================
+function maxInflightFromEvents(events: CacheSyncEvent[]): number {
+  let current = 0;
+  let max = 0;
+  for (const event of events) {
+    if (event.kind === "file_pushed") {
+      current += 1;
+      max = Math.max(max, current);
+      continue;
+    }
+    if (event.kind === "file_acked") {
+      current -= 1;
+    }
+  }
+  return max;
+}
 
 test("scanLocalFiles claude-json 返回空数组当文件不存在", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);
-  const res = await scanLocalFiles("claude-json", home);
-  assert.deepEqual(res, []);
-});
-
-test("scanLocalFiles claude-json 找到 ~/.claude.json 返回单条目", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  await writeFile(path.join(home, ".claude.json"), '{"x":1}', "utf8");
-  const res = await scanLocalFiles("claude-json", home);
-  assert.equal(res.length, 1);
-  assert.equal(res[0].relPath, "");
+  const entries = await scanLocalFiles("claude-json", home);
+  assert.deepEqual(entries, []);
 });
 
 test("scanLocalFiles claude-home 递归遍历 ~/.claude/", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(path.join(base, "subdir"), { recursive: true });
-  await writeFile(path.join(base, "settings.json"), "{}", "utf8");
-  await writeFile(path.join(base, "subdir", "nested.json"), "{}", "utf8");
+  await mkdir(path.join(home, ".claude", "nested"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "settings.json"), "{}", "utf8");
+  await writeFile(path.join(home, ".claude", "nested", "prefs.json"), '{"a":1}', "utf8");
 
-  const res = await scanLocalFiles("claude-home", home);
-  const rels = res.map((r) => r.relPath).sort();
-  assert.deepEqual(rels, ["settings.json", "subdir/nested.json"]);
+  const entries = await scanLocalFiles("claude-home", home);
+  assert.deepEqual(
+    entries.map((entry) => entry.relPath).sort(),
+    ["nested/prefs.json", "settings.json"],
+  );
 });
 
-// ================== applyScopeBudget ==================
-
-test("applyScopeBudget 单文件 >1MB 保留但标记 skipped，不计入预算", () => {
-  const adds: CachePushEntry[] = [
-    { path: "big", size: 10 * 1024 * 1024, mtime: 100, sha256: "", skipped: true },
-    { path: "a", size: 10, mtime: 50, sha256: "x", content: "Zm9v" },
-    { path: "b", size: 10, mtime: 60, sha256: "y", content: "Zm9v" },
+test("applyScopeBudget 单文件 skipped 不占预算，按 mtime 截断其余项", () => {
+  const adds: CacheTaskUpsertChange[] = [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "big.bin",
+      size: MAX_FILE_BYTES + 1,
+      mtime: 100,
+      sha256: null,
+      skipped: true,
+    },
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "newer.json",
+      size: 70 * 1024 * 1024,
+      mtime: 90,
+      sha256: "a",
+      contentBase64: "YQ==",
+    },
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "older.json",
+      size: 40 * 1024 * 1024,
+      mtime: 80,
+      sha256: "b",
+      contentBase64: "Yg==",
+    },
   ];
-  const { kept, truncatedAdds } = applyScopeBudget(adds);
-  assert.equal(truncatedAdds, false);
-  assert.equal(kept.length, 3);
-});
 
-test("applyScopeBudget 按 mtime 倒序截断至 100MB", () => {
-  const entry = (path: string, size: number, mtime: number): CachePushEntry => ({
-    path,
-    size,
-    mtime,
-    sha256: "h-" + path,
-    content: "x",
-  });
-  const adds: CachePushEntry[] = [
-    entry("oldest", 60 * 1024 * 1024, 1),
-    entry("middle", 50 * 1024 * 1024, 2),
-    entry("newest", 30 * 1024 * 1024, 3),
-  ];
   const { kept, truncatedAdds } = applyScopeBudget(adds);
   assert.equal(truncatedAdds, true);
-  const paths = kept.map((e) => e.path).sort();
-  assert.deepEqual(paths, ["middle", "newest"]);
+  assert.deepEqual(
+    kept.map((entry) => entry.path).sort(),
+    ["big.bin", "newer.json"],
+  );
 });
 
-// ================== pipeline 主流程 ==================
-
-test("performInitialCacheSync 首次同步：每个文件一个 push，且 push.seq 单调递增", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(path.join(base, "sub"), { recursive: true });
-  await writeFile(path.join(base, "settings.json"), "{}", "utf8");
-  await writeFile(path.join(base, "sub", "nested.json"), '{"a":1}', "utf8");
-  await writeFile(path.join(home, ".claude.json"), '{"x":1}', "utf8");
-
-  const { sent, deps } = makeControllableDeps({
-    homedir: home,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": { entries: {} },
-        "claude-json": { entries: {} },
-      },
-    },
-  });
-
-  const summaries = await performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-
-  assert.equal(sent[0].type, "cache_handshake");
-  assert.deepEqual((sent[0] as CacheHandshake).scopes, ALL_SCOPES);
-
-  const pushes = sent.filter((m): m is CachePush => m.type === "cache_push");
-  // 三个文件 → 三个 push（一个都不合并）
-  assert.equal(pushes.length, 3);
-  for (const p of pushes) {
-    assert.equal(p.adds.length, 1);
-    assert.equal(p.deletes.length, 0);
-    assert.ok(typeof p.seq === "number");
-  }
-  // seq 单调递增（不要求从 1 开始，只要严格递增）
-  const seqs = pushes.map((p) => p.seq);
-  for (let i = 1; i < seqs.length; i++) {
-    assert.ok(seqs[i] > seqs[i - 1], `seq 必须递增 (${seqs[i - 1]} → ${seqs[i]})`);
-  }
-
-  const totalPushed = summaries.reduce((acc, s) => acc + s.pushed, 0);
-  assert.equal(totalPushed, 3);
-  for (const s of summaries) {
-    assert.equal(s.error, undefined);
-  }
-});
-
-test("performInitialCacheSync 完全 unchanged 时不发送任何 cache_push", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(base, { recursive: true });
-  const settingsPath = path.join(base, "settings.json");
-  await writeFile(settingsPath, "{}", "utf8");
-  const fixedMtime = 1_700_000_000_000;
-  await utimes(settingsPath, new Date(fixedMtime), new Date(fixedMtime));
-
-  const { sent, deps } = makeControllableDeps({
-    homedir: home,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": {
-          entries: {
-            "settings.json": {
-              size: 2,
-              mtime: Math.floor(fixedMtime),
-              sha256: "dummy",
-            },
-          },
-        },
-        "claude-json": { entries: {} },
-      },
-    },
-  });
-
-  await performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].type, "cache_handshake");
-});
-
-test("performInitialCacheSync 仅有 deletes 时发一次元数据批", async (t) => {
+test("buildScopePlan 生成 uploads、skipped metadata 与 remote deletes", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);
   await mkdir(path.join(home, ".claude"), { recursive: true });
+  const unchanged = path.join(home, ".claude", "unchanged.json");
+  await writeFile(unchanged, "{}", "utf8");
+  const stats = await import("node:fs/promises").then((fs) => fs.stat(unchanged));
+  await utimes(unchanged, stats.atime, stats.mtime);
+  await writeFile(path.join(home, ".claude", "large.bin"), Buffer.alloc(MAX_FILE_BYTES + 10));
+  await writeFile(path.join(home, ".claude", "fresh.json"), '{"ok":true}', "utf8");
 
-  const { sent, deps } = makeControllableDeps({
+  const unchangedStats = await import("node:fs/promises").then((fs) => fs.stat(unchanged));
+  const plan = await buildScopePlan({
+    scope: "claude-home",
     homedir: home,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": {
-          entries: {
-            "stale.json": { size: 10, mtime: 100, sha256: "old" },
-          },
+    remote: {
+      entries: {
+        "unchanged.json": {
+          size: unchangedStats.size,
+          mtime: Math.floor(unchangedStats.mtimeMs),
+          sha256: "ignored",
         },
-        "claude-json": { entries: {} },
+        "stale.json": {
+          size: 1,
+          mtime: 1,
+          sha256: "old",
+        },
       },
     },
   });
 
-  const summaries = await performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-
-  const pushes = sent.filter((m): m is CachePush => m.type === "cache_push");
-  assert.equal(pushes.length, 1);
-  assert.equal(pushes[0].scope, "claude-home");
-  assert.deepEqual(pushes[0].deletes, ["stale.json"]);
-  assert.equal(pushes[0].adds.length, 0);
-  assert.ok(typeof pushes[0].seq === "number");
-
-  const homeSummary = summaries.find((s) => s.scope === "claude-home");
-  assert.ok(homeSummary);
-  assert.equal(homeSummary.deleted, 1);
-});
-
-// ================== onProgress 事件序列 ==================
-
-test("onProgress 事件序列：scan_start → scan_done → upload_start → file_pushed/file_acked* → upload_done", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(base, { recursive: true });
-  await writeFile(path.join(base, "settings.json"), "{}", "utf8");
-  await writeFile(path.join(home, ".claude.json"), '{"x":1}', "utf8");
-
-  const events: CacheSyncEvent[] = [];
-  const { deps } = makeControllableDeps({
-    homedir: home,
-    onProgress: (e) => events.push(e),
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": { entries: {} },
-        "claude-json": { entries: {} },
-      },
-    },
-  });
-
-  await performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-
-  const kinds = events.map((e) => e.kind);
-  assert.equal(kinds[0], "scan_start");
-  assert.equal(kinds[1], "scan_done");
-  assert.equal(kinds[2], "upload_start");
-  assert.equal(kinds[kinds.length - 1], "upload_done");
-
-  const pushed = events.filter((e) => e.kind === "file_pushed");
-  const acked = events.filter((e) => e.kind === "file_acked");
-  assert.equal(pushed.length, 2);
-  assert.equal(acked.length, 2);
-
-  // 每个 file_pushed 都有对应 seq 的 file_acked
-  for (const p of pushed) {
-    if (p.kind !== "file_pushed") continue;
-    const matched = acked.find((a) => a.kind === "file_acked" && a.seq === p.seq);
-    assert.ok(matched, `file_pushed seq=${p.seq} 没有对应的 file_acked`);
-  }
-
-  const uploadStart = events.find((e) => e.kind === "upload_start") as Extract<
-    CacheSyncEvent,
-    { kind: "upload_start" }
-  >;
-  assert.equal(uploadStart.totalFiles, 2);
-});
-
-test("onProgress 在 manifest 等待失败时发 skipped 事件", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-
-  const events: CacheSyncEvent[] = [];
-  const summaries = await performInitialCacheSync(
-    {
-      sendMessage: async () => {},
-      waitForServerMessage: async () => {
-        throw new Error("timeout");
-      },
-      subscribeAcks: () => () => {},
-      homedir: home,
-      onProgress: (e) => events.push(e),
-    },
-    { deviceId: "d", cwd: "/c" },
+  assert.deepEqual(plan.uploads.map((item) => item.change.path), ["fresh.json"]);
+  assert.ok(plan.metaChanges.some((change) => change.kind === "delete" && change.path === "stale.json"));
+  assert.ok(
+    plan.metaChanges.some(
+      (change) => change.kind === "upsert" && change.path === "large.bin" && change.skipped === true,
+    ),
   );
+});
 
-  assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "skipped");
-  for (const s of summaries) {
-    assert.ok(s.error);
+test("pushInitialDeltaBatches 保留 file_pushed/file_acked 事件契约并预分配 baseRevision", async () => {
+  const sent: CacheTaskDelta[] = [];
+  const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
+  const events: CacheSyncEvent[] = [];
+  let revision = 7;
+
+  const result = await pushInitialDeltaBatches({
+    assignmentId: "assign-1",
+    baseRevision: revision,
+    plans: [
+      {
+        scope: "claude-home",
+        uploads: [
+          {
+            displayPath: "~/.claude/a.json",
+            change: {
+              kind: "upsert",
+              scope: "claude-home",
+              path: "a.json",
+              size: 3,
+              mtime: 1,
+              sha256: "a",
+              contentBase64: "YQ==",
+            },
+          },
+          {
+            displayPath: "~/.claude/b.json",
+            change: {
+              kind: "upsert",
+              scope: "claude-home",
+              path: "b.json",
+              size: 3,
+              mtime: 2,
+              sha256: "b",
+              contentBase64: "Yg==",
+            },
+          },
+        ],
+        metaChanges: [{ kind: "delete", scope: "claude-home", path: "gone.json" }],
+        truncated: false,
+        totalLocal: 2,
+      },
+    ],
+    sendDelta: async (delta) => {
+      sent.push(delta);
+      revision += 1;
+      queueMicrotask(() => {
+        for (const subscriber of Array.from(subscribers)) {
+          subscriber({
+            type: "cache_task_delta_ack",
+            assignmentId: delta.assignmentId,
+            batchId: delta.batchId,
+            ok: true,
+            appliedRevision: revision,
+          });
+        }
+      });
+    },
+    subscribeAcks: (handler) => {
+      subscribers.add(handler);
+      return () => subscribers.delete(handler);
+    },
+    onProgress: (event) => events.push(event),
+    createBatchId: (() => {
+      let id = 0;
+      return () => `batch-${++id}`;
+    })(),
+    now: (() => {
+      let value = 10;
+      return () => ++value;
+    })(),
+  });
+
+  assert.equal(sent.length, 3);
+  assert.deepEqual(sent.map((delta) => delta.baseRevision), [7, 8, 9]);
+  assert.equal(sent[0].changes[0]?.kind, "delete");
+  assert.equal(events[0]?.kind, "upload_start");
+  assert.equal(events.at(-1)?.kind, "upload_done");
+  const pushed = events.filter((event): event is Extract<CacheSyncEvent, { kind: "file_pushed" }> => event.kind === "file_pushed");
+  const acked = events.filter((event): event is Extract<CacheSyncEvent, { kind: "file_acked" }> => event.kind === "file_acked");
+  assert.deepEqual(pushed.map((event) => event.seq), [1, 2]);
+  assert.deepEqual(acked.map((event) => event.seq).sort((a, b) => a - b), [1, 2]);
+  assert.equal(result.baseRevision, 10);
+});
+
+test("pushInitialDeltaBatches 在 initial 阶段保留多文件并发 in-flight", async () => {
+  const sent: CacheTaskDelta[] = [];
+  const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
+  const events: CacheSyncEvent[] = [];
+  const batches = new Map<string, CacheTaskDelta>();
+
+  const promise = pushInitialDeltaBatches({
+    assignmentId: "assign-1",
+    baseRevision: 20,
+    plans: [{
+      scope: "claude-home",
+      uploads: [
+        makeUpload("a.json", 3, 1, "a"),
+        makeUpload("b.json", 3, 2, "b"),
+        makeUpload("c.json", 3, 3, "c"),
+      ],
+      metaChanges: [],
+      truncated: false,
+      totalLocal: 3,
+    }],
+    sendDelta: async (delta) => {
+      sent.push(delta);
+      batches.set(delta.batchId, delta);
+    },
+    subscribeAcks: (handler) => {
+      subscribers.add(handler);
+      return () => subscribers.delete(handler);
+    },
+    onProgress: (event) => events.push(event),
+    createBatchId: (() => {
+      let id = 0;
+      return () => `batch-${++id}`;
+    })(),
+    now: (() => {
+      let value = 100;
+      return () => ++value;
+    })(),
+  });
+
+  await waitFor(() => sent.length === 3);
+  assert.deepEqual(sent.map((delta) => delta.baseRevision), [20, 21, 22]);
+  assert.equal(events.filter((event) => event.kind === "file_pushed").length, 3);
+  assert.equal(events.filter((event) => event.kind === "file_acked").length, 0);
+  assert.ok(maxInflightFromEvents(events) > 1);
+
+  ackBatch(subscribers, batches.get("batch-1")!, 21);
+  await waitFor(() => events.filter((event) => event.kind === "file_acked").length === 1);
+  ackBatch(subscribers, batches.get("batch-2")!, 22);
+  ackBatch(subscribers, batches.get("batch-3")!, 23);
+
+  const result = await promise;
+  assert.equal(result.baseRevision, 23);
+  assert.deepEqual(
+    events.map((event) => event.kind),
+    ["upload_start", "file_pushed", "file_pushed", "file_pushed", "file_acked", "file_acked", "file_acked", "upload_done"],
+  );
+});
+
+test("pushInitialDeltaBatches 在达到 capacity 水位前阻塞后续 push", async () => {
+  const sent: CacheTaskDelta[] = [];
+  const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
+  const batches = new Map<string, CacheTaskDelta>();
+
+  const promise = pushInitialDeltaBatches({
+    assignmentId: "assign-1",
+    baseRevision: 30,
+    maxInflightBytes: 10,
+    plans: [{
+      scope: "claude-home",
+      uploads: [
+        makeUpload("a.bin", 7, 1, "a"),
+        makeUpload("b.bin", 7, 2, "b"),
+        makeUpload("c.bin", 7, 3, "c"),
+      ],
+      metaChanges: [],
+      truncated: false,
+      totalLocal: 3,
+    }],
+    sendDelta: async (delta) => {
+      sent.push(delta);
+      batches.set(delta.batchId, delta);
+    },
+    subscribeAcks: (handler) => {
+      subscribers.add(handler);
+      return () => subscribers.delete(handler);
+    },
+    createBatchId: (() => {
+      let id = 0;
+      return () => `batch-${++id}`;
+    })(),
+  });
+
+  await waitFor(() => sent.length === 1);
+  await delay(10);
+  assert.equal(sent.length, 1);
+
+  ackBatch(subscribers, batches.get("batch-1")!, 31);
+  await waitFor(() => sent.length === 2);
+  await delay(10);
+  assert.equal(sent.length, 2);
+
+  ackBatch(subscribers, batches.get("batch-2")!, 32);
+  await waitFor(() => sent.length === 3);
+  ackBatch(subscribers, batches.get("batch-3")!, 33);
+
+  const result = await promise;
+  assert.equal(result.baseRevision, 33);
+});
+
+test("pushInitialDeltaBatches abort 时清理 ack listener 并抛 InitialSyncAbortedError", async () => {
+  const controller = new AbortController();
+  const sent: CacheTaskDelta[] = [];
+  const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
+  const events: CacheSyncEvent[] = [];
+
+  const promise = pushInitialDeltaBatches({
+    assignmentId: "assign-1",
+    baseRevision: 40,
+    plans: [{
+      scope: "claude-home",
+      uploads: [
+        makeUpload("a.json", 3, 1, "a"),
+        makeUpload("b.json", 3, 2, "b"),
+      ],
+      metaChanges: [],
+      truncated: false,
+      totalLocal: 2,
+    }],
+    sendDelta: async (delta) => {
+      sent.push(delta);
+    },
+    subscribeAcks: (handler) => {
+      subscribers.add(handler);
+      return () => subscribers.delete(handler);
+    },
+    abortSignal: controller.signal,
+    onProgress: (event) => events.push(event),
+    createBatchId: (() => {
+      let id = 0;
+      return () => `batch-${++id}`;
+    })(),
+  });
+
+  await waitFor(() => sent.length === 2);
+  assert.equal(subscribers.size, 1);
+
+  controller.abort();
+
+  await assert.rejects(promise, InitialSyncAbortedError);
+  assert.equal(subscribers.size, 0);
+  const uploadDone = events.find((event): event is Extract<CacheSyncEvent, { kind: "upload_done" }> => event.kind === "upload_done");
+  assert.equal(uploadDone?.aborted, true);
+});
+
+function makeUpload(pathName: string, size: number, mtime: number, sha: string) {
+  return {
+    displayPath: `~/.claude/${pathName}`,
+    change: {
+      kind: "upsert" as const,
+      scope: "claude-home" as const,
+      path: pathName,
+      size,
+      mtime,
+      sha256: sha,
+      contentBase64: "YQ==",
+    },
+  };
+}
+
+function ackBatch(
+  subscribers: Set<(ack: CacheTaskDeltaAck) => void>,
+  delta: CacheTaskDelta,
+  appliedRevision: number,
+): void {
+  for (const subscriber of Array.from(subscribers)) {
+    subscriber({
+      type: "cache_task_delta_ack",
+      assignmentId: delta.assignmentId,
+      batchId: delta.batchId,
+      ok: true,
+      appliedRevision,
+    });
   }
-});
-
-// ================== Pipeline 行为 ==================
-
-test("pipeline：autoAck=false 时不阻塞，可同时有多个 push in-flight", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(base, { recursive: true });
-  // 三个小文件
-  await writeFile(path.join(base, "a.json"), "1", "utf8");
-  await writeFile(path.join(base, "b.json"), "2", "utf8");
-  await writeFile(path.join(base, "c.json"), "3", "utf8");
-
-  const { sent, deps, ackBySeq } = makeControllableDeps({
-    homedir: home,
-    autoAck: false,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": { entries: {} },
-        "claude-json": { entries: {} },
-      },
-    },
-  });
-
-  const syncPromise = performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-
-  // 让 IO/microtask 跑一轮，pipeline 应该已经把所有三个 push 都发出去
-  await new Promise((r) => setTimeout(r, 30));
-
-  const pushesBeforeAck = sent.filter((m): m is CachePush => m.type === "cache_push");
-  // 三个文件 push 全部已发，证明没有等 ack 阻塞
-  assert.equal(pushesBeforeAck.length, 3, "pipeline 应在收到 ack 前就把所有 push 发出去");
-
-  // 按 seq 乱序回 ack（中间 → 最后 → 第一个）
-  const seqs = pushesBeforeAck.map((p) => p.seq);
-  ackBySeq(seqs[1]);
-  ackBySeq(seqs[2]);
-  ackBySeq(seqs[0]);
-
-  const summaries = await syncPromise;
-  const totalPushed = summaries.reduce((acc, s) => acc + s.pushed, 0);
-  assert.equal(totalPushed, 3, "三个文件都应被记为已 push");
-});
-
-test("pipeline：流控水位生效——in-flight 字节超过水位时暂停发送，ack 释放后继续", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(base, { recursive: true });
-  // 3 个 ~10KB 文件
-  const big = "x".repeat(10 * 1024);
-  await writeFile(path.join(base, "a.json"), big, "utf8");
-  await writeFile(path.join(base, "b.json"), big, "utf8");
-  await writeFile(path.join(base, "c.json"), big, "utf8");
-
-  const { sent, deps, ackBySeq } = makeControllableDeps({
-    homedir: home,
-    autoAck: false,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": { entries: {} },
-        "claude-json": { entries: {} },
-      },
-    },
-  });
-
-  // 水位线 = 12KB，单文件 10KB → 一次只能 in-flight 一个
-  const syncPromise = performInitialCacheSync(deps, {
-    deviceId: "d",
-    cwd: "/c",
-    maxInflightBytes: 12 * 1024,
-  });
-
-  await new Promise((r) => setTimeout(r, 30));
-  // 仅第一个 push 已发（水位限制）
-  let pushes = sent.filter((m): m is CachePush => m.type === "cache_push");
-  assert.equal(pushes.length, 1, "水位卡住后续：当前应只有 1 个 in-flight");
-
-  // 释放第一个，第二个应能立刻进 in-flight
-  ackBySeq(pushes[0].seq);
-  await new Promise((r) => setTimeout(r, 10));
-  pushes = sent.filter((m): m is CachePush => m.type === "cache_push");
-  assert.equal(pushes.length, 2, "ack 释放后应能发下一个");
-
-  ackBySeq(pushes[1].seq);
-  await new Promise((r) => setTimeout(r, 10));
-  pushes = sent.filter((m): m is CachePush => m.type === "cache_push");
-  assert.equal(pushes.length, 3);
-
-  ackBySeq(pushes[2].seq);
-  const summaries = await syncPromise;
-  assert.equal(summaries.reduce((acc, s) => acc + s.pushed, 0), 3);
-});
-
-test("pipeline：单个文件 ack 失败不影响其他 push 完成", async (t) => {
-  const { home, cleanup } = await makeTempHome();
-  t.after(cleanup);
-  const base = path.join(home, ".claude");
-  await mkdir(base, { recursive: true });
-  await writeFile(path.join(base, "good.json"), "1", "utf8");
-  await writeFile(path.join(base, "bad.json"), "2", "utf8");
-
-  const { deps } = makeControllableDeps({
-    homedir: home,
-    manifest: {
-      type: "cache_manifest",
-      deviceId: "d",
-      cwd: "/c",
-      manifests: {
-        "claude-home": { entries: {} },
-        "claude-json": { entries: {} },
-      },
-    },
-    failByPath: (p) => (p === "bad.json" ? "simulated server error" : undefined),
-  });
-
-  const summaries = await performInitialCacheSync(deps, { deviceId: "d", cwd: "/c" });
-  const homeSummary = summaries.find((s) => s.scope === "claude-home");
-  assert.ok(homeSummary);
-  // 一个成功（good.json）+ 一个失败（bad.json）
-  assert.equal(homeSummary.pushed, 1);
-  assert.ok(homeSummary.error);
-  assert.match(homeSummary.error, /simulated server error/);
-});
-
-// ================== 常量 ==================
-
-test("常量值符合需求：单文件 1MB，单 scope 100MB，水位 16MB", () => {
-  assert.equal(MAX_FILE_BYTES, 1 * 1024 * 1024);
-  assert.equal(MAX_SCOPE_BYTES, 100 * 1024 * 1024);
-  assert.equal(MAX_INFLIGHT_BYTES, 16 * 1024 * 1024);
-});
+}
