@@ -79,15 +79,21 @@ test("docker entrypoint writes credentials from CLAUDE_CREDENTIALS env var", asy
   assert.equal(result.exitCode, 0, result.stderr);
   assert.match(result.stdout, /已通过 CLAUDE_CREDENTIALS 环境变量写入登录凭证/);
 
-  const written = await readFile(path.join(sandbox.homeDir, ".claude", ".credentials.json"), "utf8");
+  // 凭证迁移到 ${CERELAY_DATA_DIR}/credentials/default/（commit f6cffeb），
+  // 不再写入 ${HOME}/.claude/.credentials.json。
+  const written = await readFile(
+    path.join(sandbox.dataDir, "credentials", "default", ".credentials.json"),
+    "utf8"
+  );
   assert.equal(written.trim(), credentials);
 });
 
 test("docker entrypoint detects mounted credentials file", async () => {
   const sandbox = await createSandbox();
-  // 模拟已挂载的 credentials 文件
-  await mkdir(path.join(sandbox.homeDir, ".claude"), { recursive: true });
-  await writeFile(path.join(sandbox.homeDir, ".claude", ".credentials.json"), '{"ok":true}\n', "utf8");
+  // 模拟 named volume 已经持久化好凭证（commit f6cffeb 后的实际路径）
+  const credentialsDir = path.join(sandbox.dataDir, "credentials", "default");
+  await mkdir(credentialsDir, { recursive: true });
+  await writeFile(path.join(credentialsDir, ".credentials.json"), '{"ok":true}\n', "utf8");
 
   const result = await runEntrypoint(sandbox, {
     PORT: "8765",
@@ -98,7 +104,7 @@ test("docker entrypoint detects mounted credentials file", async () => {
   });
 
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.match(result.stdout, /检测到已挂载的 Claude Code 登录凭证/);
+  assert.match(result.stdout, /检测到已持久化的 Claude Code 登录凭证/);
 });
 
 test("docker entrypoint merges .claude.json preserving existing fields", async () => {
@@ -230,6 +236,7 @@ async function createSandbox() {
   const rootDir = await mkdtemp(path.join(tmpdir(), "cerelay-entrypoint-"));
   const binDir = path.join(rootDir, "bin");
   const homeDir = path.join(rootDir, "home");
+  const dataDir = path.join(rootDir, "data");
   const tunFlag = path.join(rootDir, "tun-ready");
   const etcDir = path.join(rootDir, "etc");
   const netStateFile = path.join(rootDir, "net-state");
@@ -237,6 +244,7 @@ async function createSandbox() {
 
   await mkdir(binDir, { recursive: true });
   await mkdir(homeDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
   await mkdir(etcDir, { recursive: true });
 
   await writeExecutable(
@@ -333,7 +341,7 @@ exit 0
 `
   );
 
-  return { rootDir, binDir, homeDir, tunFlag, etcDir, netStateFile, resolvConf };
+  return { rootDir, binDir, homeDir, dataDir, tunFlag, etcDir, netStateFile, resolvConf };
 }
 
 async function writeExecutable(filePath, content) {
@@ -352,6 +360,8 @@ function runEntrypoint(sandbox, overrides) {
         CERELAY_TEST_NET_STATE_FILE: sandbox.netStateFile,
         CERELAY_SOCKS_CONFIG_DIR: sandbox.etcDir,
         CERELAY_RESOLV_CONF_PATH: sandbox.resolvConf,
+        // Data 目录走 sandbox，避免污染宿主 /var/lib/cerelay。
+        CERELAY_DATA_DIR: sandbox.dataDir,
         ...overrides,
       },
       stdio: ["ignore", "pipe", "pipe"],
