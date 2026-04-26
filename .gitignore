@@ -33,3 +33,6 @@ __pycache__/
 # 测试运行临时产物
 .tmp-tests/
 
+# Git worktrees
+.worktrees/
+
