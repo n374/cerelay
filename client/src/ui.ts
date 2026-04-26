@@ -106,12 +106,19 @@ export class EOFError extends Error {
 // 启动期 Cache 同步进度视图
 //
 // 设计要点：
-// - 两阶段渲染：扫描期单行 spinner + 计时；上传期双行（总进度 + in-flight 头部信息）
+// - 两阶段渲染：扫描期单行 spinner + 计时；上传期双行
+//   - line1：聚合所有数字字段（总进度条、百分比、ack 文件/字节、in-flight 计数/字节）
+//   - line2：仅渲染当前 ack 等待的文件路径，箭头紧贴左侧 → 路径起点恒定列，文件名
+//     切换时不会左右漂移
 // - 100ms 节拍刷新，事件驱动只更新内部状态、不直接写 stdout，避免抖动
 // - 总进度按 ack 文件/字节精确计算（不再依赖 ws.bufferedAmount 近似）
-// - Pipeline 模式下同时有多个文件 in-flight；line2 显示队列头部（最早未 ack 的文件）
-//   + in-flight 计数与字节总量。单文件进度条因为多文件字节混在 OS 缓冲中无法精确
-//   测量，故不再展示
+// - 每次渲染所有行都以 \n 结尾，cursor 落在内容下方一行的列 0；clearLines 据此用
+//   `\x1b[1A` × linesRendered 上移再 `\x1b[J` 擦除。一旦外部代码（如 `[PTY 已连接]`）
+//   在两次 render 之间写 stdout，也只是写到独立行，不会拼接到 spinner 末尾导致脏屏
+// - upload_done 时先把 ackedBytes/Files 推到 totalBytes/Files 渲染一帧 100% 状态，
+//   再清屏写"✓ 同步完成"，避免最后一次 100ms tick 没赶上而让用户看到 "54.5% → 完成"
+// - Pipeline 模式下同时有多个文件 in-flight；line2 取队首作为"当前 ack 等待"。单
+//   文件进度条因为多文件字节混在 OS 缓冲中无法精确测量，故不再展示
 // ============================================================
 
 export interface CacheSyncProgressOptions {
@@ -247,6 +254,18 @@ export class CacheSyncProgressView {
 
       case "upload_done":
         this.stopTimer();
+        if (!event.aborted && this.uploadTotalFiles > 0) {
+          // 先把进度强行推到 100% 重绘一帧——否则最后一次 100ms tick 可能没赶上，
+          // 用户在 scrollback 里看到的最后"同步中"快照会停在中间百分比
+          this.ackedBytes = this.uploadTotalBytes;
+          this.ackedFiles = this.uploadTotalFiles;
+          this.inFlight = [];
+          this.inFlightBytes = 0;
+          this.displayedHead = null;
+          this.displayedHeadAt = 0;
+          this.headPendingSince = 0;
+          this.renderUpload();
+        }
         this.clearLines();
         this.displayedHead = null;
         this.displayedHeadAt = 0;
@@ -319,6 +338,7 @@ export class CacheSyncProgressView {
         columns,
       );
     this.out.write(line);
+    this.out.write("\n");
     this.linesRendered = 1;
   }
 
@@ -338,19 +358,24 @@ export class CacheSyncProgressView {
     });
     this.clearLines();
     this.out.write(line1);
+    this.out.write("\n");
     if (line2) {
-      this.out.write("\n");
       this.out.write(line2);
+      this.out.write("\n");
       this.linesRendered = 2;
     } else {
       this.linesRendered = 1;
     }
   }
 
+  /**
+   * 把 cursor 移回最近一次 render 的内容首行并擦除到屏末。每次 render 都以 \n 结尾，
+   * 因此调用前 cursor 必然处于内容下方一行的列 0：上移 linesRendered 行即可对齐到首行。
+   */
   private clearLines(): void {
     if (this.linesRendered === 0) return;
     this.out.write("\r");
-    for (let i = 0; i < this.linesRendered - 1; i += 1) {
+    for (let i = 0; i < this.linesRendered; i += 1) {
       this.out.write("\x1b[1A");
     }
     this.out.write("\x1b[J");
@@ -418,8 +443,10 @@ interface FormatHashProgressLineArgs {
 
 /**
  * 把上传期的两行 UI 拍扁为字符串，方便测试。
- * - line1：总进度（spinner + 进度条 + 百分比 + 已 ack 文件数 + 已 ack 字节）
- * - line2：当前等待 ack 的文件（→ 路径 + in-flight 计数与字节）；in-flight 为空时返回空串
+ * - line1：聚合所有数字字段——spinner + 进度条 + 百分比 + ack 文件数 + ack 字节 +
+ *   (可选) in-flight 计数/字节。`·` 作为视觉分隔符
+ * - line2：仅渲染当前 ack 等待的文件路径（`→ <path>`）。in-flight 为空时返回空串。
+ *   箭头紧贴左侧边缘 → 路径起点保持恒定列，文件名切换时不会左右漂移
  */
 export function formatUploadLines(args: FormatUploadLinesArgs): { line1: string; line2: string } {
   const {
@@ -439,24 +466,29 @@ export function formatUploadLines(args: FormatUploadLinesArgs): { line1: string;
   const overallBar = renderBar(overallRatio, 10);
   const percentText = `${(Math.min(1, Math.max(0, overallRatio)) * 100).toFixed(1).padStart(5)}%`;
 
-  const rawLine1 =
-    `${colorCyan}${frame}${colorReset} 同步中 ${overallBar} ${percentText}` +
-    ` (${ackedFiles}/${uploadTotalFiles} 文件,` +
-    ` ${formatBytes(ackedBytes)}/${formatBytes(uploadTotalBytes)})`;
-  const line1 = fitToColumns(rawLine1, columns);
+  const separator = `  ${colorGray}·${colorReset}  `;
+  const segments: string[] = [
+    `${colorCyan}${frame}${colorReset} 同步中`,
+    overallBar,
+    percentText,
+    `${ackedFiles}/${uploadTotalFiles} 文件`,
+    `${formatBytes(ackedBytes)}/${formatBytes(uploadTotalBytes)}`,
+  ];
+  if (inFlightCount > 0) {
+    segments.push(
+      `${colorGray}in-flight ${inFlightCount} / ${formatBytes(inFlightBytes)}${colorReset}`,
+    );
+  }
+  const line1 = fitToColumns(segments.join(separator), columns);
 
   if (!inFlightHead) {
     return { line1, line2: "" };
   }
 
-  const tail =
-    `  ${colorGray}(in-flight ${String(inFlightCount).padStart(3)} 文件 / ` +
-    `${formatBytesFixedWidth(inFlightBytes)})${colorReset}`;
-  const prefix = `  ${colorGray}→${colorReset} 当前 ack 等待: `;
-  const reservedWidth = displayWidth(prefix) + displayWidth(tail);
-  const maxPathWidth = Math.max(0, columns - reservedWidth);
+  const prefix = `  ${colorGray}→${colorReset} `;
+  const maxPathWidth = Math.max(0, columns - displayWidth(prefix));
   const truncatedPath = truncateMiddle(inFlightHead.displayPath, maxPathWidth);
-  const line2 = fitToColumns(`${prefix}${truncatedPath}${tail}`, columns);
+  const line2 = fitToColumns(`${prefix}${truncatedPath}`, columns);
   return { line1, line2 };
 }
 
@@ -564,10 +596,6 @@ function fitToColumns(line: string, columns: number): string {
     fitted += colorReset;
   }
   return fitted + " ".repeat(Math.max(0, targetWidth - displayWidth(fitted)));
-}
-
-function formatBytesFixedWidth(bytes: number): string {
-  return formatBytes(bytes).padStart(8);
 }
 
 /** 简化的 ANSI 序列剥离，只用于宽度估算（不追求覆盖所有 escape 类型） */
