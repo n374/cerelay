@@ -29,6 +29,7 @@ export interface WatchBackendOptions {
   atomic: boolean;
   awaitWriteFinish: false;
   persistent: boolean;
+  ignored?: (path: string) => boolean;
 }
 
 export interface WatchHandle {
@@ -99,6 +100,7 @@ export class CacheWatcher {
         atomic: true,
         awaitWriteFinish: false,
         persistent: true,
+        ignored: this.exclude ? (watchedPath) => this.shouldIgnoreWatchPath(watchedPath) : undefined,
       },
     );
     this.handle.on("all", (eventName, filePath) => {
@@ -355,6 +357,21 @@ export class CacheWatcher {
 
   private changeKey(change: CacheTaskChange): string {
     return `${change.scope}:${change.path}`;
+  }
+
+  private shouldIgnoreWatchPath(watchedPath: string): boolean {
+    const normalized = path.resolve(watchedPath);
+    const homeRoot = this.claudeHomeRoot();
+
+    if (normalized === homeRoot) {
+      return false;
+    }
+    if (!normalized.startsWith(`${homeRoot}${path.sep}`)) {
+      return false;
+    }
+
+    const relPath = path.relative(homeRoot, normalized).split(path.sep).join("/");
+    return this.exclude?.(relPath) ?? false;
   }
 
   private indexKey(scope: CacheScope, relPath: string): string {

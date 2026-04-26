@@ -36,8 +36,10 @@ class FakeWatchHandle {
 
 class FakeWatchBackend {
   readonly handle = new FakeWatchHandle();
+  watchCalls: Array<{ paths: string[]; options: Record<string, unknown> }> = [];
 
-  async watch(): Promise<FakeWatchHandle> {
+  async watch(paths: string[], options: Record<string, unknown>): Promise<FakeWatchHandle> {
+    this.watchCalls.push({ paths, options });
     return this.handle;
   }
 }
@@ -210,4 +212,28 @@ test("CacheWatcher 使用 exclude matcher 跳过被排除目录的 live 变更",
 
   assert.equal(emitted.length, 1);
   assert.deepEqual(emitted[0]?.map((change) => change.path), ["keep.json"]);
+});
+
+test("CacheWatcher 把 exclude matcher 映射到 chokidar ignored，仅作用于 ~/.claude/ 范围", async (t) => {
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  const backend = new FakeWatchBackend();
+  const watcher = new CacheWatcher({
+    homedir: home,
+    debounceMs: 20,
+    exclude: (relPath) => relPath === "projects" || relPath.startsWith("projects/"),
+    backend,
+    onChanges: () => undefined,
+  });
+
+  await watcher.start();
+
+  assert.equal(backend.watchCalls.length, 1);
+  const options = backend.watchCalls[0]?.options;
+  const ignored = options?.ignored;
+  assert.equal(typeof ignored, "function");
+  assert.equal(ignored?.(path.join(home, ".claude", "projects")), true);
+  assert.equal(ignored?.(path.join(home, ".claude", "projects", "demo.json")), true);
+  assert.equal(ignored?.(path.join(home, ".claude", "keep.json")), false);
+  assert.equal(ignored?.(path.join(home, ".claude.json")), false);
 });
