@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { createLogger } from "./logger.js";
+import type { ScanCacheStore } from "./scan-cache.js";
 import type {
   CacheManifestData,
   CacheScope,
@@ -30,6 +31,8 @@ export const ALL_SCOPES: CacheScope[] = ["claude-home", "claude-json"];
 export type CacheSyncEvent =
   | { kind: "skipped"; reason: string }
   | { kind: "scan_start" }
+  | { kind: "walk_done"; totalFiles: number }
+  | { kind: "hash_progress"; completedFiles: number; totalFiles: number }
   | { kind: "scan_done"; totalFiles: number; totalBytes: number; elapsedMs: number }
   | { kind: "upload_start"; totalFiles: number; totalBytes: number }
   | {
@@ -78,10 +81,30 @@ export interface ScopeSyncSummary {
   totalLocal: number;
 }
 
-interface BuildPlanArgs {
+interface BuildPlanArgs extends ScanOptions {
   scope: CacheScope;
   homedir: string;
   remote: CacheManifestData | undefined;
+}
+
+export interface ScanOptions {
+  exclude?: (relPath: string) => boolean;
+  scanCache?: ScanCacheStore;
+  onHashProgress?: () => void;
+}
+
+export interface WalkScopeArgs {
+  scope: CacheScope;
+  homedir: string;
+  exclude?: (relPath: string) => boolean;
+}
+
+export interface HashScopeArgs {
+  scope: CacheScope;
+  locals: LocalEntry[];
+  remote?: CacheManifestData;
+  scanCache?: ScanCacheStore;
+  onHashProgress?: () => void;
 }
 
 interface PendingAck {
@@ -339,7 +362,19 @@ export async function pushInitialDeltaBatches(
         globalIndex += 1;
       }
 
-      const settledRevisions = await Promise.all(fileFutures);
+      // 用 allSettled 而非 all：fileFuture 失败时（任意 ack.ok=false）catch 块会 rejectAllPending，
+      // 把同批其它 future 一并 reject。Promise.all 只 await 第一个 reject，剩下的 rejected promise
+      // 没人消费 → Node 25 默认 --unhandled-rejections=throw → 进程 crash。
+      // allSettled 保证每个 future 都被 await，第一个 rejected 取出 reason 抛上去走 finally cleanup。
+      const settled = await Promise.allSettled(fileFutures);
+      const firstRejected = settled.find(
+        (entry): entry is PromiseRejectedResult => entry.status === "rejected",
+      );
+      if (firstRejected) {
+        throw firstRejected.reason;
+      }
+      const settledRevisions = settled
+        .map((entry) => (entry as PromiseFulfilledResult<number>).value);
       if (settledRevisions.length > 0) {
         revision = Math.max(revision, ...settledRevisions);
       }
@@ -424,19 +459,36 @@ async function registerPendingAck(args: {
 }
 
 export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
+  const locals = await walkScope(args);
+  return hashScope({
+    scope: args.scope,
+    locals,
+    remote: args.remote,
+    scanCache: args.scanCache,
+    onHashProgress: args.onHashProgress,
+  });
+}
+
+export async function walkScope(args: WalkScopeArgs): Promise<LocalEntry[]> {
+  return scanLocalFiles(args.scope, args.homedir, args.exclude);
+}
+
+export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
   const remoteEntries = args.remote?.entries ?? {};
-  const locals = await scanLocalFiles(args.scope, args.homedir);
+  const localPaths = new Set(args.locals.map((entry) => entry.relPath));
+  args.scanCache?.pruneToPresent(args.scope, localPaths);
 
   const adds: CacheTaskUpsertChange[] = [];
-  for (const local of locals) {
+  for (const local of args.locals) {
     const remoteEntry = remoteEntries[local.relPath];
     if (remoteEntry && remoteEntry.size === local.size && remoteEntry.mtime === local.mtime) {
+      args.onHashProgress?.();
       continue;
     }
-    adds.push(await buildUpsertChange(args.scope, local));
+    adds.push(await buildUpsertChange(args.scope, local, args.scanCache));
+    args.onHashProgress?.();
   }
 
-  const localPaths = new Set(locals.map((entry) => entry.relPath));
   const deletes: CacheTaskChange[] = [];
   for (const remotePath of Object.keys(remoteEntries)) {
     if (!localPaths.has(remotePath)) {
@@ -468,11 +520,15 @@ export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
     uploads,
     metaChanges,
     truncated: truncatedAdds,
-    totalLocal: locals.length,
+    totalLocal: args.locals.length,
   };
 }
 
-export async function scanLocalFiles(scope: CacheScope, homedir: string): Promise<LocalEntry[]> {
+export async function scanLocalFiles(
+  scope: CacheScope,
+  homedir: string,
+  exclude?: (relPath: string) => boolean,
+): Promise<LocalEntry[]> {
   if (scope === "claude-json") {
     const abs = path.join(homedir, ".claude.json");
     if (!existsSync(abs)) {
@@ -500,11 +556,16 @@ export async function scanLocalFiles(scope: CacheScope, homedir: string): Promis
   }
 
   const results: LocalEntry[] = [];
-  await walkDir(rootAbs, rootAbs, results);
+  await walkDir(rootAbs, rootAbs, results, exclude);
   return results;
 }
 
-async function walkDir(root: string, current: string, out: LocalEntry[]): Promise<void> {
+async function walkDir(
+  root: string,
+  current: string,
+  out: LocalEntry[],
+  exclude?: (relPath: string) => boolean,
+): Promise<void> {
   let entries;
   try {
     entries = await readdir(current, { withFileTypes: true });
@@ -514,17 +575,24 @@ async function walkDir(root: string, current: string, out: LocalEntry[]): Promis
 
   for (const entry of entries) {
     const abs = path.join(current, entry.name);
+    const relPath = path.relative(root, abs).split(path.sep).join("/");
     if (entry.isDirectory()) {
-      await walkDir(root, abs, out);
+      if (exclude?.(relPath)) {
+        continue;
+      }
+      await walkDir(root, abs, out, exclude);
       continue;
     }
     if (!entry.isFile()) {
       continue;
     }
+    if (exclude?.(relPath)) {
+      continue;
+    }
     try {
       const stats = await stat(abs);
       out.push({
-        relPath: path.relative(root, abs).split(path.sep).join("/"),
+        relPath,
         absPath: abs,
         size: stats.size,
         mtime: Math.floor(stats.mtimeMs),
@@ -538,6 +606,7 @@ async function walkDir(root: string, current: string, out: LocalEntry[]): Promis
 async function buildUpsertChange(
   scope: CacheScope,
   local: LocalEntry,
+  scanCache?: ScanCacheStore,
 ): Promise<CacheTaskUpsertChange> {
   if (local.size > MAX_FILE_BYTES) {
     return {
@@ -552,13 +621,22 @@ async function buildUpsertChange(
   }
 
   const buffer = await readFile(local.absPath);
+  const cachedSha = scanCache?.lookup(scope, local.relPath, local.size, local.mtime);
+  const sha256 = cachedSha ?? createHash("sha256").update(buffer).digest("hex");
+  if (!cachedSha) {
+    scanCache?.upsert(scope, local.relPath, {
+      size: local.size,
+      mtime: local.mtime,
+      sha256,
+    });
+  }
   return {
     kind: "upsert",
     scope,
     path: local.relPath,
     size: local.size,
     mtime: local.mtime,
-    sha256: createHash("sha256").update(buffer).digest("hex"),
+    sha256,
     contentBase64: buffer.toString("base64"),
   };
 }
