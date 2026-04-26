@@ -12,10 +12,18 @@ import { FileProxyHandler } from "./file-proxy.js";
 import { UI, CacheSyncProgressView } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
 import { getOrCreateDeviceId } from "./device-id.js";
-import { loadConfig } from "./config.js";
-import { CacheTaskStateMachine, isCacheTaskDisabled } from "./cache-task-state-machine.js";
+import {
+  DEFAULT_EXCLUDE_DIRS,
+  loadConfig,
+  type CerelayConfig,
+} from "./config.js";
+import {
+  CacheTaskStateMachine,
+  isCacheTaskDisabled,
+  type CacheTaskStateMachineOptions,
+} from "./cache-task-state-machine.js";
 import type { CacheSyncEvent } from "./cache-sync.js";
-import { openScanCache } from "./scan-cache.js";
+import { openScanCache, type ScanCacheStore } from "./scan-cache.js";
 import type {
   CacheTaskAssignment,
   CacheTaskDeltaAck,
@@ -37,6 +45,18 @@ const log = createLogger("client");
 
 export interface ClientOptions {
   interactiveOutput?: boolean;
+  deviceId?: string;
+  homedir?: string;
+  loadConfig?: typeof loadConfig;
+  openScanCache?: typeof openScanCache;
+  isCacheTaskDisabled?: typeof isCacheTaskDisabled;
+  cacheTaskStateMachineFactory?: (options: CacheTaskStateMachineOptions) => CacheTaskStateMachineLike;
+}
+
+interface CacheTaskStateMachineLike {
+  onConnected(send: (message: import("./protocol.js").HandToServerMessage) => Promise<void>): Promise<void>;
+  onDisconnected(): Promise<void>;
+  onMessage(message: CacheTaskAssignment | CacheTaskDeltaAck | CacheTaskMutationHint | { type: "cache_task_heartbeat_ack" }): Promise<void>;
 }
 
 export class CerelayClient {
@@ -51,12 +71,17 @@ export class CerelayClient {
   private fileProxy: FileProxyHandler;
   private ptySessionId = "";
   private writeChain: Promise<void> = Promise.resolve();
+  private readonly homedir: string;
   /**
    * 本机设备 ID，用于 Server 侧文件缓存按 (deviceId, cwd) 隔离。
    * 在构造时读取/生成并持久化到 ~/.config/cerelay/device-id。
    */
   private readonly deviceId: string;
-  private cacheTaskStateMachine: CacheTaskStateMachine | null = null;
+  private readonly loadConfigImpl: typeof loadConfig;
+  private readonly openScanCacheImpl: typeof openScanCache;
+  private readonly isCacheTaskDisabledImpl: typeof isCacheTaskDisabled;
+  private readonly cacheTaskStateMachineFactory: (options: CacheTaskStateMachineOptions) => CacheTaskStateMachineLike;
+  private cacheTaskStateMachine: CacheTaskStateMachineLike | null = null;
   private cacheSyncView: CacheSyncProgressView | null = null;
 
   constructor(serverURL: string, cwd: string, options: ClientOptions = {}) {
@@ -65,8 +90,14 @@ export class CerelayClient {
     this.ui = new UI();
     this.interactiveOutput = options.interactiveOutput ?? true;
     this.executor = new ToolExecutor(cwd);
-    this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
-    this.deviceId = getOrCreateDeviceId();
+    this.homedir = options.homedir ?? os.homedir();
+    this.fileProxy = new FileProxyHandler(this.homedir, cwd);
+    this.deviceId = options.deviceId ?? getOrCreateDeviceId();
+    this.loadConfigImpl = options.loadConfig ?? loadConfig;
+    this.openScanCacheImpl = options.openScanCache ?? openScanCache;
+    this.isCacheTaskDisabledImpl = options.isCacheTaskDisabled ?? isCacheTaskDisabled;
+    this.cacheTaskStateMachineFactory = options.cacheTaskStateMachineFactory
+      ?? ((factoryOptions) => new CacheTaskStateMachine(factoryOptions));
   }
 
   connect(): Promise<void> {
@@ -85,21 +116,21 @@ export class CerelayClient {
       ws.on("open", () => {
         void (async () => {
           this.ws = ws;
-          const disableCacheTask = isCacheTaskDisabled();
-          const config = disableCacheTask ? undefined : await loadConfig();
+          const disableCacheTask = this.isCacheTaskDisabledImpl();
+          const config = disableCacheTask ? undefined : await this.safeLoadConfig();
           const scanCache = disableCacheTask
             ? undefined
-            : await openScanCache({
+            : await this.safeOpenScanCache({
               deviceId: this.deviceId,
               cwd: this.cwd,
             });
 
-          this.cacheTaskStateMachine = new CacheTaskStateMachine({
+          this.cacheTaskStateMachine = this.cacheTaskStateMachineFactory({
             cwd: this.cwd,
             deviceId: this.deviceId,
             config,
             scanCache,
-            homedir: os.homedir(),
+            homedir: this.homedir,
             disableCacheTask,
             onProgress: (event) => this.handleCacheSyncProgress(event),
           });
@@ -592,6 +623,35 @@ export class CerelayClient {
         break;
       }
       this.activeMessageConsumer(raw);
+    }
+  }
+
+  private async safeLoadConfig(): Promise<CerelayConfig> {
+    try {
+      return await this.loadConfigImpl();
+    } catch (error) {
+      log.warn("loadConfig 抛出异常，回退默认 scan 配置", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        scan: {
+          excludeDirs: [...DEFAULT_EXCLUDE_DIRS],
+        },
+      };
+    }
+  }
+
+  private async safeOpenScanCache(args: {
+    deviceId: string;
+    cwd: string;
+  }): Promise<ScanCacheStore | undefined> {
+    try {
+      return await this.openScanCacheImpl(args);
+    } catch (error) {
+      log.warn("openScanCache 抛出异常，降级为 no-op 行为", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
     }
   }
 }
