@@ -14,9 +14,9 @@
 
 import process from "node:process";
 import { createLogger } from "../logger.js";
+import { buildAllShadowToolHandlers } from "./handlers.js";
 import { IpcClient } from "./ipc-client.js";
 import {
-  buildEchoTool,
   connectStdio,
   createRoutedMcpServer,
   type RoutedToolDefinition,
@@ -54,7 +54,7 @@ export async function runRoutedMcpServer(options: RunRoutedMcpServerOptions = {}
   const ipc = new IpcClient({ socketPath, token });
   await ipc.connect();
 
-  const buildTools = options.buildTools ?? ((client) => [buildEchoTool(client)]);
+  const buildTools = options.buildTools ?? ((client) => buildAllShadowToolHandlers(client));
   const tools = buildTools(ipc);
   const server = createRoutedMcpServer({
     serverName: "cerelay",

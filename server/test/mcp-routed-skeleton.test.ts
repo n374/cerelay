@@ -1,14 +1,15 @@
 // ============================================================
-// 端到端 skeleton: MCPIpcHost + spawn 真实 mcp-routed 子进程 + SDK Client
-// End-to-end skeleton: MCPIpcHost + spawn real mcp-routed child + SDK Client
+// 端到端 skeleton: spawn 真实 mcp-routed 子进程 + SDK Client
+// End-to-end skeleton: spawn real mcp-routed child + SDK Client
 //
 // 验证流程:
-//   1. 主进程 listen unix socket
+//   1. 主进程 listen unix socket（MCPIpcHost），dispatcher 模拟主进程的
+//      executeToolViaClient（直接返回伪造的 stdout）。
 //   2. spawn `node --import tsx src/mcp-routed/index.ts`，env 注入 socket+token
 //   3. 用 SDK Client+StdioClientTransport 通过 stdio 跟子进程握手
-//   4. tools/list 看到 echo
-//   5. tools/call __cerelay_echo -> dispatcher 收到 IPC tool_call -> 回结果
-//      -> 子进程渲染 -> Client 拿到 isError:false 的 CallToolResult
+//   4. tools/list 看到 7 个 shadow tools（bash/read/write/edit/multi_edit/glob/grep）
+//   5. tools/call mcp__cerelay__bash → IPC tool_call("Bash", ...) → dispatcher
+//      回结果 → 子进程渲染 → Client 拿到 isError:false 的 CallToolResult
 // ============================================================
 
 import test from "node:test";
@@ -23,22 +24,28 @@ import { MCPIpcHost, buildMcpIpcSocketPath } from "../src/mcp-ipc-host.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROUTED_ENTRY = path.resolve(HERE, "../src/mcp-routed/index.ts");
 
-test("mcp-routed 子进程 echo 工具端到端：MCP tools/call → IPC tool_call → result", async (t) => {
-  // macOS sun_path 限制 104 byte，tmpdir() 在 macOS 是 /var/folders/...
-  // 太长，用 /tmp 配合 mkdtemp 保证 socket 路径在限制内。
+test("mcp-routed 端到端：CC tools/list 看到 7 个 shadow tools 且 callTool bash 走通完整渲染", async (t) => {
   const dir = await mkdtemp(path.join("/tmp", "cerelay-mcp-skeleton-"));
   const sessionId = "pty-skeleton-1";
   const socketPath = buildMcpIpcSocketPath(dir, sessionId);
 
-  let lastDispatched: { toolName: string; input: unknown } | null = null;
+  const dispatched: Array<{ toolName: string; input: unknown }> = [];
   const host = new MCPIpcHost({
     sessionId,
     socketPath,
     token: "secret-token",
     dispatcher: async (toolName, input) => {
-      lastDispatched = { toolName, input };
-      const message = (input as { message?: string } | null)?.message ?? "";
-      return { output: message.toUpperCase() };
+      dispatched.push({ toolName, input });
+      if (toolName === "Bash") {
+        return {
+          output: {
+            stdout: "README.md\npackage.json\n",
+            stderr: "",
+            exit_code: 0,
+          },
+        };
+      }
+      return { error: `unexpected toolName ${toolName}` };
     },
     verboseLogging: false,
   });
@@ -70,17 +77,24 @@ test("mcp-routed 子进程 echo 工具端到端：MCP tools/call → IPC tool_ca
   await client.connect(transport);
 
   const list = await client.listTools();
-  assert.equal(list.tools.length, 1);
-  assert.equal(list.tools[0]?.name, "__cerelay_echo");
+  const names = list.tools.map((t) => t.name).sort();
+  assert.deepEqual(
+    names,
+    ["bash", "edit", "glob", "grep", "multi_edit", "read", "write"],
+    "tools/list 应该暴露 7 个 shadow tools",
+  );
 
   const result = await client.callTool({
-    name: "__cerelay_echo",
-    arguments: { message: "hello" },
+    name: "bash",
+    arguments: { command: "ls" },
   });
-  assert.equal(result.isError, false, "echo 应该 isError:false");
-  assert.deepEqual(lastDispatched, { toolName: "__cerelay_echo", input: { message: "hello" } });
+
+  assert.equal(result.isError, false, "shadow bash 工具必须以 isError:false 返回（Plan D 核心不变量）");
+  assert.deepEqual(dispatched, [{ toolName: "Bash", input: { command: "ls" } }]);
+
   assert.ok(Array.isArray(result.content));
   const block = (result.content as Array<{ type: string; text: string }>)[0];
   assert.equal(block?.type, "text");
-  assert.equal(block?.text, "HELLO");
+  assert.match(block?.text ?? "", /stdout:\nREADME\.md\npackage\.json/);
+  assert.match(block?.text ?? "", /exit_code: 0/);
 });

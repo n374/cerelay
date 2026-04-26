@@ -16,7 +16,6 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { IpcClient } from "./ipc-client.js";
 
 export interface RoutedToolDefinition {
   name: string;
@@ -96,39 +95,3 @@ export async function connectStdio(server: Server): Promise<StdioServerTransport
   return transport;
 }
 
-/**
- * 仅用于端到端 IPC 联调的内置 echo tool。
- * 收到 input 后通过 IpcClient 发一个 toolName="__cerelay_echo" 的 tool_call，
- * 主进程侧测试桩可以根据 toolName 直接回 echo。这条工具仅 Phase 1 使用，
- * Phase 2 加完真实 handlers 后会从默认列表移除。
- */
-export function buildEchoTool(ipc: IpcClient): RoutedToolDefinition {
-  return {
-    name: "__cerelay_echo",
-    description: "internal IPC smoke-test tool",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message: { type: "string" },
-      },
-      required: ["message"],
-      additionalProperties: false,
-    },
-    handler: async (rawInput) => {
-      const result = await ipc.callTool("__cerelay_echo", rawInput);
-      if (result.error) {
-        return {
-          content: [{ type: "text", text: result.error }],
-          isError: true,
-        };
-      }
-      const text = typeof result.output === "string"
-        ? result.output
-        : JSON.stringify(result.output ?? null);
-      return {
-        content: [{ type: "text", text }],
-        isError: false,
-      };
-    },
-  };
-}
