@@ -45,6 +45,13 @@ COPY docker-compose.yml ./docker-compose.yml
 COPY docker-compose.test.yml ./docker-compose.test.yml
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
+# Plan D：mcp-routed 子进程在 e2e 真实 claude 路径下被 CC spawn，
+# 由于 spawn 时 cwd 是测试临时目录而非 /app，tsx loader 通过 module
+# resolution 找不到（cwd-aware），必须用编译产物路径。预编译 server
+# workspace 输出 dist/mcp-routed/index.js，让 resolveShadowMcpLaunchSpec
+# 优先命中 .js 路径而非 fallback 的 tsx loader。
+RUN npm run build --workspace=cerelay-server
+
 # 确保 mount namespace runtime 目录存在
 RUN mkdir -p /opt/cerelay-runtime
 

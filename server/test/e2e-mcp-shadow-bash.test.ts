@@ -182,6 +182,9 @@ test(
     delete env.CLAUDE_CODE_USE_BEDROCK;
     delete env.CLAUDE_CODE_USE_VERTEX;
 
+    // 注意：CC 的 --mcp-config <configs...> 和 --disallowedTools <tools...> 都是
+    // commander.js variadic option，会把后续非 dash 的 token 吸进 value 数组，
+    // 因此 prompt 不能放 positional——必须通过 stdin 传入。
     const claudeStdout: Buffer[] = [];
     const claudeStderr: Buffer[] = [];
     const child = spawn(
@@ -189,15 +192,16 @@ test(
       [
         "--print",
         "--permission-mode", "bypassPermissions",
+        "--input-format", "text",
         ...injectionArgs,
-        "请用 mcp__cerelay__bash 列出当前目录下的文件",
       ],
       {
         cwd,
         env,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       }
     );
+    child.stdin?.end("请用 mcp__cerelay__bash 列出当前目录下的文件\n");
     child.stdout?.on("data", (chunk: Buffer) => claudeStdout.push(Buffer.from(chunk)));
     child.stderr?.on("data", (chunk: Buffer) => claudeStderr.push(Buffer.from(chunk)));
 

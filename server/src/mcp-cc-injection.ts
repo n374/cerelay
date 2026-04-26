@@ -33,25 +33,32 @@ export interface ShadowMcpLaunchSpec {
 }
 
 /**
- * 解析 cerelay-routed 子进程入口：优先编译产物 dist/mcp-routed/index.js，
- * dev 环境 fallback 到 src/mcp-routed/index.ts + tsx loader。
+ * 解析 cerelay-routed 子进程入口：优先编译产物（不依赖 cwd-aware tsx loader）。
  *
- * 容器场景：build 时已经 tsc 编译，所以 dist 路径会存在。
- * 单元测试 / 本地 dev：dist 可能不存在，走 tsx loader 跑 ts 入口。
+ * - prod (tsc 编译产物执行)：HERE = server/dist，./mcp-routed/index.js 是 sibling
+ * - dev (tsx 直跑 src)：HERE = server/src，编译产物在 ../dist/mcp-routed/index.js
+ * - dev 且未 prebuild：fallback 到 src/mcp-routed/index.ts + tsx loader
+ *
+ * 注意 tsx fallback 路径有 cwd 依赖——CC 通过 --mcp-config spawn 子进程时 cwd
+ * 是用户 cwd 而非 server/。tsx 包通过 nodejs module resolution 可能找不到。
+ * 因此容器 e2e 必须先 `npm run build --workspace=cerelay-server` 让 dist 路径生效。
  */
 export function resolveShadowMcpLaunchSpec(): ShadowMcpLaunchSpec {
-  // HERE 在 dev (tsx) 是 server/src，在 prod (tsc 编译) 是 server/dist。
-  // 两种场景都从 HERE 出发尝试同 sibling 的 mcp-routed 子目录。
-  const compiledEntry = path.resolve(HERE, "./mcp-routed/index.js");
-  if (existsSync(compiledEntry)) {
-    return { command: process.execPath, args: [compiledEntry] };
+  const compiledCandidates = [
+    path.resolve(HERE, "./mcp-routed/index.js"),       // prod: dist sibling
+    path.resolve(HERE, "../dist/mcp-routed/index.js"), // dev with prebuild
+  ];
+  for (const candidate of compiledCandidates) {
+    if (existsSync(candidate)) {
+      return { command: process.execPath, args: [candidate] };
+    }
   }
   const tsEntry = path.resolve(HERE, "./mcp-routed/index.ts");
   if (existsSync(tsEntry)) {
     return { command: process.execPath, args: ["--import", "tsx", tsEntry] };
   }
   throw new Error(
-    `无法定位 cerelay-routed MCP 子进程入口：dist (${compiledEntry}) / src (${tsEntry}) 都不存在`,
+    `无法定位 cerelay-routed MCP 子进程入口：dist 候选 (${compiledCandidates.join(" / ")}) 与 src (${tsEntry}) 均不存在`,
   );
 }
 
