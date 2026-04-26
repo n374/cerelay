@@ -16,6 +16,8 @@ import {
 } from "./claude-tool-bridge.js";
 import { resolveClaudeCodeExecutable } from "./claude-executable.js";
 import { isClientRoutedToolName } from "./tool-routing.js";
+import { MCPIpcHost, buildMcpIpcSocketPath } from "./mcp-ipc-host.js";
+import { buildShadowMcpInjectionArgs } from "./mcp-cc-injection.js";
 
 const log = createLogger("pty-session");
 
@@ -38,6 +40,18 @@ export interface ClaudePtySessionOptions {
   termProgramVersion?: string;
   clientHomeDir?: string;
   shouldRouteToolToClient?: (toolName: string) => boolean;
+  /**
+   * Plan D shadow MCP 注入开关。enabled=true 时 ClaudePtySession 会：
+   * 1. 启动 per-session MCPIpcHost（unix socket）
+   * 2. spawn CC 时追加 --mcp-config / --append-system-prompt / --disallowedTools
+   * 3. session 关闭时关 host
+   * 默认 enabled=true；测试或 CERELAY_PTY_COMMAND override 时可关掉。
+   */
+  shadowMcp?: {
+    enabled: boolean;
+    /** unix socket 父目录，默认 /tmp。 */
+    socketDir?: string;
+  };
 }
 
 export class ClaudePtySession {
@@ -53,6 +67,8 @@ export class ClaudePtySession {
   private readonly termProgramVersion?: string;
   private readonly clientHomeDir?: string;
   private readonly shouldRouteToolToClient: (toolName: string) => boolean;
+  private readonly shadowMcpEnabled: boolean;
+  private readonly shadowMcpSocketDir: string;
   private readonly relay = new ToolRelay();
   private readonly log: Logger;
   private child: ChildProcess | null = null;
@@ -61,6 +77,7 @@ export class ClaudePtySession {
   private readonly abortController = new AbortController();
   private started = false;
   private closed = false;
+  private mcpIpcHost: MCPIpcHost | null = null;
 
   constructor(options: ClaudePtySessionOptions) {
     this.id = options.id;
@@ -74,6 +91,8 @@ export class ClaudePtySession {
     this.termProgramVersion = options.termProgramVersion;
     this.clientHomeDir = options.clientHomeDir?.trim() || undefined;
     this.shouldRouteToolToClient = options.shouldRouteToolToClient ?? ((toolName) => isClientRoutedToolName(toolName));
+    this.shadowMcpEnabled = options.shadowMcp?.enabled ?? true;
+    this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? "/tmp";
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -89,13 +108,22 @@ export class ClaudePtySession {
 
     const spawnInRuntime = this.runtime.spawnInRuntime ?? defaultSpawnInRuntime;
     const helperPath = await this.ensureHelperScript();
-    const commandLine = buildClaudeCommandArgs(this.model);
+
+    // Plan D：启动 per-session MCPIpcHost，把 socketPath/token 注入到 CC 启动参数。
+    // CERELAY_PTY_COMMAND override（测试用）下不注入，因为那条路径根本不跑真实 CC。
+    let mcpInjectionArgs: string[] = [];
+    if (this.shadowMcpEnabled && !process.env.CERELAY_PTY_COMMAND?.trim()) {
+      mcpInjectionArgs = await this.startShadowMcpHost();
+    }
+
+    const commandLine = buildClaudeCommandArgs(this.model, mcpInjectionArgs);
     this.log.debug("启动 Claude PTY passthrough 会话", {
       cols,
       rows,
       helperPath,
       command: commandLine[0],
       args: commandLine.slice(1),
+      shadowMcpEnabled: this.shadowMcpEnabled && mcpInjectionArgs.length > 0,
     });
 
     this.child = spawnInRuntime({
@@ -207,6 +235,17 @@ export class ClaudePtySession {
       this.child.kill("SIGTERM");
     }
     this.controlStream = null;
+    // 关 mcp host 在 runtime cleanup 之前——避免 mcp 子进程残留 fd 阻塞
+    // unmount/cleanup 流程。host.close 内部 unlink socket 文件 + destroy 活跃连接。
+    if (this.mcpIpcHost) {
+      const host = this.mcpIpcHost;
+      this.mcpIpcHost = null;
+      await host.close().catch((err) => {
+        this.log.debug("关闭 MCPIpcHost 失败（忽略）", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     if (this.helperDir) {
       await rm(this.helperDir, { recursive: true, force: true }).catch(() => undefined);
       this.helperDir = null;
@@ -216,6 +255,19 @@ export class ClaudePtySession {
 
   resolveToolResult(requestId: string, result: RemoteToolResult): void {
     this.relay.resolve(requestId, result);
+  }
+
+  /**
+   * 公开给 cerelay-routed MCP 子进程通过 MCPIpcHost 调用的 dispatch API。
+   * 内部走与 PreToolUse hook 路径相同的 client-routed 转发链：路径重写 →
+   * relay → ws → client → tool 执行 → relay resolve → 返回原始 RemoteToolResult。
+   *
+   * 跟 handleInjectedPreToolUse 的区别：
+   * - 不裹 hook 协议返回（CallToolResult 由子进程的 handler 渲染）
+   * - 没有 toolUseId（MCP tools/call 本身不用 anthropic tool_use_id）
+   */
+  async dispatchToolToClient(toolName: string, input: unknown): Promise<RemoteToolResult> {
+    return this.executeToolViaClient(toolName, input);
   }
 
   async handleInjectedPreToolUse(input: HookInput): Promise<SyncHookJsonOutput> {
@@ -262,6 +314,35 @@ export class ClaudePtySession {
         additionalContext: rendered,
       },
     };
+  }
+
+  /**
+   * 启动 per-session MCPIpcHost 并返回需要追加到 CC 启动命令的 CLI flags。
+   * 出错时不抛出（保留"MCP 起不来时退回纯 hook 路径"的 G5 不变量）。
+   */
+  private async startShadowMcpHost(): Promise<string[]> {
+    const token = randomUUID();
+    const socketPath = buildMcpIpcSocketPath(this.shadowMcpSocketDir, this.id);
+    const host = new MCPIpcHost({
+      sessionId: this.id,
+      socketPath,
+      token,
+      dispatcher: (toolName, input) => this.dispatchToolToClient(toolName, input),
+    });
+    try {
+      await host.start();
+    } catch (err) {
+      this.log.warn("启动 MCPIpcHost 失败，退回纯 hook 路径（不阻塞 session）", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+    this.mcpIpcHost = host;
+    return buildShadowMcpInjectionArgs({
+      sessionId: this.id,
+      socketPath,
+      token,
+    });
   }
 
   private async ensureHelperScript(): Promise<string> {
@@ -364,14 +445,17 @@ function defaultSpawnInRuntime(options: SpawnOptions): SpawnedProcess {
   throw new Error(`session runtime does not support PTY spawn: ${options.command}`);
 }
 
-function buildClaudeCommandArgs(model: string | undefined): string[] {
+function buildClaudeCommandArgs(model: string | undefined, extraArgs: string[] = []): string[] {
   const override = process.env.CERELAY_PTY_COMMAND?.trim();
   if (override) {
+    // Test/dev override 下不混入 mcp 注入——override 通常用于跑 cat / sh
+    // 一类的 stub，传入 --mcp-config 会让 stub 把它当成 stdin 输入。
     return ["/bin/sh", "-lc", override];
   }
 
   return [
     resolveClaudeCodeExecutable(),
     ...(model ? ["--model", model] : []),
+    ...extraArgs,
   ];
 }

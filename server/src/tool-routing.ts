@@ -7,6 +7,17 @@ export type BuiltinHandToolName =
   | "Grep"
   | "Glob";
 
+/**
+ * cerelay 自己的 shadow MCP server (mcp-routed) 注册的工具命名前缀。
+ * 这些工具由 cerelay 主进程通过 IPC 直接 dispatch，不走 PreToolUse hook
+ * → client-routed 路径，否则会跟 stdio MCP 路径双重执行。
+ */
+export const CERELAY_SHADOW_MCP_PREFIX = "mcp__cerelay__";
+
+export function isCerelayShadowMcpTool(toolName: string): boolean {
+  return toolName.startsWith(CERELAY_SHADOW_MCP_PREFIX);
+}
+
 export interface ToolRoutingConfig {
   builtinToolNames: string[];
   handToolNames: string[];
@@ -60,6 +71,11 @@ export class ToolRoutingStore {
   }
 
   shouldRouteToHand(toolName: string): boolean {
+    // cerelay 自己的 shadow MCP 工具走 stdio MCP 路径，不能再回 client-routed
+    // 链路（否则双重执行）。这条排除必须在 builtin / prefix 检查之前。
+    if (isCerelayShadowMcpTool(toolName)) {
+      return false;
+    }
     return isBuiltinHandToolName(toolName)
       || this.config.handToolNames.includes(toolName)
       || this.config.handToolPrefixes.some((prefix) => toolName.startsWith(prefix));
@@ -75,6 +91,10 @@ export function isMcpToolName(toolName: string): boolean {
 }
 
 export function isClientRoutedToolName(toolName: string): boolean {
+  // 同 shouldRouteToHand：cerelay shadow MCP 工具不走 client-routed 路径。
+  if (isCerelayShadowMcpTool(toolName)) {
+    return false;
+  }
   return isBuiltinHandToolName(toolName) || isMcpToolName(toolName);
 }
 
