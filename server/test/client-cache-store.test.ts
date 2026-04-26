@@ -182,6 +182,42 @@ test("applyDelta 覆盖 delete、skipped 与 sha256 校验", async (t) => {
   );
 });
 
+test("applyDelta 接受 0 字节文件（contentBase64 为空字符串）", async (t) => {
+  // 回归：早期 server 用 if (!change.contentBase64) 判存在，
+  // 0 字节文件的 base64 是 ""，会被误判为"缺少 contentBase64"。
+  // 典型触发：~/.claude/tasks/<uuid>/.lock。
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const emptySha = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+  const result = await store.applyDelta(DEVICE_ID, CWD, [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "tasks/abc/.lock",
+      size: 0,
+      mtime: 1_700_000_000_000,
+      sha256: emptySha,
+      contentBase64: "",
+    },
+  ]);
+
+  assert.equal(result.written, 1);
+  assert.equal(result.deleted, 0);
+
+  const blobPath = store.blobPath(DEVICE_ID, CWD, emptySha);
+  assert.ok(existsSync(blobPath), "0 字节 blob 应该被写入（且 sha256 等于空 buffer 的 hash）");
+  const blob = await readFile(blobPath);
+  assert.equal(blob.length, 0);
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.deepEqual(manifest.scopes["claude-home"].entries["tasks/abc/.lock"], {
+    size: 0,
+    mtime: 1_700_000_000_000,
+    sha256: emptySha,
+  });
+});
+
 test("不同 cwd 的缓存互不污染", async (t) => {
   const { store, cleanup } = await makeStore();
   t.after(cleanup);

@@ -287,12 +287,15 @@ export class ClientCacheStore {
         continue;
       }
 
-      if (!change.contentBase64) {
+      // 注意：必须用 typeof 判定字段存在，不能用 !change.contentBase64。
+      // 0 字节文件（如 ~/.claude/tasks/<uuid>/.lock）的 contentBase64 是空字符串 ""，
+      // 是合法值；早期写法用 falsy 检查会把它误当成"缺失"并整个 cache sync 崩盘。
+      if (typeof change.contentBase64 !== "string") {
         throw new Error(
           `cache_task_delta upsert 条目缺少 contentBase64: scope=${change.scope} path=${change.path}`,
         );
       }
-      if (!change.sha256) {
+      if (typeof change.sha256 !== "string" || change.sha256.length === 0) {
         throw new Error(
           `cache_task_delta upsert 条目缺少 sha256: scope=${change.scope} path=${change.path}`,
         );
