@@ -59,6 +59,17 @@ test("loadConfig 缺少 [scan] 段时视为空配置", async (t) => {
   assert.deepEqual(config.scan.excludeDirs, []);
 });
 
+test("loadConfig 存在 [scan] 但缺少 exclude_dirs 时视为空配置", async (t) => {
+  const { dir, cleanup } = await makeTempDir("cerelay-config-");
+  t.after(cleanup);
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(configPath, `[scan]\nother = 1\n`, "utf8");
+
+  const config = await loadConfig({ configPath });
+
+  assert.deepEqual(config.scan.excludeDirs, []);
+});
+
 test("loadConfig exclude_dirs = [] 时保留用户的空配置", async (t) => {
   const { dir, cleanup } = await makeTempDir("cerelay-config-");
   t.after(cleanup);
@@ -114,6 +125,20 @@ test("createExcludeMatcher 按目录边界精确匹配 POSIX 前缀", () => {
   assert.equal(exclude("a/bx/c.txt"), false);
 });
 
+test("loadConfig 把空串和纯斜杠 exclude_dirs 规范化为空，并使 matcher 对任意路径返回 false", async (t) => {
+  const { dir, cleanup } = await makeTempDir("cerelay-config-");
+  t.after(cleanup);
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(configPath, `[scan]\nexclude_dirs = ["", "/", "//"]\n`, "utf8");
+
+  const config = await loadConfig({ configPath });
+  const exclude = createExcludeMatcher(config.scan.excludeDirs);
+
+  assert.deepEqual(config.scan.excludeDirs, ["", "", ""]);
+  assert.equal(exclude("repos"), false);
+  assert.equal(exclude("nested/path/file.txt"), false);
+});
+
 test("createExcludeMatcher 空数组永远返回 false", () => {
   const exclude = createExcludeMatcher([]);
   assert.equal(exclude("anything"), false);
@@ -125,4 +150,19 @@ test("createExcludeMatcher 规范化反斜杠和首尾斜杠", () => {
   assert.equal(exclude("nested/repo"), true);
   assert.equal(exclude("nested/repo/file.txt"), true);
   assert.equal(exclude("nested/repository"), false);
+});
+
+test("loadConfig 把 trailing slash exclude_dirs 规范化为目录前缀", async (t) => {
+  const { dir, cleanup } = await makeTempDir("cerelay-config-");
+  t.after(cleanup);
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(configPath, `[scan]\nexclude_dirs = ["repos/"]\n`, "utf8");
+
+  const config = await loadConfig({ configPath });
+  const exclude = createExcludeMatcher(config.scan.excludeDirs);
+
+  assert.deepEqual(config.scan.excludeDirs, ["repos"]);
+  assert.equal(exclude("repos"), true);
+  assert.equal(exclude("repos/demo/file.txt"), true);
+  assert.equal(exclude("reposx/demo/file.txt"), false);
 });
