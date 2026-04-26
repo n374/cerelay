@@ -183,3 +183,31 @@ test("CacheWatcher stop 后不再发事件", async (t) => {
   assert.equal(emitted.length, 0);
   assert.equal(backend.handle.closed, true);
 });
+
+test("CacheWatcher 使用 exclude matcher 跳过被排除目录的 live 变更", async (t) => {
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  const backend = new FakeWatchBackend();
+  const emitted: CacheTaskChange[][] = [];
+  const excludedPath = path.join(home, ".claude", "projects", "skip.json");
+  const keptPath = path.join(home, ".claude", "keep.json");
+  await mkdir(path.dirname(excludedPath), { recursive: true });
+  await writeFile(excludedPath, "skip", "utf8");
+  await writeFile(keptPath, "keep", "utf8");
+
+  const watcher = new CacheWatcher({
+    homedir: home,
+    debounceMs: 20,
+    exclude: (relPath) => relPath === "projects" || relPath.startsWith("projects/"),
+    backend,
+    onChanges: (batch) => emitted.push(batch),
+  });
+  await watcher.start();
+
+  backend.handle.emitAll("change", excludedPath);
+  backend.handle.emitAll("change", keptPath);
+  await sleep(60);
+
+  assert.equal(emitted.length, 1);
+  assert.deepEqual(emitted[0]?.map((change) => change.path), ["keep.json"]);
+});

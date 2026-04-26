@@ -43,6 +43,7 @@ export interface WatchBackend {
 
 export interface CacheWatcherOptions extends CacheWatcherCallbacks {
   homedir: string;
+  exclude?: (relPath: string) => boolean;
   debounceMs?: number;
   maxFileBytes?: number;
   backend?: WatchBackend;
@@ -53,6 +54,7 @@ export interface CacheWatcherOptions extends CacheWatcherCallbacks {
 
 export class CacheWatcher {
   private readonly homedir: string;
+  private readonly exclude?: (relPath: string) => boolean;
   private readonly debounceMs: number;
   private readonly maxFileBytes: number;
   private readonly callbacks: CacheWatcherCallbacks;
@@ -70,6 +72,7 @@ export class CacheWatcher {
 
   constructor(options: CacheWatcherOptions) {
     this.homedir = options.homedir;
+    this.exclude = options.exclude;
     this.debounceMs = options.debounceMs ?? DEBOUNCE_MS;
     this.maxFileBytes = options.maxFileBytes ?? MAX_FILE_BYTES;
     this.callbacks = {
@@ -202,7 +205,11 @@ export class CacheWatcher {
   private async rebuildLocalIndex(): Promise<void> {
     this.localIndex.clear();
     for (const scope of ALL_SCOPES) {
-      const entries = await scanLocalFiles(scope, this.homedir);
+      const entries = await scanLocalFiles(
+        scope,
+        this.homedir,
+        scope === "claude-home" ? this.exclude : undefined,
+      );
       for (const entry of entries) {
         this.localIndex.set(this.indexKey(scope, entry.relPath), entry);
       }
@@ -212,6 +219,9 @@ export class CacheWatcher {
   private async buildChangesForPath(absPath: string): Promise<CacheTaskChange[]> {
     const target = this.toScopePath(absPath);
     if (!target) {
+      return [];
+    }
+    if (target.scope === "claude-home" && this.exclude?.(target.path)) {
       return [];
     }
 
