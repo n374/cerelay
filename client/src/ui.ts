@@ -147,6 +147,10 @@ export class CacheSyncProgressView {
   /** in-flight 字节累计；line2 显示用 */
   private inFlightBytes = 0;
   private uploadStartedAt = 0;
+  /** line2 当前展示的队首文件；做轻微防抖避免文件名闪烁 */
+  private displayedHead: InflightItem | null = null;
+  private displayedHeadAt = 0;
+  private headPendingSince = 0;
 
   // 渲染状态
   private renderTimer: NodeJS.Timeout | null = null;
@@ -154,6 +158,7 @@ export class CacheSyncProgressView {
   private linesRendered = 0;
   /** spinner 自驱帧索引（不依赖 wallclock，避免暂停时位置错乱） */
   private spinnerIndex = 0;
+  private static readonly HEAD_STABLE_MS = 250;
 
   constructor(options: CacheSyncProgressOptions = {}) {
     this.out = options.out ?? process.stdout;
@@ -205,6 +210,9 @@ export class CacheSyncProgressView {
         this.inFlight = [];
         this.inFlightBytes = 0;
         this.uploadStartedAt = Date.now();
+        this.displayedHead = null;
+        this.displayedHeadAt = 0;
+        this.headPendingSince = 0;
         if (event.totalFiles === 0) {
           // 没有要上传的内容（全 unchanged 或全 skipped）
           this.state = "done";
@@ -240,6 +248,9 @@ export class CacheSyncProgressView {
       case "upload_done":
         this.stopTimer();
         this.clearLines();
+        this.displayedHead = null;
+        this.displayedHeadAt = 0;
+        this.headPendingSince = 0;
         if (!event.aborted && this.uploadTotalFiles > 0) {
           this.out.write(
             `${colorGreen}✓${colorReset} 同步完成 (${event.totalFiles} 文件, ${formatBytes(event.totalBytes)}, ${formatDuration(event.elapsedMs)})\n`,
@@ -257,6 +268,9 @@ export class CacheSyncProgressView {
   dispose(): void {
     this.stopTimer();
     this.clearLines();
+    this.displayedHead = null;
+    this.displayedHeadAt = 0;
+    this.headPendingSince = 0;
     this.state = "done";
   }
 
@@ -292,28 +306,35 @@ export class CacheSyncProgressView {
     const frame = SPINNER_FRAMES[this.spinnerIndex];
     const elapsed = Date.now() - this.scanStartedAt;
     this.clearLines();
+    const columns = this.out.columns ?? 80;
     const line = this.hashTotalFiles > 0 || this.hashCompletedFiles > 0
       ? formatHashProgressLine({
         frame,
         completedFiles: this.hashCompletedFiles,
         totalFiles: this.hashTotalFiles,
+        columns,
       })
-      : `${colorCyan}${frame}${colorReset} 扫描目录 (${formatDuration(elapsed)})`;
+      : fitToColumns(
+        `${colorCyan}${frame}${colorReset} 扫描目录 (${formatDuration(elapsed)})`,
+        columns,
+      );
     this.out.write(line);
     this.linesRendered = 1;
   }
 
   private renderUpload(): void {
+    const now = Date.now();
+    const columns = this.out.columns ?? 80;
     const { line1, line2 } = formatUploadLines({
       frame: SPINNER_FRAMES[this.spinnerIndex],
       uploadTotalFiles: this.uploadTotalFiles,
       uploadTotalBytes: this.uploadTotalBytes,
       ackedFiles: this.ackedFiles,
       ackedBytes: this.ackedBytes,
-      inFlightHead: this.inFlight[0] ?? null,
+      inFlightHead: this.resolveDisplayedHead(now),
       inFlightCount: this.inFlight.length,
       inFlightBytes: this.inFlightBytes,
-      columns: this.out.columns ?? 80,
+      columns,
     });
     this.clearLines();
     this.out.write(line1);
@@ -334,6 +355,42 @@ export class CacheSyncProgressView {
     }
     this.out.write("\x1b[J");
     this.linesRendered = 0;
+  }
+
+  private resolveDisplayedHead(now: number): InflightItem | null {
+    const currentHead = this.inFlight[0] ?? null;
+    if (!currentHead) {
+      return this.setDisplayedHead(null, now);
+    }
+    if (!this.displayedHead) {
+      return this.setDisplayedHead(currentHead, now);
+    }
+    if (this.displayedHead.seq === currentHead.seq) {
+      if (this.displayedHeadAt === 0) {
+        this.displayedHeadAt = now;
+      }
+      this.headPendingSince = 0;
+      return this.displayedHead;
+    }
+    const displayedStillInQueue = this.inFlight.some((item) => item.seq === this.displayedHead?.seq);
+    if (!displayedStillInQueue) {
+      return this.setDisplayedHead(currentHead, now);
+    }
+    if (this.headPendingSince === 0) {
+      this.headPendingSince = Math.max(now, this.displayedHeadAt);
+      return this.displayedHead;
+    }
+    if (now - this.headPendingSince >= CacheSyncProgressView.HEAD_STABLE_MS) {
+      return this.setDisplayedHead(currentHead, now);
+    }
+    return this.displayedHead;
+  }
+
+  private setDisplayedHead(next: InflightItem | null, now: number): InflightItem | null {
+    this.displayedHead = next;
+    this.displayedHeadAt = next ? now : 0;
+    this.headPendingSince = 0;
+    return this.displayedHead;
   }
 }
 
@@ -356,6 +413,7 @@ interface FormatHashProgressLineArgs {
   frame: string;
   completedFiles: number;
   totalFiles: number;
+  columns: number;
 }
 
 /**
@@ -381,21 +439,24 @@ export function formatUploadLines(args: FormatUploadLinesArgs): { line1: string;
   const overallBar = renderBar(overallRatio, 10);
   const percentText = `${(Math.min(1, Math.max(0, overallRatio)) * 100).toFixed(1).padStart(5)}%`;
 
-  const line1 =
+  const rawLine1 =
     `${colorCyan}${frame}${colorReset} 同步中 ${overallBar} ${percentText}` +
     ` (${ackedFiles}/${uploadTotalFiles} 文件,` +
     ` ${formatBytes(ackedBytes)}/${formatBytes(uploadTotalBytes)})`;
+  const line1 = fitToColumns(rawLine1, columns);
 
   if (!inFlightHead) {
     return { line1, line2: "" };
   }
 
-  const tail = `  ${colorGray}(in-flight ${inFlightCount} 文件 / ${formatBytes(inFlightBytes)})${colorReset}`;
+  const tail =
+    `  ${colorGray}(in-flight ${String(inFlightCount).padStart(3)} 文件 / ` +
+    `${formatBytesFixedWidth(inFlightBytes)})${colorReset}`;
   const prefix = `  ${colorGray}→${colorReset} 当前 ack 等待: `;
-  const reservedWidth = stripAnsi(prefix).length + stripAnsi(tail).length;
-  const maxPathWidth = Math.max(20, columns - reservedWidth);
+  const reservedWidth = displayWidth(prefix) + displayWidth(tail);
+  const maxPathWidth = Math.max(0, columns - reservedWidth);
   const truncatedPath = truncateMiddle(inFlightHead.displayPath, maxPathWidth);
-  const line2 = `${prefix}${truncatedPath}${tail}`;
+  const line2 = fitToColumns(`${prefix}${truncatedPath}${tail}`, columns);
   return { line1, line2 };
 }
 
@@ -405,9 +466,10 @@ export function formatHashProgressLine(args: FormatHashProgressLineArgs): string
   const ratio = totalFiles > 0 ? completedFiles / totalFiles : 1;
   const bar = renderBar(ratio, 10);
   const percentText = `${(Math.min(1, Math.max(0, ratio)) * 100).toFixed(1).padStart(5)}%`;
-  return (
+  return fitToColumns(
     `${colorCyan}${args.frame}${colorReset} 计算文件指纹 ${bar} ${percentText}` +
-    ` (已 hash ${completedFiles}/${totalFiles} 文件)`
+    ` (已 hash ${completedFiles}/${totalFiles} 文件)`,
+    args.columns,
   );
 }
 
@@ -436,16 +498,152 @@ export function formatDuration(ms: number): string {
 }
 
 /** 中间省略截断：保留前后两段，超长时插入 … */
-export function truncateMiddle(text: string, maxWidth: number): string {
-  if (text.length <= maxWidth) return text;
-  if (maxWidth <= 3) return text.slice(0, maxWidth);
-  const keep = maxWidth - 1;
-  const head = Math.ceil(keep / 2);
-  const tail = keep - head;
-  return text.slice(0, head) + "…" + text.slice(text.length - tail);
+export function truncateMiddle(text: string, maxDisplayWidth: number): string {
+  if (maxDisplayWidth <= 0) return "";
+  if (displayWidth(text) <= maxDisplayWidth) return text;
+  if (maxDisplayWidth === 1) return "…";
+
+  const glyphs = [...text];
+  const keepWidth = maxDisplayWidth - 1;
+  const headBudget = Math.ceil(keepWidth / 2);
+  const tailBudget = keepWidth - headBudget;
+
+  let headEnd = 0;
+  let headWidth = 0;
+  while (headEnd < glyphs.length) {
+    const nextWidth = displayWidth(glyphs[headEnd]);
+    if (headWidth + nextWidth > headBudget) break;
+    headWidth += nextWidth;
+    headEnd += 1;
+  }
+
+  let tailStart = glyphs.length;
+  let tailWidth = 0;
+  while (tailStart > headEnd) {
+    const nextWidth = displayWidth(glyphs[tailStart - 1]);
+    if (tailWidth + nextWidth > tailBudget) break;
+    tailWidth += nextWidth;
+    tailStart -= 1;
+  }
+
+  return glyphs.slice(0, headEnd).join("") + "…" + glyphs.slice(tailStart).join("");
+}
+
+export function displayWidth(text: string): number {
+  let width = 0;
+  for (const glyph of stripAnsi(text)) {
+    const codePoint = glyph.codePointAt(0);
+    if (codePoint === undefined) continue;
+    if (
+      codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      codePoint === 0x200d ||
+      isVariationSelector(codePoint) ||
+      COMBINING_MARK_RE.test(glyph)
+    ) {
+      continue;
+    }
+    width += isWideGlyph(glyph, codePoint) ? 2 : 1;
+  }
+  return width;
+}
+
+function fitToColumns(line: string, columns: number): string {
+  const targetWidth = Math.max(1, columns);
+  const visibleWidth = displayWidth(line);
+  if (visibleWidth <= targetWidth) {
+    return line + " ".repeat(targetWidth - visibleWidth);
+  }
+  if (targetWidth === 1) {
+    return "…";
+  }
+
+  const truncated = sliceAnsiByDisplayWidth(line, targetWidth - 1);
+  let fitted = `${truncated.text}…`;
+  if (truncated.hasOpenStyle && !fitted.endsWith(colorReset)) {
+    fitted += colorReset;
+  }
+  return fitted + " ".repeat(Math.max(0, targetWidth - displayWidth(fitted)));
+}
+
+function formatBytesFixedWidth(bytes: number): string {
+  return formatBytes(bytes).padStart(8);
 }
 
 /** 简化的 ANSI 序列剥离，只用于宽度估算（不追求覆盖所有 escape 类型） */
 function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  return text.replace(ANSI_PATTERN_GLOBAL, "");
 }
+
+function sliceAnsiByDisplayWidth(text: string, maxWidth: number): { text: string; hasOpenStyle: boolean } {
+  let out = "";
+  let width = 0;
+  let offset = 0;
+  let hasOpenStyle = false;
+
+  while (offset < text.length) {
+    const ansi = matchAnsiAt(text, offset);
+    if (ansi) {
+      out += ansi;
+      offset += ansi.length;
+      if (ansi.endsWith("m")) {
+        hasOpenStyle = !RESET_SGR_RE.test(ansi);
+      }
+      continue;
+    }
+
+    const glyph = text.slice(offset, offset + (text.codePointAt(offset)! > 0xffff ? 2 : 1));
+    const glyphWidth = displayWidth(glyph);
+    if (width + glyphWidth > maxWidth) {
+      break;
+    }
+    out += glyph;
+    width += glyphWidth;
+    offset += glyph.length;
+  }
+
+  return { text: out, hasOpenStyle };
+}
+
+function matchAnsiAt(text: string, offset: number): string | null {
+  const match = ANSI_PATTERN_STICKY.exec(text.slice(offset));
+  return match?.index === 0 ? match[0] : null;
+}
+
+function isVariationSelector(codePoint: number): boolean {
+  return (
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+  );
+}
+
+function isWideGlyph(glyph: string, codePoint: number): boolean {
+  return EXTENDED_PICTOGRAPHIC_RE.test(glyph) || isFullWidthCodePoint(codePoint);
+}
+
+function isFullWidthCodePoint(codePoint: number): boolean {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0x3247 && codePoint !== 0x303f) ||
+    (codePoint >= 0x3250 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0xa4c6) ||
+    (codePoint >= 0xa960 && codePoint <= 0xa97c) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6b) ||
+    (codePoint >= 0xff01 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1b000 && codePoint <= 0x1b2ff) ||
+    (codePoint >= 0x1f200 && codePoint <= 0x1f251) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
+}
+
+const ANSI_PATTERN_GLOBAL = /\x1b\[[0-9;]*[A-Za-z]/g;
+const ANSI_PATTERN_STICKY = /^\x1b\[[0-9;]*[A-Za-z]/;
+const RESET_SGR_RE = /^\x1b\[(?:0)?m$/;
+const COMBINING_MARK_RE = /\p{Mark}/u;
+const EXTENDED_PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u;

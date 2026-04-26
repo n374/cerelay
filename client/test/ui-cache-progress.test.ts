@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import {
   CacheSyncProgressView,
+  displayWidth,
   formatBytes,
   formatDuration,
   formatHashProgressLine,
@@ -28,6 +29,18 @@ function makeMockOut(columns = 120) {
     { columns, isTTY: true },
   ) as unknown as NodeJS.WriteStream;
   return { out, getOutput: () => Buffer.concat(buf).toString("utf8") };
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+function extractLine2Path(line2: string): string {
+  const plain = stripAnsi(line2);
+  const prefix = "  → 当前 ack 等待: ";
+  const suffix = "  (in-flight";
+  const suffixIndex = plain.indexOf(suffix);
+  return plain.slice(prefix.length, suffixIndex >= 0 ? suffixIndex : undefined);
 }
 
 test("formatBytes 在 B/KB/MB/GB 边界正确切换", () => {
@@ -64,16 +77,42 @@ test("truncateMiddle 长文本中间省略", () => {
   assert.ok(result.includes("…"));
 });
 
+test("displayWidth 正确处理 ASCII/CJK/emoji/ANSI", () => {
+  assert.equal(displayWidth("hello"), 5);
+  assert.equal(displayWidth("中文路径"), 8);
+  assert.equal(displayWidth("a🙂b"), 4);
+  assert.equal(displayWidth("\x1b[31m红🙂a\x1b[0m"), 5);
+});
+
+test("truncateMiddle 按显示宽度截断 CJK 文本", () => {
+  const result = truncateMiddle("中文目录/测试文件/session.jsonl", 12);
+  assert.ok(result.includes("…"));
+  assert.ok(displayWidth(result) <= 12);
+});
+
 test("formatHashProgressLine 渲染 hash 阶段进度", () => {
   const line = formatHashProgressLine({
     frame: "⠋",
     completedFiles: 3,
     totalFiles: 6,
+    columns: 120,
   });
 
   assert.match(line, /计算文件指纹/);
   assert.match(line, /已 hash 3\/6 文件/);
   assert.match(line, /50\.0%/);
+});
+
+test("formatHashProgressLine 窄终端下会裁剪并补齐整宽", () => {
+  const line = formatHashProgressLine({
+    frame: "⠋",
+    completedFiles: 88,
+    totalFiles: 88,
+    columns: 32,
+  });
+
+  assert.equal(displayWidth(line), 32);
+  assert.ok(stripAnsi(line).includes("…"));
 });
 
 test("formatUploadLines 总进度按 ack 字节精确计算", () => {
@@ -102,7 +141,7 @@ test("formatUploadLines 总进度按 ack 字节精确计算", () => {
   assert.ok(line2);
   assert.match(line2, /当前 ack 等待: /);
   assert.match(line2, /settings\.json/);
-  assert.match(line2, /in-flight 2 文件/);
+  assert.match(line2, /in-flight\s+2 文件/);
   assert.match(line2, /384\.0 KB/);
 });
 
@@ -139,6 +178,58 @@ test("formatUploadLines 文件名过长会被中间截断", () => {
     columns: 80,
   });
   assert.ok(line2.includes("…"), "应该出现省略号");
+});
+
+test("formatUploadLines CJK 路径在窄终端下仍严格限制在单行列宽内", () => {
+  const { line1, line2 } = formatUploadLines({
+    frame: "⠋",
+    uploadTotalFiles: 8,
+    uploadTotalBytes: 4 * 1024 * 1024,
+    ackedFiles: 3,
+    ackedBytes: 1024 * 1024,
+    inFlightHead: {
+      seq: 4,
+      displayPath: "~/.claude/projects/中文目录/子目录/配置文件/session.jsonl",
+      size: 512 * 1024,
+    },
+    inFlightCount: 12,
+    inFlightBytes: 1536 * 1024,
+    columns: 72,
+  });
+
+  assert.equal(displayWidth(line1), 72);
+  assert.equal(displayWidth(line2), 72);
+  assert.ok(stripAnsi(line2).startsWith("  → 当前 ack 等待: "));
+  assert.ok(line2.includes("…"));
+});
+
+test("formatUploadLines 固定 tail 宽度后 path 截断阈值保持稳定", () => {
+  const base = {
+    frame: "⠋",
+    uploadTotalFiles: 20,
+    uploadTotalBytes: 32 * 1024 * 1024,
+    ackedFiles: 4,
+    ackedBytes: 8 * 1024 * 1024,
+    inFlightHead: {
+      seq: 5,
+      displayPath: "~/.claude/projects/" + "abcdef/".repeat(12) + "session.jsonl",
+      size: 1024,
+    },
+    columns: 76,
+  };
+
+  const line2a = formatUploadLines({
+    ...base,
+    inFlightCount: 3,
+    inFlightBytes: 4 * 1024,
+  }).line2;
+  const line2b = formatUploadLines({
+    ...base,
+    inFlightCount: 12,
+    inFlightBytes: 256 * 1024,
+  }).line2;
+
+  assert.equal(extractLine2Path(line2a), extractLine2Path(line2b));
 });
 
 test("CacheSyncProgressView 完整事件流：扫描 → 上传 → 完成", () => {
@@ -241,4 +332,55 @@ test("CacheSyncProgressView in-flight 队列：file_pushed 入队，file_acked �
   view.handle({ kind: "upload_done", totalFiles: 3, totalBytes: 300, elapsedMs: 50 });
   view.dispose();
   // 没有断言 throw 即视为状态机健康（队列查找按 seq，乱序 ack 不应 panic）
+});
+
+test("CacheSyncProgressView displayedHead 在 250ms 内保持稳定", () => {
+  const { out } = makeMockOut(80);
+  const view = new CacheSyncProgressView({ out });
+  const internal = view as unknown as {
+    state: string;
+    uploadTotalFiles: number;
+    uploadTotalBytes: number;
+    ackedFiles: number;
+    ackedBytes: number;
+    inFlightBytes: number;
+    inFlight: Array<{ seq: number; displayPath: string; size: number }>;
+    displayedHead: { seq: number; displayPath: string; size: number } | null;
+    displayedHeadAt: number;
+    headPendingSince: number;
+    renderUpload(): void;
+  };
+
+  const headA = { seq: 1, displayPath: "~/.claude/a.json", size: 100 };
+  const headB = { seq: 2, displayPath: "~/.claude/b.json", size: 100 };
+  const realNow = Date.now;
+  let now = 1_000;
+
+  try {
+    Date.now = () => now;
+    internal.state = "uploading";
+    internal.uploadTotalFiles = 2;
+    internal.uploadTotalBytes = 200;
+    internal.ackedFiles = 0;
+    internal.ackedBytes = 0;
+    internal.inFlightBytes = 200;
+    internal.inFlight = [headA, headB];
+    internal.displayedHead = headB;
+    internal.displayedHeadAt = now;
+    internal.headPendingSince = 0;
+
+    internal.renderUpload();
+    assert.equal(internal.displayedHead?.seq, 2);
+
+    now += 200;
+    internal.renderUpload();
+    assert.equal(internal.displayedHead?.seq, 2);
+
+    now += 60;
+    internal.renderUpload();
+    assert.equal(internal.displayedHead?.seq, 1);
+  } finally {
+    Date.now = realNow;
+    view.dispose();
+  }
 });
