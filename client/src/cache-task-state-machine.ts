@@ -7,18 +7,22 @@ import {
   CacheTaskDeltaAckError,
   MAX_FILE_BYTES,
   MAX_INFLIGHT_BYTES,
-  buildScopePlan,
+  hashScope,
   pushInitialDeltaBatches,
   type CacheSyncEvent,
   type InitialDeltaPipelineResult,
+  type LocalEntry,
   type ScopePlan,
+  walkScope,
 } from "./cache-sync.js";
 import {
   CacheWatcher,
   DEFAULT_SUPPRESS_TTL_MS,
   type CacheWatcherFault,
 } from "./cache-watcher.js";
+import { createExcludeMatcher, type CerelayConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import type { ScanCacheStore } from "./scan-cache.js";
 import type {
   CacheTaskAssignment,
   CacheTaskChange,
@@ -43,6 +47,8 @@ export type CacheTaskState =
 export interface CacheTaskStateMachineOptions {
   cwd: string;
   deviceId: string;
+  config?: CerelayConfig;
+  scanCache?: ScanCacheStore;
   homedir?: string;
   debounceMs?: number;
   disableCacheTask?: boolean;
@@ -52,8 +58,10 @@ export interface CacheTaskStateMachineOptions {
   watcherFactory?: (callbacks: {
     onChanges: (changes: CacheTaskChange[]) => void | Promise<void>;
     onFault: (fault: CacheWatcherFault) => void | Promise<void>;
+    exclude: (relPath: string) => boolean;
   }) => CacheWatcherLike;
-  buildScopePlan?: typeof buildScopePlan;
+  walkScope?: typeof walkScope;
+  hashScope?: typeof hashScope;
   pushInitialDeltaBatches?: (options: Parameters<typeof pushInitialDeltaBatches>[0]) => Promise<InitialDeltaPipelineResult>;
   now?: () => number;
   setIntervalFn?: typeof setInterval;
@@ -80,6 +88,9 @@ type SendFn = (message: HandToServerMessage) => Promise<void>;
 export class CacheTaskStateMachine {
   private readonly cwd: string;
   private readonly deviceId: string;
+  private readonly config: CerelayConfig;
+  private readonly scanCache?: ScanCacheStore;
+  private readonly exclude: (relPath: string) => boolean;
   private readonly homedir: string;
   private readonly debounceMs: number;
   private readonly disableCacheTask: boolean;
@@ -87,7 +98,8 @@ export class CacheTaskStateMachine {
   private readonly ackTimeoutMs: number;
   private readonly onProgress?: (event: CacheSyncEvent) => void;
   private readonly watcherFactory: NonNullable<CacheTaskStateMachineOptions["watcherFactory"]>;
-  private readonly buildScopePlanImpl: typeof buildScopePlan;
+  private readonly walkScopeImpl: typeof walkScope;
+  private readonly hashScopeImpl: typeof hashScope;
   private readonly pushInitialDeltaBatchesImpl: NonNullable<CacheTaskStateMachineOptions["pushInitialDeltaBatches"]>;
   private readonly now: () => number;
   private readonly setIntervalFn: typeof setInterval;
@@ -114,13 +126,17 @@ export class CacheTaskStateMachine {
   constructor(options: CacheTaskStateMachineOptions) {
     this.cwd = options.cwd;
     this.deviceId = options.deviceId;
+    this.config = options.config ?? { scan: { excludeDirs: [] } };
+    this.scanCache = options.scanCache;
+    this.exclude = createExcludeMatcher(this.config.scan.excludeDirs);
     this.homedir = options.homedir ?? os.homedir();
     this.debounceMs = options.debounceMs ?? 250;
     this.disableCacheTask = options.disableCacheTask ?? isCacheTaskDisabled();
     this.suppressTtlMs = options.suppressTtlMs ?? DEFAULT_SUPPRESS_TTL_MS;
     this.ackTimeoutMs = options.ackTimeoutMs ?? 60_000;
     this.onProgress = options.onProgress;
-    this.buildScopePlanImpl = options.buildScopePlan ?? buildScopePlan;
+    this.walkScopeImpl = options.walkScope ?? walkScope;
+    this.hashScopeImpl = options.hashScope ?? hashScope;
     this.pushInitialDeltaBatchesImpl = options.pushInitialDeltaBatches ?? pushInitialDeltaBatches;
     this.now = options.now ?? (() => Date.now());
     this.setIntervalFn = options.setIntervalFn ?? setInterval;
@@ -130,6 +146,7 @@ export class CacheTaskStateMachine {
     this.createBatchId = options.createBatchId ?? randomUUID;
     this.watcherFactory = options.watcherFactory ?? ((callbacks) => new CacheWatcher({
       homedir: this.homedir,
+      exclude: callbacks.exclude,
       debounceMs: this.debounceMs,
       onChanges: callbacks.onChanges,
       onFault: callbacks.onFault,
@@ -235,6 +252,7 @@ export class CacheTaskStateMachine {
     const watcher = this.watcherFactory({
       onChanges: (changes) => this.handleWatcherChanges(changes),
       onFault: (fault) => this.handleWatcherFault(fault),
+      exclude: this.exclude,
     });
     this.watcher = watcher;
 
@@ -242,6 +260,21 @@ export class CacheTaskStateMachine {
       await watcher.start();
       await this.runInitialSync(message, generation);
     } catch (error) {
+      // Cache sync 失败一律降级为"无缓存继续"——CLAUDE.md 明确写过缓存同步失败不阻塞 PTY session，
+      // FUSE 读请求会回穿到 Client。但绝不能静默吞：异常以 error 级别打全堆栈，必要细节（ack.errorCode、
+      // ack.error）一并暴露，方便日志层排查。注意不要 throw，否则 client.ts 那条 void onMessage 链会
+      // 变成 unhandled rejection 把进程拉崩。
+      log.error("cache task initial sync 失败，降级为无缓存继续", {
+        assignmentId: message.assignmentId,
+        deviceId: this.deviceId,
+        cwd: this.cwd,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: asErrorMessage(error),
+        ackErrorCode: error instanceof CacheTaskDeltaAckError ? error.ack.errorCode : undefined,
+        ackErrorMessage: error instanceof CacheTaskDeltaAckError ? error.ack.error : undefined,
+        ackResyncRequired: error instanceof CacheTaskDeltaAckError ? error.ack.resyncRequired : undefined,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       if (!this.isGenerationCurrent(generation, message.assignmentId)) {
         return;
       }
@@ -263,22 +296,50 @@ export class CacheTaskStateMachine {
     const scanStartedAt = this.now();
     this.onProgress?.({ kind: "scan_start" });
 
-    const plans: ScopePlan[] = [];
+    const walkedScopes: Array<{ scope: (typeof ALL_SCOPES)[number]; locals: LocalEntry[] }> = [];
     let totalFiles = 0;
-    let totalBytes = 0;
     for (const scope of ALL_SCOPES) {
-      const plan = await this.buildScopePlanImpl({
+      const locals = await this.walkScopeImpl({
         scope,
         homedir: this.homedir,
-        remote: message.manifest?.scopes[scope],
+        exclude: this.exclude,
+      });
+      walkedScopes.push({ scope, locals });
+      totalFiles += locals.length;
+      if (!this.isGenerationCurrent(generation, message.assignmentId)) {
+        return;
+      }
+    }
+
+    this.onProgress?.({ kind: "walk_done", totalFiles });
+
+    const plans: ScopePlan[] = [];
+    let totalBytes = 0;
+    let completedFiles = 0;
+    for (const walked of walkedScopes) {
+      const plan = await this.hashScopeImpl({
+        scope: walked.scope,
+        locals: walked.locals,
+        remote: message.manifest?.scopes[walked.scope],
+        scanCache: this.scanCache,
+        onHashProgress: () => {
+          completedFiles += 1;
+          this.onProgress?.({
+            kind: "hash_progress",
+            completedFiles,
+            totalFiles,
+          });
+        },
       });
       plans.push(plan);
-      totalFiles += plan.totalLocal;
       totalBytes += plan.uploads.reduce((sum, item) => sum + item.change.size, 0);
       totalBytes += plan.metaChanges.reduce(
         (sum, change) => sum + (change.kind === "upsert" ? change.size : 0),
         0,
       );
+      if (!this.isGenerationCurrent(generation, message.assignmentId)) {
+        return;
+      }
     }
 
     this.onProgress?.({
@@ -310,6 +371,11 @@ export class CacheTaskStateMachine {
       this.initialSyncAbortController = null;
     }
 
+    if (!this.isGenerationCurrent(generation, message.assignmentId)) {
+      return;
+    }
+
+    await this.flushScanCache();
     if (!this.isGenerationCurrent(generation, message.assignmentId)) {
       return;
     }
@@ -572,6 +638,19 @@ export class CacheTaskStateMachine {
   private abortInitialSync(): void {
     this.initialSyncAbortController?.abort();
     this.initialSyncAbortController = null;
+  }
+
+  private async flushScanCache(): Promise<void> {
+    if (!this.scanCache) {
+      return;
+    }
+    try {
+      await this.scanCache.flush();
+    } catch (error) {
+      log.warn("scan cache flush 失败，已忽略", {
+        error: asErrorMessage(error),
+      });
+    }
   }
 
   private async sendMessage(message: HandToServerMessage): Promise<void> {
