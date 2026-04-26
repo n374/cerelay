@@ -12,8 +12,10 @@ import { FileProxyHandler } from "./file-proxy.js";
 import { UI, CacheSyncProgressView } from "./ui.js";
 import { createLogger, configureLogger } from "./logger.js";
 import { getOrCreateDeviceId } from "./device-id.js";
-import { CacheTaskStateMachine } from "./cache-task-state-machine.js";
+import { loadConfig } from "./config.js";
+import { CacheTaskStateMachine, isCacheTaskDisabled } from "./cache-task-state-machine.js";
 import type { CacheSyncEvent } from "./cache-sync.js";
+import { openScanCache } from "./scan-cache.js";
 import type {
   CacheTaskAssignment,
   CacheTaskDeltaAck,
@@ -81,35 +83,48 @@ export class CerelayClient {
       const ws = new WebSocket(this.serverURL, agent ? { agent } : undefined);
 
       ws.on("open", () => {
-        this.ws = ws;
-        this.cacheTaskStateMachine = new CacheTaskStateMachine({
-          cwd: this.cwd,
-          deviceId: this.deviceId,
-          homedir: os.homedir(),
-          onProgress: (event) => this.handleCacheSyncProgress(event),
-        });
-        ws.on("message", (data) => {
-          const raw = data.toString();
-          if (this.tryHandleFileProxyFromRaw(raw)) {
-            return;
-          }
-          if (this.tryHandleCacheTaskFromRaw(raw)) {
-            return;
-          }
-          if (this.activeMessageConsumer) {
-            this.activeMessageConsumer(raw);
-            return;
-          }
-          this.pendingMessages.push(raw);
-        });
-        ws.on("close", () => {
-          void this.cacheTaskStateMachine?.onDisconnected();
-          this.cacheTaskStateMachine = null;
-          this.disposeCacheSyncView();
-        });
-        void this.cacheTaskStateMachine.onConnected((msg) => this.writeJSON(msg))
-          .then(() => resolve())
-          .catch(reject);
+        void (async () => {
+          this.ws = ws;
+          const disableCacheTask = isCacheTaskDisabled();
+          const config = disableCacheTask ? undefined : await loadConfig();
+          const scanCache = disableCacheTask
+            ? undefined
+            : await openScanCache({
+              deviceId: this.deviceId,
+              cwd: this.cwd,
+            });
+
+          this.cacheTaskStateMachine = new CacheTaskStateMachine({
+            cwd: this.cwd,
+            deviceId: this.deviceId,
+            config,
+            scanCache,
+            homedir: os.homedir(),
+            disableCacheTask,
+            onProgress: (event) => this.handleCacheSyncProgress(event),
+          });
+          ws.on("message", (data) => {
+            const raw = data.toString();
+            if (this.tryHandleFileProxyFromRaw(raw)) {
+              return;
+            }
+            if (this.tryHandleCacheTaskFromRaw(raw)) {
+              return;
+            }
+            if (this.activeMessageConsumer) {
+              this.activeMessageConsumer(raw);
+              return;
+            }
+            this.pendingMessages.push(raw);
+          });
+          ws.on("close", () => {
+            void this.cacheTaskStateMachine?.onDisconnected();
+            this.cacheTaskStateMachine = null;
+            this.disposeCacheSyncView();
+          });
+          await this.cacheTaskStateMachine.onConnected((msg) => this.writeJSON(msg));
+          resolve();
+        })().catch(reject);
       });
 
       ws.on("error", (err) => {
@@ -252,9 +267,17 @@ export class CerelayClient {
         case "cache_task_mutation_hint":
         case "cache_task_heartbeat_ack":
           if (this.cacheTaskStateMachine) {
-            void this.cacheTaskStateMachine.onMessage(
+            // onMessage 内部已对 cache sync 失败做了 error log + 降级，但仍需顶层 .catch 兜底：
+            // 任何意外抛错都不能让这条 void 链变成 unhandled rejection（Node 25 默认会 crash 进程）。
+            this.cacheTaskStateMachine.onMessage(
               msg as CacheTaskAssignment | CacheTaskDeltaAck | CacheTaskMutationHint | { type: "cache_task_heartbeat_ack" },
-            );
+            ).catch((err) => {
+              log.error("cache task onMessage 抛出未捕获异常，已忽略以保活进程", {
+                msgType: msg.type,
+                error: err instanceof Error ? err.message : String(err),
+                stack: err instanceof Error ? err.stack : undefined,
+              });
+            });
           }
           return true;
         default:
