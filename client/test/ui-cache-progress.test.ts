@@ -10,6 +10,7 @@ import {
   CacheSyncProgressView,
   formatBytes,
   formatDuration,
+  formatHashProgressLine,
   formatUploadLines,
   renderBar,
   truncateMiddle,
@@ -61,6 +62,18 @@ test("truncateMiddle 长文本中间省略", () => {
   const result = truncateMiddle("verylongfilename.txt", 10);
   assert.equal(result.length, 10);
   assert.ok(result.includes("…"));
+});
+
+test("formatHashProgressLine 渲染 hash 阶段进度", () => {
+  const line = formatHashProgressLine({
+    frame: "⠋",
+    completedFiles: 3,
+    totalFiles: 6,
+  });
+
+  assert.match(line, /计算文件指纹/);
+  assert.match(line, /已 hash 3\/6 文件/);
+  assert.match(line, /50\.0%/);
 });
 
 test("formatUploadLines 总进度按 ack 字节精确计算", () => {
@@ -133,6 +146,8 @@ test("CacheSyncProgressView 完整事件流：扫描 → 上传 → 完成", () 
   const view = new CacheSyncProgressView({ out });
 
   view.handle({ kind: "scan_start" });
+  view.handle({ kind: "walk_done", totalFiles: 3 });
+  view.handle({ kind: "hash_progress", completedFiles: 1, totalFiles: 3 });
   view.handle({ kind: "scan_done", totalFiles: 3, totalBytes: 1024, elapsedMs: 50 });
   view.handle({ kind: "upload_start", totalFiles: 1, totalBytes: 100 });
   view.handle({
@@ -164,6 +179,7 @@ test("CacheSyncProgressView 完整事件流：扫描 → 上传 → 完成", () 
   view.dispose();
 
   const output = getOutput();
+  assert.match(output, /计算文件指纹/);
   assert.match(output, /扫描 Claude 配置/);
   assert.match(output, /同步完成/);
 });
@@ -173,6 +189,7 @@ test("CacheSyncProgressView upload_start 0 文件时跳过同步行", () => {
   const view = new CacheSyncProgressView({ out });
 
   view.handle({ kind: "scan_start" });
+  view.handle({ kind: "walk_done", totalFiles: 0 });
   view.handle({ kind: "scan_done", totalFiles: 0, totalBytes: 0, elapsedMs: 30 });
   view.handle({ kind: "upload_start", totalFiles: 0, totalBytes: 0 });
   view.handle({ kind: "upload_done", totalFiles: 0, totalBytes: 0, elapsedMs: 1 });

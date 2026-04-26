@@ -132,6 +132,8 @@ export class CacheSyncProgressView {
 
   // scan 阶段
   private scanStartedAt = 0;
+  private hashCompletedFiles = 0;
+  private hashTotalFiles = 0;
 
   // upload 阶段
   private uploadTotalFiles = 0;
@@ -170,7 +172,21 @@ export class CacheSyncProgressView {
       case "scan_start":
         this.state = "scanning";
         this.scanStartedAt = Date.now();
+        this.hashCompletedFiles = 0;
+        this.hashTotalFiles = 0;
         this.startTimer();
+        return;
+
+      case "walk_done":
+        this.hashCompletedFiles = 0;
+        this.hashTotalFiles = event.totalFiles;
+        this.render();
+        return;
+
+      case "hash_progress":
+        this.hashCompletedFiles = event.completedFiles;
+        this.hashTotalFiles = event.totalFiles;
+        this.render();
         return;
 
       case "scan_done":
@@ -276,7 +292,13 @@ export class CacheSyncProgressView {
     const frame = SPINNER_FRAMES[this.spinnerIndex];
     const elapsed = Date.now() - this.scanStartedAt;
     this.clearLines();
-    const line = `${colorCyan}${frame}${colorReset} 扫描 Claude 配置 (${formatDuration(elapsed)})`;
+    const line = this.hashTotalFiles > 0 || this.hashCompletedFiles > 0
+      ? formatHashProgressLine({
+        frame,
+        completedFiles: this.hashCompletedFiles,
+        totalFiles: this.hashTotalFiles,
+      })
+      : `${colorCyan}${frame}${colorReset} 扫描目录 (${formatDuration(elapsed)})`;
     this.out.write(line);
     this.linesRendered = 1;
   }
@@ -330,6 +352,12 @@ interface FormatUploadLinesArgs {
   columns: number;
 }
 
+interface FormatHashProgressLineArgs {
+  frame: string;
+  completedFiles: number;
+  totalFiles: number;
+}
+
 /**
  * 把上传期的两行 UI 拍扁为字符串，方便测试。
  * - line1：总进度（spinner + 进度条 + 百分比 + 已 ack 文件数 + 已 ack 字节）
@@ -369,6 +397,18 @@ export function formatUploadLines(args: FormatUploadLinesArgs): { line1: string;
   const truncatedPath = truncateMiddle(inFlightHead.displayPath, maxPathWidth);
   const line2 = `${prefix}${truncatedPath}${tail}`;
   return { line1, line2 };
+}
+
+export function formatHashProgressLine(args: FormatHashProgressLineArgs): string {
+  const totalFiles = Math.max(0, args.totalFiles);
+  const completedFiles = Math.max(0, Math.min(args.completedFiles, totalFiles));
+  const ratio = totalFiles > 0 ? completedFiles / totalFiles : 1;
+  const bar = renderBar(ratio, 10);
+  const percentText = `${(Math.min(1, Math.max(0, ratio)) * 100).toFixed(1).padStart(5)}%`;
+  return (
+    `${colorCyan}${args.frame}${colorReset} 计算文件指纹 ${bar} ${percentText}` +
+    ` (已 hash ${completedFiles}/${totalFiles} 文件)`
+  );
 }
 
 /** 进度条：固定宽度，█ 满 / ░ 空 */
