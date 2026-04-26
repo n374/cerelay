@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   SHADOWED_BUILTIN_TOOLS,
+  SHADOWED_BUILTIN_TOOL_SET,
   buildMcpConfigJson,
+  buildShadowFallbackReason,
   buildShadowMcpInjectionArgs,
   buildSteeringPrompt,
   resolveShadowMcpLaunchSpec,
@@ -57,6 +59,37 @@ test("buildSteeringPrompt 含 7 个 builtin → mcp__cerelay__ 映射 + append �
   }
   // 用户自配 MCP 不应被替换的提示
   assert.match(prompt, /User-installed MCP servers/);
+});
+
+test("SHADOWED_BUILTIN_TOOL_SET 与 SHADOWED_BUILTIN_TOOLS 内容一致", () => {
+  assert.equal(SHADOWED_BUILTIN_TOOL_SET.size, SHADOWED_BUILTIN_TOOLS.length);
+  for (const name of SHADOWED_BUILTIN_TOOLS) {
+    assert.equal(SHADOWED_BUILTIN_TOOL_SET.has(name), true);
+  }
+});
+
+test("buildShadowFallbackReason: 7 个 builtin → 引导文案含正确 mcp__cerelay__*", () => {
+  const cases: Array<[string, string]> = [
+    ["Bash", "mcp__cerelay__bash"],
+    ["Read", "mcp__cerelay__read"],
+    ["Write", "mcp__cerelay__write"],
+    ["Edit", "mcp__cerelay__edit"],
+    ["MultiEdit", "mcp__cerelay__multi_edit"],
+    ["Glob", "mcp__cerelay__glob"],
+    ["Grep", "mcp__cerelay__grep"],
+  ];
+  for (const [builtin, fqn] of cases) {
+    const reason = buildShadowFallbackReason(builtin);
+    assert.ok(reason, `${builtin} 应有引导文案`);
+    assert.match(reason!, new RegExp(`Tool '${builtin}' is not available`));
+    assert.match(reason!, new RegExp(fqn.replace(/_/g, "_")));
+  }
+});
+
+test("buildShadowFallbackReason: 不在 shadow 范围的工具返回 null", () => {
+  assert.equal(buildShadowFallbackReason("WebFetch"), null);
+  assert.equal(buildShadowFallbackReason("mcp__user__ping"), null);
+  assert.equal(buildShadowFallbackReason("UnknownTool"), null);
 });
 
 test("buildShadowMcpInjectionArgs 输出 --mcp-config / --append-system-prompt / --disallowedTools", () => {

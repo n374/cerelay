@@ -95,6 +95,99 @@ test("Phase 3: handleInjectedPreToolUse 收到 mcp__cerelay__bash 直接 allow�
   await session.close();
 });
 
+test("Phase 4: shadow MCP 启用 + 模型违规调内置 Bash → hook deny + 引导改用 mcp__cerelay__bash", async () => {
+  const capture = createCapture();
+  const session = new ClaudePtySession({
+    id: "pty-fallback-bash",
+    cwd: "/Users/dev/project",
+    runtime: createMockRuntime(),
+    transport: createTransport(capture, () => {
+      throw new Error("命中 shadow 黑名单时不应该再走 client 转发");
+    }),
+  });
+
+  // 模拟 shadowMcpHost 已经启动（用 cast 注入 sentinel，避免真启 unix socket）。
+  (session as unknown as { mcpIpcHost: unknown }).mcpIpcHost = { sentinel: true };
+
+  const result = await session.handleInjectedPreToolUse({
+    tool_name: "Bash",
+    tool_use_id: "toolu_violate",
+    tool_input: { command: "ls" },
+  });
+
+  assert.equal(result.hookSpecificOutput?.permissionDecision, "deny");
+  const reason = result.hookSpecificOutput?.permissionDecisionReason ?? "";
+  assert.match(reason, /Tool 'Bash' is not available/);
+  assert.match(reason, /mcp__cerelay__bash/);
+  assert.equal(capture.toolCalls.length, 0);
+
+  // additionalContext 与 reason 同步携带，hook protocol 冗余通道
+  assert.equal(result.hookSpecificOutput?.additionalContext, reason);
+
+  // 防止 close 内 mcp host.close 抛错
+  (session as unknown as { mcpIpcHost: unknown }).mcpIpcHost = null;
+  await session.close();
+});
+
+test("Phase 4: 7 个 shadowed builtin 都触发引导文案", async () => {
+  const capture = createCapture();
+  const session = new ClaudePtySession({
+    id: "pty-fallback-all",
+    cwd: "/Users/dev/project",
+    runtime: createMockRuntime(),
+    transport: createTransport(capture, () => undefined),
+  });
+  (session as unknown as { mcpIpcHost: unknown }).mcpIpcHost = { sentinel: true };
+
+  const cases: Array<[string, string]> = [
+    ["Bash", "mcp__cerelay__bash"],
+    ["Read", "mcp__cerelay__read"],
+    ["Write", "mcp__cerelay__write"],
+    ["Edit", "mcp__cerelay__edit"],
+    ["MultiEdit", "mcp__cerelay__multi_edit"],
+    ["Glob", "mcp__cerelay__glob"],
+    ["Grep", "mcp__cerelay__grep"],
+  ];
+  for (const [builtin, fqn] of cases) {
+    const result = await session.handleInjectedPreToolUse({
+      tool_name: builtin,
+      tool_use_id: `toolu_${builtin}`,
+      tool_input: {},
+    });
+    assert.equal(result.hookSpecificOutput?.permissionDecision, "deny", `${builtin} 应该 deny`);
+    assert.match(result.hookSpecificOutput?.permissionDecisionReason ?? "", new RegExp(fqn));
+  }
+  assert.equal(capture.toolCalls.length, 0, "全部 7 个工具不应触发任何 client 转发");
+
+  (session as unknown as { mcpIpcHost: unknown }).mcpIpcHost = null;
+  await session.close();
+});
+
+test("Phase 4: shadow MCP 未启用时 hook 路径仍走旧的 client 转发逻辑（不引导）", async () => {
+  const capture = createCapture();
+  const session = new ClaudePtySession({
+    id: "pty-fallback-disabled",
+    cwd: "/Users/dev/project",
+    runtime: createMockRuntime(),
+    transport: createTransport(capture, (requestId) => {
+      session.resolveToolResult(requestId, { output: { stdout: "ok\n", stderr: "", exit_code: 0 } });
+    }),
+    shadowMcp: { enabled: false },
+  });
+
+  const result = await session.handleInjectedPreToolUse({
+    tool_name: "Bash",
+    tool_use_id: "toolu_legacy",
+    tool_input: { command: "ls" },
+  });
+
+  // shadow MCP 未启用 → 仍走老路径：deny 但 reason 是真实 stdout（不是引导文案）
+  assert.equal(result.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(result.hookSpecificOutput?.permissionDecisionReason ?? "", /stdout:/);
+  assert.equal(capture.toolCalls.length, 1);
+  await session.close();
+});
+
 test("Phase 3: dispatch 路径 requestId 用 mcp- 前缀，跟 hook- 前缀区分", async () => {
   const capture = createCapture();
   const session = new ClaudePtySession({

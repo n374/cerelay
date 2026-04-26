@@ -17,7 +17,11 @@ import {
 import { resolveClaudeCodeExecutable } from "./claude-executable.js";
 import { isClientRoutedToolName } from "./tool-routing.js";
 import { MCPIpcHost, buildMcpIpcSocketPath } from "./mcp-ipc-host.js";
-import { buildShadowMcpInjectionArgs } from "./mcp-cc-injection.js";
+import {
+  buildShadowFallbackReason,
+  buildShadowMcpInjectionArgs,
+  SHADOWED_BUILTIN_TOOL_SET,
+} from "./mcp-cc-injection.js";
 
 const log = createLogger("pty-session");
 
@@ -298,6 +302,27 @@ export class ClaudePtySession {
           permissionDecisionReason: `Tool ${input.tool_name} approved`,
         },
       };
+    }
+
+    // Plan D §4.5：shadow MCP 已启用 + 模型违规调用了被 disallowedTools 列入
+    // 黑名单的内置工具（Bash/Read/Write/Edit/MultiEdit/Glob/Grep）→ 不执行，
+    // deny + permissionDecisionReason 引导模型改用 mcp__cerelay__X 替代。
+    // 模型下一轮会改用 shadow 版本，本轮仅浪费一次 round-trip。
+    if (this.mcpIpcHost && SHADOWED_BUILTIN_TOOL_SET.has(input.tool_name)) {
+      const fallback = buildShadowFallbackReason(input.tool_name);
+      if (fallback) {
+        this.log.info("PTY tool 命中 shadow 黑名单，引导模型改用 mcp__cerelay__*", {
+          toolName: input.tool_name,
+        });
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: fallback,
+            additionalContext: fallback,
+          },
+        };
+      }
     }
 
     const result = await this.executeToolViaClient(input.tool_name, input.tool_input, input.tool_use_id);

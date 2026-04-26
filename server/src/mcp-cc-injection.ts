@@ -124,3 +124,27 @@ export function buildShadowMcpInjectionArgs(input: ShadowMcpConfigInput): string
     SHADOWED_BUILTIN_TOOLS.join(","),
   ];
 }
+
+/**
+ * Plan D §4.5：shadow MCP 启用时模型违规调内置 Bash/Read/... 走到 PreToolUse
+ * hook，cerelay 直接 deny 并把 permissionDecisionReason 设成"用 mcp__cerelay__X
+ * 替代"的强提示，让模型下一轮改用正确工具。
+ *
+ * 返回 null 表示该 builtinName 不在 shadow 范围（无对应 mcp__cerelay__ 工具，
+ * 应该走原来的 client-routed 转发链）。
+ */
+export function buildShadowFallbackReason(builtinName: string): string | null {
+  const shadow = SHADOW_TOOLS.find((tool) => tool.builtinName === builtinName);
+  if (!shadow) {
+    return null;
+  }
+  const fqn = fullyQualifiedShadowToolName(shadow.shortName);
+  return (
+    `Tool '${builtinName}' is not available in this sandboxed runtime. ` +
+    `Use ${fqn} instead—it has the same schema and routes to the user's actual ` +
+    `workspace via the cerelay tool relay.`
+  );
+}
+
+/** SHADOWED_BUILTIN_TOOLS 的 Set 形式，pty-session 快速判断用。 */
+export const SHADOWED_BUILTIN_TOOL_SET = new Set<string>(SHADOWED_BUILTIN_TOOLS);
