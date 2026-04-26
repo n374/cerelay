@@ -9,6 +9,7 @@
 
 import { connect, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import type { RemoteToolResult } from "../relay.js";
 import {
   decodeIpcLines,
   encodeIpcMessage,
@@ -25,11 +26,8 @@ export interface IpcClientOptions {
   connectTimeoutMs?: number;
 }
 
-export interface IpcToolResult {
-  output?: unknown;
-  summary?: string;
-  error?: string;
-}
+/** 复用主进程侧 ToolRelay 的结果形态，避免平行类型抽象。 */
+export type IpcToolResult = RemoteToolResult;
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
@@ -82,33 +80,56 @@ export class IpcClient {
     const socket = connect(this.socketPath);
     this.socket = socket;
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        socket.destroy();
-        reject(new Error(`IpcClient 连接超时（socket=${this.socketPath}）`));
-      }, this.connectTimeoutMs);
-      socket.once("connect", () => {
-        clearTimeout(timer);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error(`IpcClient 连接超时（socket=${this.socketPath}）`));
+        }, this.connectTimeoutMs);
+        socket.once("connect", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        socket.once("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
       });
-      socket.once("error", (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
+    } catch (err) {
+      this.socket = null;
+      throw err;
+    }
 
     this.connected = true;
     socket.setNoDelay(true);
-    socket.on("data", (chunk: Buffer) => this.handleData(chunk));
-    socket.on("close", () => this.handleClose());
-    socket.on("error", () => undefined);
 
-    // 发送 hello 帧并等 ack。
-    const helloAck = await this.sendHelloAndAwaitAck();
+    // 发送 hello 帧并等 ack（超时和 socket close-race 都要兜住）。
+    // 注意：握手期间不要注册 long-running data/close listener，
+    // 否则会跟 sendHelloAndAwaitAck 内部 listener 抢 buffer/事件。
+    let helloAck: { ok: boolean; error?: string };
+    try {
+      helloAck = await this.sendHelloAndAwaitAck();
+    } catch (err) {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+      this.socket = null;
+      this.connected = false;
+      throw err;
+    }
     if (!helloAck.ok) {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+      this.socket = null;
+      this.connected = false;
       throw new Error(`IpcClient hello 失败：${helloAck.error ?? "unknown"}`);
     }
     this.authenticated = true;
+    // 握手完成后才挂 long-running listeners。
+    socket.on("data", (chunk: Buffer) => this.handleData(chunk));
+    socket.on("close", () => this.handleClose());
+    socket.on("error", () => undefined);
   }
 
   private async sendHelloAndAwaitAck(): Promise<{ ok: boolean; error?: string }> {
@@ -117,24 +138,47 @@ export class IpcClient {
     }
     const socket = this.socket;
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        socket.off("data", onData);
+        socket.off("error", onErr);
+        socket.off("close", onClose);
+        clearTimeout(timer);
+      };
       const onData = (chunk: Buffer) => {
         this.buffer += chunk.toString("utf8");
         const { messages, rest } = decodeIpcLines(this.buffer);
         this.buffer = rest;
         for (const message of messages) {
-          if (message.type === "hello_ack") {
-            socket.off("data", onData);
+          if (message.type === "hello_ack" && !settled) {
+            settled = true;
+            cleanup();
             resolve({ ok: message.ok, error: message.error });
             return;
           }
         }
       };
       const onErr = (err: Error) => {
-        socket.off("data", onData);
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(err);
       };
+      const onClose = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("IpcClient hello 期间连接被对端关闭"));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`IpcClient hello 超时（${this.connectTimeoutMs}ms）`));
+      }, this.connectTimeoutMs);
       socket.on("data", onData);
       socket.once("error", onErr);
+      socket.once("close", onClose);
       socket.write(encodeIpcMessage({ type: "hello", token: this.token }));
     });
   }

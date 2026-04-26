@@ -11,6 +11,7 @@
 
 import { createServer, type Server, type Socket } from "node:net";
 import { mkdir, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { createLogger, type Logger } from "./logger.js";
 import {
@@ -20,6 +21,8 @@ import {
   type IpcToolCallRequest,
 } from "./mcp-routed/ipc-protocol.js";
 import type { RemoteToolResult } from "./relay.js";
+
+const HANDSHAKE_TIMEOUT_MS = 5_000;
 
 const log = createLogger("mcp-ipc-host");
 
@@ -50,6 +53,7 @@ export class MCPIpcHost {
   private buffer = "";
   private authenticated = false;
   private closed = false;
+  private handshakeTimer: NodeJS.Timeout | null = null;
 
   constructor(options: MCPIpcHostOptions) {
     this.sessionId = options.sessionId;
@@ -74,13 +78,28 @@ export class MCPIpcHost {
     server.on("error", (err) => {
       this.log.warn("MCPIpcHost server 异常", { error: err.message });
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(this.socketPath, () => {
-        server.off("error", reject);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          server.off("listening", onListen);
+          reject(err);
+        };
+        const onListen = () => {
+          server.off("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListen);
+        server.listen(this.socketPath);
       });
-    });
+    } catch (err) {
+      // listen 失败必须显式关闭 server，避免 fd 泄漏。
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      }).catch(() => undefined);
+      await unlink(this.socketPath).catch(() => undefined);
+      throw err;
+    }
     this.server = server;
     this.log.debug("MCPIpcHost 已 listen");
   }
@@ -90,12 +109,17 @@ export class MCPIpcHost {
       return;
     }
     this.closed = true;
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
     const server = this.server;
     this.server = null;
     if (this.activeSocket && !this.activeSocket.destroyed) {
       this.activeSocket.destroy();
     }
     this.activeSocket = null;
+    this.authenticated = false;
     if (server) {
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -126,6 +150,14 @@ export class MCPIpcHost {
     this.authenticated = false;
     this.buffer = "";
 
+    // 防御僵尸连接：握手必须在 HANDSHAKE_TIMEOUT_MS 内完成，否则 destroy。
+    this.handshakeTimer = setTimeout(() => {
+      if (this.activeSocket === socket && !this.authenticated) {
+        this.log.warn("MCPIpcHost 握手超时，断开连接");
+        socket.destroy();
+      }
+    }, HANDSHAKE_TIMEOUT_MS);
+
     socket.setNoDelay(true);
     socket.on("data", (chunk: Buffer) => {
       this.buffer += chunk.toString("utf8");
@@ -140,6 +172,10 @@ export class MCPIpcHost {
         this.activeSocket = null;
         this.authenticated = false;
         this.buffer = "";
+        if (this.handshakeTimer) {
+          clearTimeout(this.handshakeTimer);
+          this.handshakeTimer = null;
+        }
         this.log.debug("MCPIpcHost 连接关闭");
       }
     });
@@ -156,16 +192,16 @@ export class MCPIpcHost {
         return;
       }
       if (message.token !== this.token) {
-        this.writeMessage(socket, {
-          type: "hello_ack",
-          ok: false,
-          error: "invalid token",
-        });
         this.log.warn("MCPIpcHost token 不匹配，拒绝连接");
-        socket.destroy();
+        // 用 socket.end(...) 让 ack 帧在 close 前完整发出，避免对端读不到 ok:false。
+        socket.end(encodeIpcMessage({ type: "hello_ack", ok: false, error: "invalid token" }));
         return;
       }
       this.authenticated = true;
+      if (this.handshakeTimer) {
+        clearTimeout(this.handshakeTimer);
+        this.handshakeTimer = null;
+      }
       this.writeMessage(socket, { type: "hello_ack", ok: true });
       this.log.debug("MCPIpcHost 子进程已认证");
       return;
@@ -217,11 +253,22 @@ export class MCPIpcHost {
 
 /**
  * 选择一个长度安全的 socket 路径。
- * Pick a socket path within Unix socket length limit (108 bytes on Linux).
+ * Pick a socket path within the strictest Unix socket sun_path limit:
+ *   - macOS: 104 bytes including NUL → string ≤ 103
+ *   - Linux: 108 bytes including NUL → string ≤ 107
+ * 我们硬卡到 macOS 上限（103）。
+ *
+ * 长 sessionId 用 sha256 截 16 hex（64 bit 抗碰撞足够），不再原样拼接。
  */
+export const MAX_UNIX_SOCKET_PATH_LENGTH = 103;
+
 export function buildMcpIpcSocketPath(rootDir: string, sessionId: string): string {
-  // sessionId 形如 "pty-<ms>-<uuid>"（54 char），rootDir 通常 < 30 char。
-  // 整体路径稳定 < 108 char。
-  const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "-");
-  return path.join(rootDir, `mcp-${safeId}.sock`);
+  const hash = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+  const candidate = path.join(rootDir, `mcp-${hash}.sock`);
+  if (Buffer.byteLength(candidate, "utf8") > MAX_UNIX_SOCKET_PATH_LENGTH) {
+    throw new Error(
+      `mcp socket path 超出长度上限 ${MAX_UNIX_SOCKET_PATH_LENGTH}：${candidate}（rootDir 太长，请改用更短的 socket 目录）`,
+    );
+  }
+  return candidate;
 }

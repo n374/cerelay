@@ -14,7 +14,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -25,7 +24,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROUTED_ENTRY = path.resolve(HERE, "../src/mcp-routed/index.ts");
 
 test("mcp-routed 子进程 echo 工具端到端：MCP tools/call → IPC tool_call → result", async (t) => {
-  const dir = await mkdtemp(path.join(tmpdir(), "cerelay-mcp-skeleton-"));
+  // macOS sun_path 限制 104 byte，tmpdir() 在 macOS 是 /var/folders/...
+  // 太长，用 /tmp 配合 mkdtemp 保证 socket 路径在限制内。
+  const dir = await mkdtemp(path.join("/tmp", "cerelay-mcp-skeleton-"));
   const sessionId = "pty-skeleton-1";
   const socketPath = buildMcpIpcSocketPath(dir, sessionId);
 

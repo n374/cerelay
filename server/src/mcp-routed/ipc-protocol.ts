@@ -71,9 +71,41 @@ function parseIpcLine(line: string): IpcMessage | null {
   if (!value || typeof value !== "object") {
     return null;
   }
-  const type = (value as { type?: unknown }).type;
-  if (type !== "hello" && type !== "hello_ack" && type !== "tool_call" && type !== "tool_result") {
-    return null;
+  const obj = value as Record<string, unknown>;
+  switch (obj.type) {
+    case "hello":
+      return typeof obj.token === "string" ? ({ type: "hello", token: obj.token } satisfies IpcHello) : null;
+    case "hello_ack":
+      if (typeof obj.ok !== "boolean") {
+        return null;
+      }
+      return {
+        type: "hello_ack",
+        ok: obj.ok,
+        error: typeof obj.error === "string" ? obj.error : undefined,
+      } satisfies IpcHelloAck;
+    case "tool_call":
+      if (typeof obj.id !== "string" || typeof obj.toolName !== "string") {
+        return null;
+      }
+      return {
+        type: "tool_call",
+        id: obj.id,
+        toolName: obj.toolName,
+        input: obj.input,
+      } satisfies IpcToolCallRequest;
+    case "tool_result":
+      if (typeof obj.id !== "string") {
+        return null;
+      }
+      return {
+        type: "tool_result",
+        id: obj.id,
+        output: obj.output,
+        summary: typeof obj.summary === "string" ? obj.summary : undefined,
+        error: typeof obj.error === "string" ? obj.error : undefined,
+      } satisfies IpcToolCallResponse;
+    default:
+      return null;
   }
-  return value as IpcMessage;
 }

@@ -36,3 +36,39 @@ test("decodeIpcLines 处理无 \\n 收尾的不完整缓冲", () => {
   assert.equal(messages.length, 0);
   assert.equal(rest, '{"type":"hello","token":"x"');
 });
+
+test("decodeIpcLines 拒绝缺少必填字段的 tool_call（防 toolName=undefined 进 dispatcher）", () => {
+  // 缺 toolName
+  const buf = `{"type":"tool_call","id":"1","input":{}}\n{"type":"tool_call","id":"2","toolName":"Bash","input":{}}\n`;
+  const { messages } = decodeIpcLines(buf);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.type, "tool_call");
+});
+
+test("decodeIpcLines 拒绝 hello 缺 token / hello_ack 缺 ok / tool_result 缺 id", () => {
+  const buf = [
+    `{"type":"hello"}`,
+    `{"type":"hello_ack"}`,
+    `{"type":"tool_result","output":"x"}`,
+    `{"type":"hello","token":"good"}`,
+  ].join("\n") + "\n";
+  const { messages } = decodeIpcLines(buf);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.type, "hello");
+});
+
+test("decodeIpcLines 跨多 chunk 累积才能切出完整行（半包重组）", () => {
+  // 模拟 socket 多 chunk 投递。
+  let leftover = "";
+  const collected: string[] = [];
+  for (const chunk of ['{"type":"', 'hello","tok', 'en":"abc"}\n{"type":"hel', 'lo_ack","ok":true}\n']) {
+    leftover += chunk;
+    const { messages, rest } = decodeIpcLines(leftover);
+    leftover = rest;
+    for (const m of messages) {
+      collected.push(m.type);
+    }
+  }
+  assert.deepEqual(collected, ["hello", "hello_ack"]);
+  assert.equal(leftover, "");
+});

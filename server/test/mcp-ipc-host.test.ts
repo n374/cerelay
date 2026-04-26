@@ -2,9 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { connect, type Socket } from "node:net";
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { MCPIpcHost, buildMcpIpcSocketPath, type ToolCallDispatcher } from "../src/mcp-ipc-host.js";
+import {
+  MCPIpcHost,
+  MAX_UNIX_SOCKET_PATH_LENGTH,
+  buildMcpIpcSocketPath,
+  type ToolCallDispatcher,
+} from "../src/mcp-ipc-host.js";
 import {
   decodeIpcLines,
   encodeIpcMessage,
@@ -81,7 +85,9 @@ async function setupHost(dispatcher: ToolCallDispatcher): Promise<{
   socketPath: string;
   cleanup: () => Promise<void>;
 }> {
-  const dir = await mkdtemp(path.join(tmpdir(), "cerelay-mcp-host-"));
+  // macOS sun_path 限制 104 byte，要求短 dir。tmpdir() 在 macOS 是
+  // /var/folders/... 太长，统一用 /tmp 配合 mkdtemp。
+  const dir = await mkdtemp(path.join("/tmp", "cerelay-mcp-host-"));
   const sessionId = "pty-test-1";
   const socketPath = buildMcpIpcSocketPath(dir, sessionId);
   const host = new MCPIpcHost({
@@ -204,8 +210,28 @@ test("MCPIpcHost 拒绝并发连接（同时只允许一个活跃 child）", asy
   }
 });
 
-test("buildMcpIpcSocketPath 总长度低于 Unix socket 限制 108", () => {
+test("buildMcpIpcSocketPath 用 sha256 截短 sessionId，总长度 ≤ MAX_UNIX_SOCKET_PATH_LENGTH（macOS 安全）", () => {
   const sid = "pty-1234567890123-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const sock = buildMcpIpcSocketPath("/tmp", sid);
-  assert.ok(sock.length < 108, `socket path too long: ${sock.length} for ${sock}`);
+  // sessionId 不应原样出现：用 hash 截短。
+  assert.equal(sock.includes(sid), false, "sessionId 不应原样拼进 socket 路径");
+  assert.match(sock, /\/tmp\/mcp-[0-9a-f]{16}\.sock$/);
+  assert.ok(
+    Buffer.byteLength(sock, "utf8") <= MAX_UNIX_SOCKET_PATH_LENGTH,
+    `socket path too long: ${sock.length} for ${sock}`,
+  );
+});
+
+test("buildMcpIpcSocketPath rootDir 过长时抛错（防 sun_path 溢出）", () => {
+  const longDir = "/tmp/" + "a".repeat(MAX_UNIX_SOCKET_PATH_LENGTH);
+  assert.throws(
+    () => buildMcpIpcSocketPath(longDir, "pty-x"),
+    /mcp socket path 超出长度上限/,
+  );
+});
+
+test("buildMcpIpcSocketPath 同一 sessionId 路径稳定（同一 hash）", () => {
+  const a = buildMcpIpcSocketPath("/tmp", "pty-stable-1");
+  const b = buildMcpIpcSocketPath("/tmp", "pty-stable-1");
+  assert.equal(a, b);
 });
