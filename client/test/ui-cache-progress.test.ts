@@ -282,6 +282,26 @@ test("CacheSyncProgressView 完整事件流：扫描 → 上传 → 完成", () 
   assert.match(output, /同步完成/);
 });
 
+test("CacheSyncProgressView scan_done 之前会渲染一帧 100% hash 状态", () => {
+  // 回归：之前 scan_done 直接 clearLines + "✓ 扫描..."，如果 hash_progress 没
+  // 触发到 totalFiles（或被外部 stdout 写入污染了行追踪导致 clearLines 漏擦），
+  // scrollback 里 "计算文件指纹" 的最后快照就会停在中间百分比
+  const { out, getOutput } = makeMockOut();
+  const view = new CacheSyncProgressView({ out });
+
+  view.handle({ kind: "scan_start" });
+  view.handle({ kind: "walk_done", totalFiles: 10 });
+  // 故意只发送中间的一个 hash_progress 就触发 scan_done
+  view.handle({ kind: "hash_progress", completedFiles: 4, totalFiles: 10 });
+  view.handle({ kind: "scan_done", totalFiles: 10, totalBytes: 1024, elapsedMs: 50 });
+  view.dispose();
+
+  const plain = getOutput().replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  assert.ok(plain.includes("已 hash 10/10 文件"), "scan_done 前应当渲染一帧 hash 100% 状态");
+  assert.match(plain, /扫描 Claude 配置/);
+  assert.ok(plain.indexOf("已 hash 10/10 文件") < plain.indexOf("扫描 Claude 配置"));
+});
+
 test("CacheSyncProgressView upload_done 之前会渲染一帧 100% 状态", () => {
   // 回归：之前的 bug 是 upload_done 直接 clearLines + "✓ 同步完成"，最后一次
   // 100ms tick 没赶上的话，scrollback 里 "同步中" 的最后快照会停在中间百分比，
@@ -329,6 +349,52 @@ test("CacheSyncProgressView upload_done 之前会渲染一帧 100% 状态", () =
   assert.match(plain, /同步完成/);
   // 100% 那帧必须在 "同步完成" 之前出现
   assert.ok(plain.indexOf("100.0%") < plain.indexOf("同步完成"));
+});
+
+test("CacheSyncProgressView printPersistent 在 sync 活动期把内容写到 spinner 上方并重渲 spinner", () => {
+  // 这是修复 [PTY 已连接] 与 cache sync spinner 互相破坏的核心契约：
+  // 持久行不能直接 process.stdout.write（会污染 linesRendered 行追踪），必须
+  // 走 printPersistent → 先 clearLines 擦 spinner、写持久行 + \n、立即重渲 spinner
+  const { out, getOutput } = makeMockOut();
+  const view = new CacheSyncProgressView({ out });
+
+  view.handle({ kind: "scan_start" });
+  view.handle({ kind: "walk_done", totalFiles: 5 });
+  view.handle({ kind: "hash_progress", completedFiles: 1, totalFiles: 5 });
+  // 模拟外部代码在 sync 进行中写入 [PTY 已连接]
+  view.printPersistent("[PTY 已连接] Session: pty-xyz\r\n");
+  view.handle({ kind: "hash_progress", completedFiles: 2, totalFiles: 5 });
+  view.handle({ kind: "scan_done", totalFiles: 5, totalBytes: 100, elapsedMs: 20 });
+  view.dispose();
+
+  const plain = getOutput().replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  // 持久行应当出现在最终输出里（没被后续 spinner 重渲擦掉）
+  assert.match(plain, /\[PTY 已连接\] Session: pty-xyz/);
+  // 持久行写完后必然会 re-render spinner，所以 hash 行紧跟其后再次出现
+  const ptyIdx = plain.indexOf("[PTY 已连接]");
+  const hashAfterPty = plain.indexOf("计算文件指纹", ptyIdx);
+  assert.ok(hashAfterPty > ptyIdx, "printPersistent 后应当立即重渲 spinner");
+  // 最终 ✓ 扫描必然在 [PTY 已连接] 之后
+  assert.ok(plain.indexOf("扫描 Claude 配置") > ptyIdx);
+});
+
+test("CacheSyncProgressView printPersistent 在 idle/done 状态直接 stdout 写入", () => {
+  const { out, getOutput } = makeMockOut();
+  const view = new CacheSyncProgressView({ out });
+
+  // idle 状态：sync 还没启动
+  view.printPersistent("startup line\n");
+  // done 状态：sync 已结束
+  view.handle({ kind: "scan_start" });
+  view.handle({ kind: "scan_done", totalFiles: 1, totalBytes: 1, elapsedMs: 1 });
+  view.handle({ kind: "upload_start", totalFiles: 0, totalBytes: 0 });
+  view.handle({ kind: "upload_done", totalFiles: 0, totalBytes: 0, elapsedMs: 1 });
+  view.printPersistent("after-done line");
+
+  const plain = getOutput().replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  assert.match(plain, /startup line/);
+  // 没有尾随 \n 的也会自动补
+  assert.match(plain, /after-done line\n/);
 });
 
 test("CacheSyncProgressView 每次 render 写入的内容都以换行收尾，避免外部 stdout 拼接", () => {

@@ -583,6 +583,19 @@ export class CerelayClient {
     }
   }
 
+  /**
+   * 写一行持久输出（如 `[PTY 已连接]`、日志路径），保证不会与启动期 cache sync
+   * spinner 互相破坏：sync 活动时走 progress view 的 print-above-spinner 路径，
+   * 否则直接 stdout。所有需要在启动早期阶段打印的"非 spinner"行都应走此 API。
+   */
+  printAboveSyncProgress(content: string): void {
+    if (this.cacheSyncView) {
+      this.cacheSyncView.printPersistent(content);
+      return;
+    }
+    process.stdout.write(content);
+  }
+
   private disposeCacheSyncView(): void {
     this.cacheSyncView?.dispose();
     this.cacheSyncView = null;

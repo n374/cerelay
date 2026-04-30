@@ -117,10 +117,14 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
   try {
     await client.connect();
     const sessionId = await client.sendCreatePtySession(cwd);
-    process.stdout.write(`\x1b[36m[PTY 已连接] Session: ${sessionId}\x1b[0m\r\n`);
+    // 走 printAboveSyncProgress：启动期 cache sync 仍在进行时，这两行会经由
+    // progress view 在 spinner 之上"持久化"——先擦 spinner、写持久行、再立刻
+    // 重渲 spinner。否则直接 process.stdout.write 会污染 spinner 的 cursor 行
+    // 追踪，导致下一次 clearLines 漏擦或误擦
+    client.printAboveSyncProgress(`\x1b[36m[PTY 已连接] Session: ${sessionId}\x1b[0m\r\n`);
     const logFilePath = getLogFilePath();
     if (logFilePath) {
-      process.stdout.write(`\x1b[90m日志文件: ${logFilePath} （查看: npm start -- logs）\x1b[0m\r\n`);
+      client.printAboveSyncProgress(`\x1b[90m日志文件: ${logFilePath} （查看: npm start -- logs）\x1b[0m\r\n`);
     }
     await client.runPtyPassthrough(sessionId);
   } catch (err) {

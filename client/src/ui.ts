@@ -203,6 +203,14 @@ export class CacheSyncProgressView {
 
       case "scan_done":
         this.stopTimer();
+        if (this.hashTotalFiles > 0) {
+          // 同 upload_done 的处理：把 hash 进度强行推到 100% 重绘一帧，避免
+          // 最后一次 hash_progress 没赶上 100% 就直接被 clearLines 抹掉，让
+          // scrollback 残留中间百分比。即便外部 stdout 写入污染了行追踪，这一帧
+          // 也会替换掉残留的旧 hash 行
+          this.hashCompletedFiles = this.hashTotalFiles;
+          this.renderScan();
+        }
         this.clearLines();
         this.out.write(
           `${colorCyan}✓${colorReset} 扫描 Claude 配置 (${event.totalFiles} 文件, ${formatBytes(event.totalBytes)}, ${formatDuration(event.elapsedMs)})\n`,
@@ -278,6 +286,31 @@ export class CacheSyncProgressView {
         this.state = "done";
         return;
     }
+  }
+
+  /**
+   * 在 spinner 上方写一行持久内容（如 `[PTY 已连接]`、日志路径等）。
+   *
+   * 设计：cache sync 与外部 stdout 写入并行时，linesRendered 只追踪我们自己写的
+   * 行数，无法感知外部写入造成的 cursor 位移。一旦外部代码直接 `process.stdout.write`，
+   * 下次 clearLines 用 `\x1b[1A` × linesRendered 上移就会跨过外部行，留下脏屏。
+   *
+   * 解决：所有持久行必须经此 API 走"先擦 spinner、写持久行、再立即重渲 spinner"
+   * 三步：擦 spinner 后 cursor 落在内容首行 col 0，写持久行 + \n 后 cursor 落在新
+   * 一行，re-render 让 spinner 重新出现在持久行下方。spinner 始终"占据"终端最底部。
+   *
+   * 不在 scanning/uploading 状态时（idle/done）：spinner 不存在，直接写。
+   */
+  printPersistent(content: string): void {
+    const text = content.endsWith("\n") ? content : `${content}\n`;
+    if (this.state !== "scanning" && this.state !== "uploading") {
+      this.out.write(text);
+      return;
+    }
+    this.clearLines();
+    this.out.write(text);
+    // 立即重绘 spinner 让它落到持久行下方；不等 100ms tick 否则会有短暂"消失"
+    this.render();
   }
 
   /**
