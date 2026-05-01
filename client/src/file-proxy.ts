@@ -234,9 +234,21 @@ export class FileProxyHandler {
    */
   private async doSnapshot(rootPath: string, maxDepth = 5): Promise<FileProxySnapshotEntry[]> {
     const results: FileProxySnapshotEntry[] = [];
+    // 诊断：scan() 入口失败、子项 stat 失败、最深 depth、被 maxDepth 截断的目录数。
+    // 用来回答 "为什么 server 端 FUSE 还在 perforate skills/bytedcli 这种 depth 浅的路径"——
+    // 如果 stat 静默失败被 silent-skip，snapshot 就不全；如果 maxDepth 过浅，深路径不被覆盖。
+    let dirEntryFailures = 0;
+    let childStatFailures = 0;
+    let maxDepthSeen = 0;
+    let truncatedAtMaxDepth = 0;
+    const sampleChildStatErrors: string[] = [];
 
     const scan = async (dirPath: string, depth: number): Promise<void> => {
-      if (depth > maxDepth) return;
+      if (depth > maxDepth) {
+        truncatedAtMaxDepth++;
+        return;
+      }
+      if (depth > maxDepthSeen) maxDepthSeen = depth;
 
       let entries: string[];
       let dirStat: FileProxyStat;
@@ -253,6 +265,7 @@ export class FileProxyHandler {
         };
         entries = await readdir(dirPath);
       } catch {
+        dirEntryFailures++;
         return;
       }
 
@@ -277,9 +290,18 @@ export class FileProxyHandler {
       );
 
       const subdirs: Promise<void>[] = [];
-      for (const result of childStats) {
-        if (result.status !== "fulfilled") continue;
-        const { fullPath, fileStat, isDir, size } = result.value;
+      for (let i = 0; i < childStats.length; i++) {
+        const result = childStats[i];
+        if (result.status !== "fulfilled") {
+          childStatFailures++;
+          if (sampleChildStatErrors.length < 10) {
+            const failedPath = path.join(dirPath, entries[i]);
+            const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+            sampleChildStatErrors.push(`${failedPath} :: ${reason}`);
+          }
+          continue;
+        }
+        const { fullPath, fileStat, isDir } = result.value;
 
         if (isDir) {
           results.push({ path: fullPath, stat: fileStat });
@@ -294,7 +316,20 @@ export class FileProxyHandler {
       await Promise.allSettled(subdirs);
     };
 
+    const startedAt = Date.now();
     await scan(rootPath, 0);
+
+    log.info("doSnapshot 已完成", {
+      rootPath,
+      maxDepth,
+      maxDepthSeen,
+      truncatedAtMaxDepth,
+      entryCount: results.length,
+      dirEntryFailures,
+      childStatFailures,
+      sampleChildStatErrors,
+      durationMs: Date.now() - startedAt,
+    });
     return results;
   }
 

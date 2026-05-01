@@ -69,13 +69,38 @@ class Cache:
         self._readdir_ttl = 10.0
         self._read_ttl = 10.0
         self._read_max_size = 256 * 1024  # 256KB
+        # 诊断计数器：区分 "key 不在 cache" 和 "在但 TTL 过期"，让用户判断 snapshot
+        # 是不完整还是只是被 TTL 限制。
+        self.stat_hit = 0
+        self.stat_miss_absent = 0   # 完全不在 _stat 字典里
+        self.stat_miss_expired = 0  # 在但 TTL 过期
+        self.readdir_hit = 0
+        self.readdir_miss_absent = 0
+        self.readdir_miss_expired = 0
+        self.read_hit = 0
+        self.read_miss_absent = 0
+        self.read_miss_expired = 0
+        # 抽样未命中的 path（区分缺失 vs 过期），帮诊断"为什么没命中"
+        self.miss_samples = []  # list of (kind, reason, path)
+        self._miss_sample_cap = 40
+
+    def _record_miss_sample(self, kind, reason, path):
+        if len(self.miss_samples) < self._miss_sample_cap:
+            self.miss_samples.append((kind, reason, path))
 
     def get_stat(self, path):
         with self._lock:
             entry = self._stat.get(path)
-            if entry and (time.monotonic() - entry[0]) < self._stat_ttl:
-                return entry[1]
-        return None
+            if entry is None:
+                self.stat_miss_absent += 1
+                self._record_miss_sample("stat", "absent", path)
+                return None
+            if (time.monotonic() - entry[0]) >= self._stat_ttl:
+                self.stat_miss_expired += 1
+                self._record_miss_sample("stat", "expired", path)
+                return None
+            self.stat_hit += 1
+            return entry[1]
 
     def put_stat(self, path, st):
         with self._lock:
@@ -84,9 +109,16 @@ class Cache:
     def get_readdir(self, path):
         with self._lock:
             entry = self._readdir.get(path)
-            if entry and (time.monotonic() - entry[0]) < self._readdir_ttl:
-                return entry[1]
-        return None
+            if entry is None:
+                self.readdir_miss_absent += 1
+                self._record_miss_sample("readdir", "absent", path)
+                return None
+            if (time.monotonic() - entry[0]) >= self._readdir_ttl:
+                self.readdir_miss_expired += 1
+                self._record_miss_sample("readdir", "expired", path)
+                return None
+            self.readdir_hit += 1
+            return entry[1]
 
     def put_readdir(self, path, entries):
         with self._lock:
@@ -95,10 +127,17 @@ class Cache:
     def get_read(self, path, offset, size):
         with self._lock:
             entry = self._read.get(path)
-            if entry and (time.monotonic() - entry[0]) < self._read_ttl:
-                data = entry[1]
-                return data[offset:offset + size]
-        return None
+            if entry is None:
+                self.read_miss_absent += 1
+                self._record_miss_sample("read", "absent", path)
+                return None
+            if (time.monotonic() - entry[0]) >= self._read_ttl:
+                self.read_miss_expired += 1
+                self._record_miss_sample("read", "expired", path)
+                return None
+            self.read_hit += 1
+            data = entry[1]
+            return data[offset:offset + size]
 
     def put_read_full(self, path, data):
         if len(data) > self._read_max_size:
@@ -707,6 +746,9 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
     try:
         with open(_snapshot_file, "r") as f:
             _snapshot = json.load(f)
+        _stat_keys = list(_snapshot.get("stats", {}).keys())
+        _readdir_keys = list(_snapshot.get("readdirs", {}).keys())
+        _read_keys = list(_snapshot.get("reads", {}).keys())
         _loaded = 0
         for path_key, stat_val in _snapshot.get("stats", {}).items():
             _cache.put_stat(path_key, stat_val)
@@ -717,9 +759,55 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
         for path_key, data_val in _snapshot.get("reads", {}).items():
             _cache.put_read_full(path_key, base64.b64decode(data_val))
             _loaded += 1
-        sys.stderr.write(f"[FUSE] cache snapshot loaded: {_loaded} entries from {_snapshot_file}\n")
+        # 诊断：snapshot 载入完毕的总条数 + 各类型 key 数 + 头/尾抽样 path。
+        # 用 [FUSE-DIAG] 前缀以便 server 端把这一行提到 INFO。
+        def _sample(keys, n=3):
+            if not keys:
+                return []
+            head = keys[:n]
+            tail = keys[-n:] if len(keys) > n else []
+            return head + (["..."] + tail if tail and head[-1] != tail[0] else [])
+        sys.stderr.write(
+            f"[FUSE-DIAG] snapshot loaded: total={_loaded} "
+            f"stats={len(_stat_keys)} readdirs={len(_readdir_keys)} reads={len(_read_keys)} "
+            f"stat_sample={_sample(_stat_keys)} "
+            f"readdir_sample={_sample(_readdir_keys)} "
+            f"read_sample={_sample(_read_keys)}\n"
+        )
     except Exception as e:
-        sys.stderr.write(f"[FUSE] cache snapshot load failed (cold start): {e}\n")
+        sys.stderr.write(f"[FUSE-DIAG] snapshot load failed (cold start): {e}\n")
+else:
+    sys.stderr.write(
+        f"[FUSE-DIAG] snapshot file unavailable (cold start): "
+        f"file={_snapshot_file or '<unset>'} exists={os.path.isfile(_snapshot_file) if _snapshot_file else False}\n"
+    )
+
+# 启动期周期诊断线程：每 5s 输出一次 cache hit/miss 计数 + 抽样未命中 path。
+# 60s 后停。
+def _cache_stats_reporter():
+    started_at = time.monotonic()
+    last_drained = 0
+    while True:
+        time.sleep(5.0)
+        elapsed = time.monotonic() - started_at
+        if elapsed > 60.0:
+            return
+        with _cache._lock:
+            stat_h, stat_a, stat_e = _cache.stat_hit, _cache.stat_miss_absent, _cache.stat_miss_expired
+            rd_h, rd_a, rd_e = _cache.readdir_hit, _cache.readdir_miss_absent, _cache.readdir_miss_expired
+            rd_r_h, rd_r_a, rd_r_e = _cache.read_hit, _cache.read_miss_absent, _cache.read_miss_expired
+            samples = list(_cache.miss_samples[last_drained:last_drained + 20])
+            last_drained = len(_cache.miss_samples)
+        sys.stderr.write(
+            f"[FUSE-DIAG] cache stats elapsed={elapsed:.1f}s "
+            f"stat(hit={stat_h} absent={stat_a} expired={stat_e}) "
+            f"readdir(hit={rd_h} absent={rd_a} expired={rd_e}) "
+            f"read(hit={rd_r_h} absent={rd_r_a} expired={rd_r_e}) "
+            f"recent_miss_samples={samples}\n"
+        )
+
+_diag_thread = threading.Thread(target=_cache_stats_reporter, daemon=True)
+_diag_thread.start()
 
 # 确保挂载点存在
 os.makedirs(MOUNT_POINT, exist_ok=True)

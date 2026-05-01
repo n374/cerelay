@@ -303,12 +303,25 @@ export class FileProxyManager {
     this.controlStream = child.stdio[3] as NodeJS.WritableStream;
 
     // 收集 stderr 用于异常退出时诊断
+    // [FUSE-DIAG] 前缀的行是诊断专用日志（snapshot 加载汇总、cache miss path、
+    // 周期 hit/miss 计数等），提升到 INFO 级别让它直接出现在 server 日志里，方便
+    // 对照 server 端 perforation log 看 Python 那侧到底是 cache 没命中还是没有 key。
     const stderrChunks: string[] = [];
     child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim();
-      if (text) {
-        stderrChunks.push(text);
-        log.debug("FUSE daemon stderr", { sessionId: this.sessionId, text });
+      const text = chunk.toString("utf8");
+      if (!text) return;
+      stderrChunks.push(text.trim());
+      for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("[FUSE-DIAG]")) {
+          log.info("FUSE daemon 诊断", {
+            sessionId: this.sessionId,
+            text: trimmed.slice("[FUSE-DIAG]".length).trim(),
+          });
+        } else {
+          log.debug("FUSE daemon stderr", { sessionId: this.sessionId, text: trimmed });
+        }
       }
     });
 
@@ -482,6 +495,24 @@ export class FileProxyManager {
 
     let entryCount = 0;
 
+    // 诊断：分别统计每个来源（cache / 各 root client）的条目数 + 抽样路径，
+    // 让用户判断 "snapshot 里到底有没有 skills/bytedcli 这种 path"。
+    const perSourceCounts: Record<string, number> = {};
+    const perSourceSamples: Record<string, string[]> = {};
+    const recordSampleFor = (source: string, path: string): void => {
+      perSourceCounts[source] = (perSourceCounts[source] ?? 0) + 1;
+      const samples = perSourceSamples[source] ?? (perSourceSamples[source] = []);
+      // 头 3 个 + 尾 3 个，便于看到 root 与深层路径同时存在
+      if (samples.length < 3) {
+        samples.push(path);
+      } else {
+        // 尾部用 ring buffer 保留最后 3 个
+        if (samples.length === 3) samples.push("...");
+        if (samples.length >= 7) samples.splice(4, 1);
+        samples.push(path);
+      }
+    };
+
     // 1. 先写入 cache 构造的条目
     for (const entry of cachedEntries) {
       entryCount++;
@@ -489,12 +520,13 @@ export class FileProxyManager {
       snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
       if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
       if (entry.data) snapshot.reads[cachePath] = entry.data;
+      recordSampleFor("cache", cachePath);
     }
 
     // 2. 再写入 Client 穿透拿到的条目（project-claude 等）
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
-      const { entries } = result.value;
+      const { rootName, entries } = result.value;
       if (!entries) continue;
       for (const entry of entries) {
         entryCount++;
@@ -502,10 +534,12 @@ export class FileProxyManager {
         snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
         if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
         if (entry.data) snapshot.reads[cachePath] = entry.data;
+        recordSampleFor(`client:${rootName}`, cachePath);
       }
     }
 
-    await writeFile(snapshotFile, JSON.stringify(snapshot), "utf8");
+    const snapshotJson = JSON.stringify(snapshot);
+    await writeFile(snapshotFile, snapshotJson, "utf8");
 
     const availability = this.explainCacheAvailability();
     log.info("FUSE 缓存快照已收集", {
@@ -517,6 +551,13 @@ export class FileProxyManager {
       cacheTaskState: availability.taskState,
       clientFetchedRoots: rootsToFetchFromClient.map(([r]) => r),
       durationMs: Date.now() - startedAt,
+      // 诊断：snapshot json 体积 + 每来源 entry 数 / 抽样 path，确认 snapshot 完整性
+      snapshotJsonBytes: Buffer.byteLength(snapshotJson, "utf8"),
+      perSourceCounts,
+      perSourceSamples,
+      statKeyCount: Object.keys(snapshot.stats).length,
+      readdirKeyCount: Object.keys(snapshot.readdirs).length,
+      readKeyCount: Object.keys(snapshot.reads).length,
     });
   }
 
