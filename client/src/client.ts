@@ -99,6 +99,15 @@ export class CerelayClient {
     this.isCacheTaskDisabledImpl = options.isCacheTaskDisabled ?? isCacheTaskDisabled;
     this.cacheTaskStateMachineFactory = options.cacheTaskStateMachineFactory
       ?? ((factoryOptions) => new CacheTaskStateMachine(factoryOptions));
+    configureLogger({
+      consoleSink: (line) => {
+        if (!this.cacheSyncView) {
+          return false;
+        }
+        this.cacheSyncView.printPersistent(line);
+        return true;
+      },
+    });
   }
 
   connect(): Promise<void> {
