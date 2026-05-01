@@ -62,9 +62,19 @@ _stdout_lock = threading.Lock()
 class Cache:
     def __init__(self):
         self._lock = threading.Lock()
+        # 运行时 cache：getattr 等 op 第一次穿透 client 后落缓存，TTL 限制以
+        # 应对 client 端文件被外部改动的情况（除 client cache_task watcher
+        # 命中的 invalidate 外，本地兜底 TTL 也很有意义）。
         self._stat = {}     # path → (timestamp, stat_dict)
         self._readdir = {}  # path → (timestamp, entries)
         self._read = {}     # path → (timestamp, bytes)
+        # snapshot 启动预填层：永久有效，不被 TTL 清掉。snapshot 已经反映了启动
+        # 那一刻 client 的真实状态，TTL 后失效会让真实存在的文件也穿透 client
+        # （实测启动 20s 后 skills/bytedcli-tce-single-cluster-deploy 这种深度
+        # 浅、肯定存在的 path 出现 perforation，就是 _stat TTL 到期的结果）。
+        self._stat_perm = {}    # path → stat_dict（无时间戳）
+        self._readdir_perm = {} # path → entries
+        self._read_perm = {}    # path → bytes
         # P0-1: snapshot 启动时预填的"已知 ENOENT path"（broken symlink 等）。
         # 永久有效（无 TTL）：snapshot 已经把 readdir 列出但 stat 失败的子项标好了。
         self._negative_perm = set()
@@ -132,6 +142,11 @@ class Cache:
 
     def get_stat(self, path):
         with self._lock:
+            # 永久层（snapshot 预填）优先，无 TTL
+            perm = self._stat_perm.get(path)
+            if perm is not None:
+                self.stat_hit += 1
+                return perm
             entry = self._stat.get(path)
             if entry is None:
                 self.stat_miss_absent += 1
@@ -150,6 +165,10 @@ class Cache:
 
     def get_readdir(self, path):
         with self._lock:
+            perm = self._readdir_perm.get(path)
+            if perm is not None:
+                self.readdir_hit += 1
+                return perm
             entry = self._readdir.get(path)
             if entry is None:
                 self.readdir_miss_absent += 1
@@ -168,6 +187,10 @@ class Cache:
 
     def get_read(self, path, offset, size):
         with self._lock:
+            perm = self._read_perm.get(path)
+            if perm is not None:
+                self.read_hit += 1
+                return perm[offset:offset + size]
             entry = self._read.get(path)
             if entry is None:
                 self.read_miss_absent += 1
@@ -187,6 +210,21 @@ class Cache:
         with self._lock:
             self._read[path] = (time.monotonic(), data)
 
+    # snapshot 启动预填用：永久层，无 TTL
+    def put_stat_perm(self, path, st):
+        with self._lock:
+            self._stat_perm[path] = st
+
+    def put_readdir_perm(self, path, entries):
+        with self._lock:
+            self._readdir_perm[path] = entries
+
+    def put_read_perm(self, path, data):
+        if len(data) > self._read_max_size:
+            return
+        with self._lock:
+            self._read_perm[path] = data
+
     def invalidate(self, path):
         with self._lock:
             self._stat.pop(path, None)
@@ -194,8 +232,13 @@ class Cache:
             parent = os.path.dirname(path)
             self._readdir.pop(parent, None)
             self._readdir.pop(path, None)
-            # 写/创建发生时，之前缓存的"不存在"必须立刻失效——否则文件已经创建
-            # 但 getattr 仍然返 ENOENT 会让 CC 看不到自己刚写的文件。
+            # 写/创建发生时，snapshot 预填的永久层也必须失效——否则 CC 写入后
+            # getattr 还会拿到旧 stat，readdir 还看不到新文件，read 拿到旧内容。
+            self._stat_perm.pop(path, None)
+            self._read_perm.pop(path, None)
+            self._readdir_perm.pop(parent, None)
+            self._readdir_perm.pop(path, None)
+            # "不存在" 缓存同样要清——否则文件已经创建但 getattr 仍返 ENOENT。
             self._negative_perm.discard(path)
             self._negative.pop(path, None)
 
@@ -808,14 +851,17 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
         _read_keys = list(_snapshot.get("reads", {}).keys())
         _negative_keys = list(_snapshot.get("negatives", []))
         _loaded = 0
+        # 全部走 perm 层：snapshot 反映启动那一刻 client 的真实状态，应当
+        # 永久有效；TTL 失效会让真实存在的文件在启动几十秒后还是穿透 client。
+        # 写/创建时 invalidate(path) 会把 perm 层连带清掉，一致性安全。
         for path_key, stat_val in _snapshot.get("stats", {}).items():
-            _cache.put_stat(path_key, stat_val)
+            _cache.put_stat_perm(path_key, stat_val)
             _loaded += 1
         for path_key, entries_val in _snapshot.get("readdirs", {}).items():
-            _cache.put_readdir(path_key, entries_val)
+            _cache.put_readdir_perm(path_key, entries_val)
             _loaded += 1
         for path_key, data_val in _snapshot.get("reads", {}).items():
-            _cache.put_read_full(path_key, base64.b64decode(data_val))
+            _cache.put_read_perm(path_key, base64.b64decode(data_val))
             _loaded += 1
         for neg_path in _negative_keys:
             _cache.put_negative_perm(neg_path)
