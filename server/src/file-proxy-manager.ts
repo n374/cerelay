@@ -199,6 +199,42 @@ export class FileProxyManager {
     return { available: true, reason: "ok_phase_ready", taskState: state };
   }
 
+  /**
+   * 阻塞等待 cache_task 进入 `ready`（spec §7.2 Defect 1 修复）。
+   *
+   * - phase=ready: 立即返回
+   * - phase=degraded/idle 或 task 不存在: 立即返回（fallback 走 client 全量）
+   * - phase=syncing: 50ms 轮询直到 ready 或转为 degraded/idle
+   * - 无 cacheTaskManager / 无 deviceId: 立即返回（无 cache 子系统, 沿用旧路径）
+   *
+   * **不设超时**：cache sync 体感耗时本质由 client walk + hash + push delta 决定；
+   * 设短超时反而让一部分 entry 走 fallback，违背修复目的。仅靠 phase 状态判定是否
+   * 可达 ready。
+   */
+  private async waitForCacheReadyOrDegraded(): Promise<void> {
+    if (!this.cacheTaskManager || !this.deviceId) return;
+    const startedAt = Date.now();
+    while (true) {
+      const state = this.cacheTaskManager.describeTaskState(this.deviceId, this.clientCwd);
+      if (state.phase === "ready") break;
+      if (!state.exists || state.phase === "degraded" || state.phase === "idle") {
+        log.warn("cache task 不可达 ready, 退化全量 walk", {
+          sessionId: this.sessionId,
+          phase: state.phase,
+          exists: state.exists,
+          waitedMs: Date.now() - startedAt,
+        });
+        return;
+      }
+      // phase=syncing: 等
+      await sleep(50);
+    }
+    log.info("snapshot 等 cache ready 完成", {
+      sessionId: this.sessionId,
+      waitedMs: Date.now() - startedAt,
+    });
+  }
+
   get mountPoint(): string {
     return this._mountPoint;
   }
@@ -448,6 +484,12 @@ export class FileProxyManager {
    */
   private async collectAndWriteSnapshot(snapshotFile: string): Promise<void> {
     const startedAt = Date.now();
+
+    // === Defect 1 修复 (spec §7.2): 阻塞等 cache ready, 无超时 ===
+    // 之前 phase=syncing 时直接走 fallback (client 全量) — 跟 cache 同步抢跑导致即便
+    // cache 已持久化 27000+ entries 仍走全量。现在: phase=syncing 阻塞等 ready,
+    // 仅 phase=degraded/idle/不存在 时才退化为 fallback (兜底, 不会无限阻塞 PTY 启动).
+    await this.waitForCacheReadyOrDegraded();
 
     // 区分 root：home-claude 和 home-claude-json 优先从 Server 侧缓存构造，
     // 避免启动时向 Client 发全量 snapshot 请求（单次 round-trip 变 0 次）。
