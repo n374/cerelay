@@ -204,6 +204,7 @@ export interface FileProxyResponse {
   data?: string;
   written?: number;
   snapshot?: FileProxySnapshotEntry[];
+  shallowestMissingAncestor?: string;
   /**
    * snapshot 期间扫到的"应当返回 ENOENT 的路径"。例如 broken symlink、
    * readdir 列出但 stat 失败的条目。FUSE 启动时直接预填到本地负缓存。
@@ -236,6 +237,19 @@ export interface CacheManifestData {
 export interface CacheTaskManifestSnapshot {
   revision: number;
   scopes: Record<CacheScope, CacheManifestData>;
+}
+
+export interface SyncPlan {
+  scopes: {
+    "claude-home"?: ScopeWalkInstruction;
+    "claude-json"?: ScopeWalkInstruction;
+  };
+}
+
+export interface ScopeWalkInstruction {
+  subtrees: Array<{ relPath: string; maxDepth: number }>;
+  files: string[];
+  knownMissing: string[];
 }
 
 export type CacheTaskRole = "active" | "inactive";
@@ -290,6 +304,7 @@ export interface CacheTaskAssignment {
   heartbeatIntervalMs: number;
   heartbeatTimeoutMs: number;
   manifest?: CacheTaskManifestSnapshot;
+  syncPlan?: SyncPlan;
 }
 
 export interface CacheTaskMutationHintTarget {

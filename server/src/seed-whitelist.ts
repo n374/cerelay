@@ -7,7 +7,7 @@
 //   3. node scripts/seed-whitelist-codegen.ts /tmp/seed.json > server/src/seed-whitelist.ts
 //   4. Commit the generated fixture.
 
-import type { SyncPlan } from "./sync-plan.js";
+import type { SyncPlan } from "./protocol.js";
 
 export const SEED_WHITELIST: Readonly<SyncPlan> = Object.freeze({
   scopes: {

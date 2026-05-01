@@ -1,20 +1,7 @@
 import path from "node:path";
 import type { AccessLedgerRuntime } from "./access-ledger.js";
+import type { ScopeWalkInstruction, SyncPlan } from "./protocol.js";
 import { SEED_WHITELIST } from "./seed-whitelist.js";
-
-// Temporary Phase 1 types. Phase 2 migrates these to protocol.ts.
-export interface SyncPlan {
-  scopes: {
-    "claude-home"?: ScopeWalkInstruction;
-    "claude-json"?: ScopeWalkInstruction;
-  };
-}
-
-export interface ScopeWalkInstruction {
-  subtrees: Array<{ relPath: string; maxDepth: number }>;
-  files: string[];
-  knownMissing: string[];
-}
 
 export interface ComputeSyncPlanArgs {
   ledger: AccessLedgerRuntime;
