@@ -83,10 +83,11 @@ test("Logger writes to file even when console is disabled", async (t) => {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
   const path = await import("node:path");
+  const { randomUUID } = await import("node:crypto");
 
   // 创建临时日志文件
   const tmpDir = os.tmpdir();
-  const testLogFile = path.join(tmpDir, `cerelay-test-${Date.now()}.log`);
+  const testLogFile = path.join(tmpDir, `cerelay-test-${randomUUID()}.log`);
 
   t.after(async () => {
     try {

@@ -12,8 +12,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -162,11 +163,11 @@ test("嫌疑2: Passthrough 模式当 Client cwd 不存在时，runtime.cwd 不�
   });
 
   // 直接构造一个明确不存在的 Client cwd，避免依赖宿主机 / 容器路径差异
-  const nonExistentClientCwd = `/tmp/cerelay-passthrough-missing-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const nonExistentClientCwd = path.join(tmpdir(), `cerelay-passthrough-missing-${randomUUID()}`);
   assert.ok(!existsSync(nonExistentClientCwd), "测试前提：Client cwd 必须不存在");
 
   const runtime = await createClaudeSessionRuntime({
-    sessionId: `passthrough-fallback-${Date.now()}`,
+    sessionId: `passthrough-fallback-${randomUUID()}`,
     cwd: nonExistentClientCwd,
   });
   t.after(async () => {
@@ -204,7 +205,7 @@ test("嫌疑2-对照: Passthrough 模式当 Client cwd 存在时，runtime.cwd �
 
   const existingCwd = tmpdir();
   const runtime = await createClaudeSessionRuntime({
-    sessionId: `passthrough-existing-${Date.now()}`,
+    sessionId: `passthrough-existing-${randomUUID()}`,
     cwd: existingCwd,
   });
   t.after(async () => {
@@ -230,11 +231,11 @@ test("嫌疑2: Bash ls 在 fallback cwd 中执行结果为空", async (t) => {
   });
 
   // 构造一个明确不存在的路径
-  const nonExistentCwd = `/tmp/cerelay-nonexistent-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const nonExistentCwd = path.join(tmpdir(), `cerelay-nonexistent-${randomUUID()}`);
   assert.ok(!existsSync(nonExistentCwd), "确保路径不存在");
 
   const runtime = await createClaudeSessionRuntime({
-    sessionId: `passthrough-bash-empty-${Date.now()}`,
+    sessionId: `passthrough-bash-empty-${randomUUID()}`,
     cwd: nonExistentCwd,
   });
   t.after(async () => {
@@ -375,9 +376,9 @@ if (expectMountNamespaceTests) {
 
 test("嫌疑3-集成: namespace 内 cwd 路径存在并含有 hook settings", { skip: !hasSysAdmin }, async (t) => {
   const { execSync } = await import("node:child_process");
-  const tempDir = await mkdir(path.join(tmpdir(), `ns-project-cwd-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "ns-project-cwd-"));
   const sourceParent = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
-  const sourceDir = await mkdir(path.join(sourceParent, `ns-project-source-${Date.now()}`), { recursive: true });
+  const sourceDir = await mkdtemp(path.join(sourceParent, "ns-project-source-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
     await rm(sourceDir, { recursive: true, force: true });

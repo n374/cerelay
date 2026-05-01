@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -132,7 +132,7 @@ test("credentials shadow file is always injected regardless of file existence", 
   // 新架构：凭证存放在 Data 目录（/var/lib/cerelay/credentials/default/.credentials.json），
   // 首次启动文件不存在是允许的——CC login 时 FUSE create 会创建它。
   // 因此 shadow file 映射必须总是注入，不得用 existsSync 跳过。
-  const tempDir = await mkdir(path.join(tmpdir(), `cred-test-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "cred-test-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -174,7 +174,7 @@ test("credentials shadow file targets Data directory path", () => {
 });
 
 test("PTY session combines hook injection and credentials shadow files", async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `pty-cred-test-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "pty-cred-test-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -254,7 +254,7 @@ test("FUSE host script handles shadow file writes locally instead of proxying to
 // ============================================================
 
 test("docker-entrypoint node merge script preserves existing fields", async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `entrypoint-test-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "entrypoint-test-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -290,7 +290,7 @@ fs.writeFileSync(p, JSON.stringify(obj) + '\\n');
 });
 
 test("docker-entrypoint node merge script works when .claude.json does not exist", async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `entrypoint-new-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "entrypoint-new-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -316,7 +316,7 @@ fs.writeFileSync(p, JSON.stringify(obj) + '\\n');
 });
 
 test("docker-entrypoint node merge script overwrites stale onboarding value", async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `entrypoint-overwrite-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "entrypoint-overwrite-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -364,7 +364,7 @@ if (expectMountNamespaceTests) {
 }
 
 test("integration: mount namespace bootstrap makes credentials visible via --rbind", { skip: !hasSysAdmin }, async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `ns-cred-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "ns-cred-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -403,7 +403,7 @@ test("integration: mount namespace bootstrap makes credentials visible via --rbi
 });
 
 test("integration: mount namespace bootstrap exposes all files under shared claude dir", { skip: !hasSysAdmin }, async (t) => {
-  const tempDir = await mkdir(path.join(tmpdir(), `ns-all-${Date.now()}`), { recursive: true });
+  const tempDir = await mkdtemp(path.join(tmpdir(), "ns-all-"));
   t.after(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });

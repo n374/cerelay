@@ -1,14 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { lookup } from "node:dns/promises";
 import WebSocket from "ws";
 
 const RUN_CONTAINER_SOCKS_TESTS = process.env.CERELAY_RUN_CONTAINER_SOCKS_TESTS === "true";
 
-const CERELAY_BASE_URL = process.env.CERELAY_SOCKS_TEST_BASE_URL || "http://172.28.0.10:8765";
-const CERELAY_WS_URL = process.env.CERELAY_SOCKS_TEST_WS_URL || "ws://172.28.0.10:8765/ws";
-const MOCK_SOCKS_ADMIN_URL = process.env.MOCK_SOCKS_ADMIN_URL || "http://172.28.0.2:18080";
-const MOCK_DNS_IP = process.env.MOCK_DNS_IP || "172.28.0.4";
-const EGRESS_PROBE_IP = process.env.EGRESS_PROBE_IP || "172.28.0.5";
+const CERELAY_BASE_URL = process.env.CERELAY_SOCKS_TEST_BASE_URL || "http://cerelay-socks-test:8765";
+const CERELAY_WS_URL = process.env.CERELAY_SOCKS_TEST_WS_URL || "ws://cerelay-socks-test:8765/ws";
+const MOCK_SOCKS_ADMIN_URL = process.env.MOCK_SOCKS_ADMIN_URL || "http://mock-socks:18080";
+const MOCK_DNS_HOST = process.env.MOCK_DNS_HOST || "mock-dns";
+const EGRESS_PROBE_HOST = process.env.EGRESS_PROBE_HOST || "egress-probe";
+const MOCK_DNS_A_RECORD = process.env.MOCK_DNS_A_RECORD || "203.0.113.10";
 
 const testIfEnabled = RUN_CONTAINER_SOCKS_TESTS ? test : test.skip;
 
@@ -21,9 +23,10 @@ testIfEnabled("container SOCKS PTY egress is routed through upstream SOCKS5", as
   assert.match(result.output, /pong from egress-probe/);
 
   const stats = await fetchJson(`${MOCK_SOCKS_ADMIN_URL}/stats`);
+  const expectedHosts = new Set([EGRESS_PROBE_HOST, MOCK_DNS_A_RECORD]);
   assert.ok(
-    stats.connects.some((entry) => entry.host === EGRESS_PROBE_IP && entry.port === 8080),
-    `expected CONNECT to ${EGRESS_PROBE_IP}:8080, got ${JSON.stringify(stats)}`
+    stats.connects.some((entry) => expectedHosts.has(entry.host) && entry.port === 8080),
+    `expected CONNECT to one of ${JSON.stringify([...expectedHosts])}:8080, got ${JSON.stringify(stats)}`
   );
 });
 
@@ -36,9 +39,10 @@ testIfEnabled("container SOCKS UDP=block still resolves DNS via TCP", async () =
   assert.match(result.output, /pong from egress-probe/);
 
   const stats = await fetchJson(`${MOCK_SOCKS_ADMIN_URL}/stats`);
+  const expectedHosts = await resolveExpectedHosts(MOCK_DNS_HOST);
   assert.ok(
-    stats.connects.some((entry) => entry.host === MOCK_DNS_IP && entry.port === 53),
-    `expected TCP DNS CONNECT to ${MOCK_DNS_IP}:53, got ${JSON.stringify(stats)}`
+    stats.connects.some((entry) => expectedHosts.has(entry.host) && entry.port === 53),
+    `expected TCP DNS CONNECT to one of ${JSON.stringify([...expectedHosts])}:53, got ${JSON.stringify(stats)}`
   );
 });
 
@@ -147,6 +151,17 @@ async function fetchJson(url, options) {
 
 async function postJson(url) {
   return fetchJson(url, { method: "POST" });
+}
+
+async function resolveExpectedHosts(host) {
+  const hosts = new Set([host]);
+  try {
+    const resolved = await lookup(host);
+    hosts.add(resolved.address);
+  } catch {
+    // The suite is skipped outside the compose network, where service DNS is unavailable.
+  }
+  return hosts;
 }
 
 function fetchWithTimeout(url, options) {

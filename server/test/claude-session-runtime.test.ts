@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClaudeSessionRuntime, getClaudeSessionRuntimeRoot } from "../src/claude-session-runtime.js";
@@ -19,7 +20,7 @@ test("createClaudeSessionRuntime preserves pre-created runtime files such as inj
     restoreEnvVar("CERELAY_ENABLE_MOUNT_NAMESPACE", originalMountNamespace);
   });
 
-  const sessionId = `runtime-preserve-${Date.now()}`;
+  const sessionId = `runtime-preserve-${randomUUID()}`;
   const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
   await rm(runtimeRoot, { recursive: true, force: true });
   await mkdir(path.join(runtimeRoot, "hooks"), { recursive: true });

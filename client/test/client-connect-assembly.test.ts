@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import os from "node:os";
+import path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { CerelayClient } from "../src/client.js";
 import { DEFAULT_EXCLUDE_DIRS, type CerelayConfig } from "../src/config.js";
@@ -37,6 +40,14 @@ function makeScanCacheStore(): ScanCacheStore {
     pruneToPresent() {},
     async flush() {},
   };
+}
+
+async function makeTestHome(t: { after(callback: () => void | Promise<void>): void }): Promise<string> {
+  const homedir = await mkdtemp(path.join(os.tmpdir(), "cerelay-home-"));
+  t.after(async () => {
+    await rm(homedir, { recursive: true, force: true });
+  });
+  return homedir;
 }
 
 async function startFakeBrain(): Promise<{
@@ -76,10 +87,11 @@ test("CerelayClient disableCacheTask=true 时不装配 loadConfig/openScanCache"
   let openScanCacheCalls = 0;
   let factoryOptions: CacheTaskStateMachineOptions | undefined;
   const stateMachine = new FakeCacheTaskStateMachine();
+  const homedir = await makeTestHome(t);
   const client = new CerelayClient(brain.url, "/repo", {
     interactiveOutput: false,
     deviceId: "device-1",
-    homedir: "/tmp/cerelay-home",
+    homedir,
     isCacheTaskDisabled: () => true,
     loadConfig: async () => {
       loadConfigCalls += 1;
@@ -117,10 +129,11 @@ test("CerelayClient loadConfig 抛错时 connect 仍完成，并回退默认配�
 
   const scanCache = makeScanCacheStore();
   let factoryOptions: CacheTaskStateMachineOptions | undefined;
+  const homedir = await makeTestHome(t);
   const client = new CerelayClient(brain.url, "/repo", {
     interactiveOutput: false,
     deviceId: "device-1",
-    homedir: "/tmp/cerelay-home",
+    homedir,
     loadConfig: async () => {
       throw new Error("broken config");
     },
@@ -159,10 +172,11 @@ test("CerelayClient openScanCache 抛错时 connect 仍完成", async (t) => {
     },
   };
   let factoryOptions: CacheTaskStateMachineOptions | undefined;
+  const homedir = await makeTestHome(t);
   const client = new CerelayClient(brain.url, "/repo", {
     interactiveOutput: false,
     deviceId: "device-1",
-    homedir: "/tmp/cerelay-home",
+    homedir,
     loadConfig: async () => config,
     openScanCache: async () => {
       throw new Error("broken scan cache");
@@ -199,10 +213,11 @@ test("CerelayClient connect 装配成功时把 config 和 scanCache 传给 state
   const scanCache = makeScanCacheStore();
   let factoryOptions: CacheTaskStateMachineOptions | undefined;
   const stateMachine = new FakeCacheTaskStateMachine();
+  const homedir = await makeTestHome(t);
   const client = new CerelayClient(brain.url, "/repo", {
     interactiveOutput: false,
     deviceId: "device-1",
-    homedir: "/tmp/cerelay-home",
+    homedir,
     loadConfig: async () => config,
     openScanCache: async () => scanCache,
     cacheTaskStateMachineFactory: (options) => {
@@ -231,10 +246,11 @@ test("CerelayClient.isCacheSyncActive 委托给 state machine 的 isInitialSyncA
   });
 
   const stateMachine = new FakeCacheTaskStateMachine();
+  const homedir = await makeTestHome(t);
   const client = new CerelayClient(brain.url, "/repo", {
     interactiveOutput: false,
     deviceId: "device-1",
-    homedir: "/tmp/cerelay-home",
+    homedir,
     loadConfig: async () => ({ scan: { excludeDirs: [] } }),
     openScanCache: async () => makeScanCacheStore(),
     cacheTaskStateMachineFactory: () => stateMachine,
