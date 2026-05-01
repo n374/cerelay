@@ -86,8 +86,9 @@ HOST_TMP_ROOT="${TMPDIR:-/tmp}/cerelay-test-${slug}"
 **清理范围**：
 
 1. Docker compose project：所有 `cerelay_test_<slug>`，slug 不在 `git for-each-ref refs/heads/` 派生集合中 → `docker compose -p <project> -f docker-compose.test.yml down -v --rmi local --remove-orphans`
-2. Host tmp 目录：`${TMPDIR:-/tmp}/cerelay-test-<slug>` 同样比对清理
-3. `sha-` 前缀的 detached HEAD 资源：**不自动清**，需手动 `--all`
+2. **Docker 孤儿 image**（关键补充）：测试 cleanup 只 `down` 容器/网络（保留 image cache 加速下次 build），项目一旦 down 之后 `docker compose ls` 看不到，对应的 `cerelay_test_<slug>-<service>:tag` image 会成为孤儿。GC 因此还要按 image repo 前缀扫描 + slug 比对清理（`docker rmi -f`）
+3. Host tmp 目录：`${TMPDIR:-/tmp}/cerelay-test-<slug>` 同样比对清理
+4. `sha-` / `sha_` 前缀的 detached HEAD 资源：**不自动清**，需手动 `--all`
 
 **并发安全**：worktree A 启动时若 worktree B 的分支仍存在于 git，A 不会清理 B 的资源。git 的分支列表由 `.git/refs/heads/`（worktree 间共享）保证一致视图。
 
@@ -121,39 +122,30 @@ trap cleanup EXIT INT TERM
   - `CERELAY_SOCKS_PROXY=socks5://mock-socks:1080`
   - `MOCK_DNS_IP` / `EGRESS_PROBE_IP` 改为 `MOCK_DNS_HOST=mock-dns` / `EGRESS_PROBE_HOST=egress-probe`（同步改 `test/container-socks-integration.test.mjs` 默认值）
 
-#### 4.4.1 C2：cerelay-socks-test 的 entrypoint 解析 mock-dns 为 IP
+#### 4.4.1 C2：cerelay-socks-test 的 entrypoint 同时解析 mock-dns 与 mock-socks 为 IP
 
-`CERELAY_SOCKS_DNS_SERVER` 的下游 `docker/socks-proxy-config.mjs` 把字符串拼成 `tcp://<value>` 给 sing-box。sing-box 对 hostname 形式 dns server 的支持依赖容器内 DNS 行为，不可信赖。**因此 cerelay-socks-test 服务包一层 entrypoint**：
+sing-box 的 dns server address 与 outbound proxy server 字段如果用 hostname，会触发 `DNS query loopback in transport[remote-dns]`：sing-box 解析 hostname 需要 DNS，DNS 又走 `detour: proxy`，proxy 自己又得先解析 hostname → 死循环。
+
+**修复**：cerelay-socks-test 服务包一层 entrypoint，在 exec docker-entrypoint.sh 之前把 `CERELAY_SOCKS_DNS_SERVER` 与 `CERELAY_SOCKS_PROXY` 中的 hostname 全部预解析为 IP（POSIX-pure shell parameter expansion，支持 `socks5://[user:pass@]host:port` 格式）。
 
 ```sh
-# docker/test-entrypoint-socks-test.sh（新增文件）
-#!/bin/sh
-set -eu
-
-# 把 service name 解析为容器 IP 后注入下游
-if [ -z "${CERELAY_SOCKS_DNS_SERVER:-}" ] || ! echo "${CERELAY_SOCKS_DNS_SERVER}" | grep -Eq '^[0-9.]+$'; then
-  resolved=$(getent hosts "${CERELAY_SOCKS_DNS_SERVER:-mock-dns}" | awk 'NR==1 {print $1}')
-  if [ -z "$resolved" ]; then
-    echo "[entrypoint] failed to resolve mock-dns" >&2
-    exit 1
-  fi
-  export CERELAY_SOCKS_DNS_SERVER="$resolved"
-fi
-
-exec /app/docker-entrypoint.sh "$@"
-```
-
-`docker-compose.test.yml` 中 `cerelay-socks-test` 服务设置：
-
-```yaml
-entrypoint: ["/app/docker/test-entrypoint-socks-test.sh"]
-environment:
-  - CERELAY_SOCKS_DNS_SERVER=mock-dns
-  - CERELAY_SOCKS_PROXY=socks5://mock-socks:1080
-  ...
+# docker/test-entrypoint-socks-test.sh（新增）
+# 解析 CERELAY_SOCKS_DNS_SERVER 中的 hostname → IP（含 scheme 兼容）
+# 解析 CERELAY_SOCKS_PROXY 中的 hostname → IP（含 user:pass@ 兼容）
+# exec /usr/local/bin/docker-entrypoint.sh "$@"
 ```
 
 **注意**：`mock-socks` 的 `MOCK_SOCKS_CONNECT_MAP` 使用 hostname 已验证可行——`test/container-fixtures/mock-socks.mjs:111` 用 `net.createConnection(target)`，Node net 模块自动 DNS 解析 hostname。**不需要给 mock-socks 加 entrypoint**。
+
+#### 4.4.2 显式 TUN 地址，避开 docker bridge auto-assigned subnet
+
+`CERELAY_SOCKS_TUN_ADDRESS` 默认 `172.19.0.1/30`（在 `docker/socks-proxy-config.mjs:86`）。docker 自动分配的 bridge subnet 常落在 172.19.0.0/16 / 172.20.0.0/16 等同网段，**正好包含 TUN 地址**。
+
+冲突后果：sing-box 启动 TUN（`auto_route: true, strict_route: true`）会把 mock-socks IP（也在 172.19.0.0/16）也吸进 TUN 形成 loopback → cerelay-server 的 monitor 第一次 cycle 探测 SOCKS proxy 即"不可达" → **误触发 fail-close**（实测 fail-close 测试 30s timeout 失败）。
+
+**修复**：在 `docker-compose.test.yml` 的 `cerelay-socks-test` 服务里显式设置 `CERELAY_SOCKS_TUN_ADDRESS=192.168.255.1/30`，使用一个不会与 docker bridge 重叠的私有网段。
+
+baseline（spec 改造前）用固定 subnet `172.28.0.0/24`，与 TUN 默认值 172.19.x 不冲突，所以隐式 work；改造后 docker 自动分配 subnet 才暴露此问题。
 
 ### 4.5 Image tag 去硬编码
 
