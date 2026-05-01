@@ -45,6 +45,11 @@ export interface ClaudePtySessionOptions {
   clientHomeDir?: string;
   shouldRouteToolToClient?: (toolName: string) => boolean;
   /**
+   * 启动诊断：用于在 PTY 子进程启动后周期性 log "尚未首次 stdout" 时合并 FUSE
+   * 活动统计。返回 undefined 表示无 file-proxy 上下文（裸 runtime / 测试 stub）。
+   */
+  getFileProxyStartupStats?: () => unknown;
+  /**
    * Plan D shadow MCP 注入开关。enabled=true 时 ClaudePtySession 会：
    * 1. 启动 per-session MCPIpcHost（unix socket）
    * 2. spawn CC 时追加 --mcp-config / --append-system-prompt / --disallowedTools
@@ -88,6 +93,7 @@ export class ClaudePtySession {
   private started = false;
   private closed = false;
   private mcpIpcHost: MCPIpcHost | null = null;
+  private readonly getFileProxyStartupStats?: () => unknown;
 
   constructor(options: ClaudePtySessionOptions) {
     this.id = options.id;
@@ -103,6 +109,7 @@ export class ClaudePtySession {
     this.shouldRouteToolToClient = options.shouldRouteToolToClient ?? ((toolName) => isClientRoutedToolName(toolName));
     this.shadowMcpEnabled = options.shadowMcp?.enabled ?? readShadowMcpEnvDefault();
     this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? resolveShadowMcpSocketDir();
+    this.getFileProxyStartupStats = options.getFileProxyStartupStats;
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -160,23 +167,57 @@ export class ClaudePtySession {
       this.controlStream.on("error", () => undefined);
     }
 
-    // 启动诊断：如果子进程长时间无 stdout 输出，打印 warn 日志辅助排查
+    const spawnedAt = Date.now();
+    const childPid = this.child?.pid;
+    this.log.info("PTY 子进程已 spawn", {
+      pid: childPid,
+      command: commandLine[0],
+    });
+
+    // 启动诊断：从 spawn 起每 5s 周期打印 "尚未首次 stdout"。让用户在长时间无输出
+    // 时直接从日志看到：FUSE 是否还在转发请求、pending 多少、累计 round-trip 多久。
+    // 如果 FUSE 计数器全为 0 → 瓶颈在 CC 自身（spawn MCP 子进程 / 网络 / API 等）。
     let gotFirstOutput = false;
-    const startupDiagTimer = setTimeout(() => {
-      if (!gotFirstOutput && !this.closed) {
-        this.log.warn("PTY 子进程启动后 5 秒内无 stdout 输出，可能卡在 FUSE 文件代理或进程启动阶段", {
-          command: commandLine[0],
-          args: commandLine.slice(1),
-          pid: this.child?.pid,
-        });
+    let totalOutputBytes = 0;
+    let totalOutputChunks = 0;
+    let lastOutputStatsLoggedAt = 0;
+    const startupDiagTimer = setInterval(() => {
+      if (gotFirstOutput || this.closed) {
+        clearInterval(startupDiagTimer);
+        return;
       }
+      const elapsedMs = Date.now() - spawnedAt;
+      this.log.warn("PTY 子进程启动后尚未输出 stdout", {
+        elapsedMs,
+        pid: childPid,
+        fileProxyStats: this.getFileProxyStartupStats?.(),
+      });
     }, 5_000);
+    startupDiagTimer.unref?.();
 
     this.child.stdout?.on("data", (chunk: Buffer) => {
+      totalOutputBytes += chunk.length;
+      totalOutputChunks++;
       if (!gotFirstOutput) {
         gotFirstOutput = true;
-        clearTimeout(startupDiagTimer);
-        this.log.info("PTY 首次 stdout 输出", { bytes: chunk.length });
+        clearInterval(startupDiagTimer);
+        const elapsedMs = Date.now() - spawnedAt;
+        this.log.info("PTY 首次 stdout 输出", {
+          bytes: chunk.length,
+          elapsedMsSinceSpawn: elapsedMs,
+          fileProxyStats: this.getFileProxyStartupStats?.(),
+        });
+        lastOutputStatsLoggedAt = Date.now();
+      } else if (Date.now() - lastOutputStatsLoggedAt >= 5_000) {
+        // 首次 stdout 之后，每 5s 输出一次累计量。CC 启动期 TUI 有时会分多次写入
+        // （边读 FUSE 边输出），用户观感上需要 N 秒后界面才稳定。这条日志反映出
+        // 真实的输出节奏，方便区分 "server 没数据" vs "client 没渲染"。
+        this.log.info("PTY stdout 累计输出统计", {
+          totalBytes: totalOutputBytes,
+          totalChunks: totalOutputChunks,
+          elapsedMsSinceFirstOutput: Date.now() - spawnedAt,
+        });
+        lastOutputStatsLoggedAt = Date.now();
       }
       void this.transport.sendOutput(this.id, Buffer.from(chunk)).catch((err) => {
         this.log.warn("PTY stdout 转发失败", { error: err instanceof Error ? err.message : String(err) });
@@ -188,7 +229,7 @@ export class ClaudePtySession {
       });
     });
     this.child.on("exit", (code, signal) => {
-      clearTimeout(startupDiagTimer);
+      clearInterval(startupDiagTimer);
       // 注意：此处的 child 是 pty_host.py helper，不是 CC 本身；helper 在 CC 死后
       // 还要走 master_fd close + thread join(0.2s ×2) + proc.wait + sys.exit，
       // 因此 'exit' 比 CC 实际退出晚约 400-500ms。这条日志记录 helper 退出时间，

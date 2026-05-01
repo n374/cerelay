@@ -49,6 +49,8 @@ interface Deferred {
    * 默认 false（外部 FUSE → server 链路，原有行为：响应转写到 Python daemon）。
    */
   silent?: boolean;
+  /** 入队时间戳（仅 client 穿透 deferred 设置），用于计算 round-trip 耗时 */
+  startedAt?: number;
 }
 
 type CacheTaskReadGate = Pick<
@@ -99,6 +101,22 @@ export class FileProxyManager {
   private _mountPoint: string = "";
   private helperPath: string = "";
   private destroyed = false;
+
+  // 启动期 FUSE 活动诊断：从 daemon ready 到首次 stdout 之间，CC 通常会通过 FUSE
+  // 连续读 ~/.claude/、settings、credentials 等文件。如果这段长时间没有日志，
+  // 用户无法判断是 FUSE 慢还是 CC 自身在做别的事（spawn MCP / 网络 / sleep 等）。
+  // 用一个轻量计数器记录 op 次数和 client 穿透耗时，按 5s 周期输出汇总。
+  private readonly opCounters = new Map<string, number>();
+  /** 累积 client 穿透 round-trip 耗时（毫秒），仅统计实际穿透到 Client 的请求 */
+  private clientRoundTripMs = 0;
+  /** 命中 server 侧 cache 的 read 请求次数 */
+  private cacheHitReads = 0;
+  /** 第一次收到 FUSE daemon 请求的时间戳，用于反映 CC 实际开始访问 FUSE 的时刻 */
+  private firstRequestAt: number | null = null;
+  /** 最近一次输出 stats 的时间，用于决定是否再输出汇总 */
+  private lastStatsLoggedAt = 0;
+  private startupStatsTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly fuseDaemonReadyAt: { value: number | null } = { value: null };
 
   /** FUSE 虚拟根到 Hand 侧绝对路径的映射 */
   private readonly roots: Record<string, string>;
@@ -289,10 +307,69 @@ export class FileProxyManager {
       earlyExitPromise,
     ]);
 
+    this.fuseDaemonReadyAt.value = Date.now();
     log.info("FUSE daemon 已就绪", {
       sessionId: this.sessionId,
       mountPoint: this._mountPoint,
     });
+
+    // 启动期 FUSE 活动监控：从 daemon ready 到 60 秒，每 5s 汇总一次 op 计数与
+    // client 穿透耗时。命令：CC 启动慢时（首次 stdout 长时间不到达），日志会显示
+    // 是否仍有大量 FUSE 流量。无活动则说明瓶颈在 CC 进程自身（spawn / 网络 / API 等），
+    // 而非文件代理。一旦 60s 后或 shutdown 时停止。
+    this.startupStatsTimer = setInterval(() => {
+      const sinceReady = this.fuseDaemonReadyAt.value
+        ? Date.now() - this.fuseDaemonReadyAt.value
+        : 0;
+      if (sinceReady > 60_000 || this.destroyed) {
+        this.stopStartupStatsTimer();
+        return;
+      }
+      this.logStartupStats("startup periodic");
+    }, 5_000);
+    this.startupStatsTimer.unref?.();
+  }
+
+  private stopStartupStatsTimer(): void {
+    if (this.startupStatsTimer) {
+      clearInterval(this.startupStatsTimer);
+      this.startupStatsTimer = null;
+    }
+  }
+
+  private logStartupStats(reason: string): void {
+    const ops: Record<string, number> = {};
+    let total = 0;
+    for (const [op, n] of this.opCounters) {
+      ops[op] = n;
+      total += n;
+    }
+    const sinceReady = this.fuseDaemonReadyAt.value
+      ? Date.now() - this.fuseDaemonReadyAt.value
+      : null;
+    const sinceFirstReq = this.firstRequestAt ? Date.now() - this.firstRequestAt : null;
+    if (total === 0 && this.cacheHitReads === 0 && reason === "startup periodic") {
+      // 无活动也输出一行，让用户知道 FUSE 不是瓶颈
+      log.info("FUSE 启动期活动统计 (无新请求)", {
+        sessionId: this.sessionId,
+        reason,
+        sinceReadyMs: sinceReady,
+        pendingRequests: this.pendingRequests.size,
+      });
+      return;
+    }
+    log.info("FUSE 启动期活动统计", {
+      sessionId: this.sessionId,
+      reason,
+      sinceReadyMs: sinceReady,
+      sinceFirstRequestMs: sinceFirstReq,
+      totalOps: total,
+      cacheHitReads: this.cacheHitReads,
+      clientRoundTripMs: this.clientRoundTripMs,
+      pendingRequests: this.pendingRequests.size,
+      opCounts: ops,
+    });
+    this.lastStatsLoggedAt = Date.now();
   }
 
   /**
@@ -591,6 +668,9 @@ export class FileProxyManager {
     }
     this.pendingRequests.delete(resp.reqId);
     clearTimeout(deferred.timer);
+    if (deferred.startedAt !== undefined) {
+      this.clientRoundTripMs += Date.now() - deferred.startedAt;
+    }
 
     // silent 路径：内部发起的 Client 请求（如 settings.json 全文穿透），
     // 把 raw response 交给调用方处理，不自动写回 Python daemon。
@@ -627,8 +707,38 @@ export class FileProxyManager {
   /**
    * 关闭 FUSE daemon：发送 shutdown → fusermount -u → kill。
    */
+  /**
+   * 启动期累计活动统计快照。供外部组件（如 PTY session 启动诊断）打 log 时合并使用。
+   */
+  getStartupStats(): {
+    fuseDaemonReadyAt: number | null;
+    firstRequestAt: number | null;
+    totalOps: number;
+    cacheHitReads: number;
+    clientRoundTripMs: number;
+    pendingRequests: number;
+    opCounts: Record<string, number>;
+  } {
+    const ops: Record<string, number> = {};
+    let total = 0;
+    for (const [op, n] of this.opCounters) {
+      ops[op] = n;
+      total += n;
+    }
+    return {
+      fuseDaemonReadyAt: this.fuseDaemonReadyAt.value,
+      firstRequestAt: this.firstRequestAt,
+      totalOps: total,
+      cacheHitReads: this.cacheHitReads,
+      clientRoundTripMs: this.clientRoundTripMs,
+      pendingRequests: this.pendingRequests.size,
+      opCounts: ops,
+    };
+  }
+
   async shutdown(): Promise<void> {
     this.destroyed = true;
+    this.stopStartupStatsTimer();
 
     // 发送 shutdown 控制消息
     if (this.controlStream) {
@@ -688,6 +798,22 @@ export class FileProxyManager {
       return;
     }
 
+    // 启动诊断：第一次收到 daemon 请求即记录时间，后续 stats 用其计算 "首次请求到现在" 间隔
+    if (this.firstRequestAt === null) {
+      this.firstRequestAt = Date.now();
+      const sinceReady = this.fuseDaemonReadyAt.value
+        ? this.firstRequestAt - this.fuseDaemonReadyAt.value
+        : null;
+      log.info("FUSE 收到首次 daemon 请求", {
+        sessionId: this.sessionId,
+        op: req.op,
+        root: req.root,
+        relPath: req.relPath,
+        sinceReadyMs: sinceReady,
+      });
+    }
+    this.opCounters.set(req.op, (this.opCounters.get(req.op) ?? 0) + 1);
+
     const { root, relPath, reqId } = req;
     const clientRoot = this.roots[root];
     if (!clientRoot) {
@@ -704,6 +830,7 @@ export class FileProxyManager {
     // Python FUSE daemon 也会在本地 snapshot 缓存中查（启动时预热过），所以
     // 正常情况下这条路径只在 Python cache 被失效时才会触发，作为兜底。
     if (req.op === "read" && this.cacheAvailable() && await this.tryServeReadFromCache(req)) {
+      this.cacheHitReads++;
       return;
     }
 
@@ -795,7 +922,7 @@ export class FileProxyManager {
       reject(new Error("timeout"));
     }, 30_000);
 
-    return { resolve, reject, timer };
+    return { resolve, reject, timer, startedAt: Date.now() };
   }
 
   private writeToDaemon(data: Record<string, unknown>): void {

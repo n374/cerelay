@@ -637,18 +637,28 @@ export class CerelayServer {
   }
 
   private async handleCreatePtySession(clientId: string, message: CreatePtySession): Promise<void> {
-    log.debug("收到创建 PTY Session 请求", {
+    const phaseStart = Date.now();
+    const phaseTimings: Record<string, number> = {};
+    const markPhase = (name: string, since: number): number => {
+      const now = Date.now();
+      phaseTimings[name] = now - since;
+      return now;
+    };
+
+    log.info("收到创建 PTY Session 请求", {
       clientId,
       cwd: message.cwd || ".",
       model: message.model || this.defaultModel,
       cols: message.cols,
       rows: message.rows,
+      hasDeviceId: Boolean(message.deviceId),
     });
 
     const sessionId = `pty-${Date.now()}-${randomUUID()}`;
     const hookToken = randomUUID();
     const runtimeRoot = getClaudeSessionRuntimeRoot(sessionId);
     await rm(runtimeRoot, { recursive: true, force: true });
+    let phaseAt = markPhase("cleanRuntimeRoot", phaseStart);
     const hookInjection = await prepareClaudeHookInjection({
       bridgeUrl: `http://127.0.0.1:${this.getListenPort()}/internal/hooks/pretooluse?sessionId=${encodeURIComponent(sessionId)}`,
       existingProjectSettingsLocalContent: message.projectClaudeSettingsLocalContent,
@@ -656,6 +666,7 @@ export class CerelayServer {
       sessionId,
       token: hookToken,
     });
+    phaseAt = markPhase("prepareHookInjection", phaseAt);
 
     // 启动 FUSE 文件代理（mount namespace 模式下）
     let fileProxy: FileProxyManager | undefined;
@@ -695,6 +706,7 @@ export class CerelayServer {
       this.fileProxies.set(sessionId, fileProxy);
       await fileProxy.start();
     }
+    phaseAt = markPhase("fileProxyStart", phaseAt);
 
     let runtime;
     try {
@@ -706,7 +718,9 @@ export class CerelayServer {
         projectSettingsLocalShadowPath: fileProxy ? undefined : hookInjection.settingsPath,
         fuseRootDir: fileProxy?.mountPoint,
       });
+      phaseAt = markPhase("createRuntime", phaseAt);
       await verifyPtyHookVisibleInRuntime(runtime, message.cwd || ".");
+      phaseAt = markPhase("verifyHookVisible", phaseAt);
     } catch (err) {
       // runtime 创建失败时必须先关闭 FUSE，否则 rm(runtimeRoot) 会 EBUSY
       if (fileProxy) {
@@ -792,6 +806,7 @@ export class CerelayServer {
       termProgramVersion: message.termProgramVersion,
       clientHomeDir: message.homeDir,
       shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
+      getFileProxyStartupStats: fileProxy ? () => fileProxy!.getStartupStats() : undefined,
     });
 
     this.ptySessions.set(sessionId, {
@@ -803,12 +818,20 @@ export class CerelayServer {
     this.clients.bindSession(clientId, sessionId);
     this.stats.onSessionCreated();
     await session.start(message.cols ?? 80, message.rows ?? 24);
+    phaseAt = markPhase("ptySessionStart", phaseAt);
     await this.sendToClient(clientId, {
       type: "pty_session_created",
       sessionId,
     });
 
-    log.info("PTY Session 已创建", { sessionId, clientId, cwd: message.cwd, model: message.model });
+    log.info("PTY Session 已创建", {
+      sessionId,
+      clientId,
+      cwd: message.cwd,
+      model: message.model,
+      totalMs: Date.now() - phaseStart,
+      phaseTimings,
+    });
   }
 
   private async handleToolResult(clientId: string, message: ToolResult): Promise<void> {

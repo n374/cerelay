@@ -32,6 +32,14 @@ const log = createLogger("file-proxy");
 export class FileProxyHandler {
   private readonly allowedPrefixes: string[];
 
+  // 启动诊断：从首次收到 file_proxy_request 起，每 5s 周期输出 op 计数与延迟分布。
+  // 60s 后停止；shutdown 时也停止。Server 侧已有 FUSE op 统计，client 侧的统计反映
+  // 实际本地 I/O 耗时 + ws 往返延迟，便于判断 "FUSE 慢" 是否出在 client 这一侧。
+  private readonly opCounters = new Map<string, number>();
+  private totalHandledMs = 0;
+  private firstRequestAt: number | null = null;
+  private startupStatsTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(homeDir: string, cwd: string) {
     const resolvedHome = path.resolve(homeDir);
     const resolvedCwd = path.resolve(cwd);
@@ -45,6 +53,61 @@ export class FileProxyHandler {
   }
 
   async handle(req: FileProxyRequest): Promise<FileProxyResponse> {
+    if (this.firstRequestAt === null) {
+      this.firstRequestAt = Date.now();
+      log.info("file-proxy 收到首次请求", {
+        op: req.op,
+        path: req.path,
+      });
+      this.startStartupStatsTimer();
+    }
+    this.opCounters.set(req.op, (this.opCounters.get(req.op) ?? 0) + 1);
+    const startedAt = Date.now();
+    try {
+      return await this.handleInternal(req);
+    } finally {
+      this.totalHandledMs += Date.now() - startedAt;
+    }
+  }
+
+  private startStartupStatsTimer(): void {
+    if (this.startupStatsTimer) return;
+    const startedAt = this.firstRequestAt ?? Date.now();
+    this.startupStatsTimer = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > 60_000) {
+        this.stopStartupStatsTimer();
+        return;
+      }
+      const ops: Record<string, number> = {};
+      let total = 0;
+      for (const [op, n] of this.opCounters) {
+        ops[op] = n;
+        total += n;
+      }
+      log.info("file-proxy 启动期活动统计", {
+        elapsedMs: elapsed,
+        totalOps: total,
+        totalHandledMs: this.totalHandledMs,
+        opCounts: ops,
+      });
+    }, 5_000);
+    this.startupStatsTimer.unref?.();
+  }
+
+  private stopStartupStatsTimer(): void {
+    if (this.startupStatsTimer) {
+      clearInterval(this.startupStatsTimer);
+      this.startupStatsTimer = null;
+    }
+  }
+
+  /** 销毁实例（停止 startup stats timer），由 client.resetExecutor 调用。 */
+  dispose(): void {
+    this.stopStartupStatsTimer();
+  }
+
+  private async handleInternal(req: FileProxyRequest): Promise<FileProxyResponse> {
     const base: Pick<FileProxyResponse, "type" | "reqId" | "sessionId"> = {
       type: "file_proxy_response",
       reqId: req.reqId,

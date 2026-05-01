@@ -417,7 +417,28 @@ export class CerelayClient {
 
       let stopSpinner: (() => void) | undefined;
 
+      // 启动诊断：从进入 passthrough 到首次 pty_output 之间的时长，以及之后输出累积。
+      // server 已在 PTY spawn 后周期 log "尚未首次 stdout"；client 这里则用于反映
+      // server → ws → client 的端到端延迟，定位 "服务端有数据但本地没渲染"。
+      const passthroughStartedAt = Date.now();
+      let firstPtyOutputAt: number | null = null;
+      let totalPtyOutputBytes = 0;
+      let totalPtyOutputChunks = 0;
+      let lastPtyStatsLoggedAt = 0;
+      const noOutputDiagTimer = setInterval(() => {
+        if (firstPtyOutputAt !== null) {
+          clearInterval(noOutputDiagTimer);
+          return;
+        }
+        log.warn("等待 pty_output 中（首帧未到达）", {
+          sessionId,
+          elapsedMs: Date.now() - passthroughStartedAt,
+        });
+      }, 5_000);
+      noOutputDiagTimer.unref?.();
+
       const cleanup = () => {
+        clearInterval(noOutputDiagTimer);
         stopSpinner?.();
         releaseMessageConsumer();
         ws.off("error", onError);
@@ -473,7 +494,31 @@ export class CerelayClient {
             if (output.sessionId !== sessionId) {
               break;
             }
-            stdout.write(Buffer.from(output.data, "base64"));
+            const buf = Buffer.from(output.data, "base64");
+            totalPtyOutputBytes += buf.length;
+            totalPtyOutputChunks++;
+            if (firstPtyOutputAt === null) {
+              firstPtyOutputAt = Date.now();
+              clearInterval(noOutputDiagTimer);
+              log.info("收到首次 pty_output", {
+                sessionId,
+                bytes: buf.length,
+                elapsedMsSincePassthrough: firstPtyOutputAt - passthroughStartedAt,
+              });
+              lastPtyStatsLoggedAt = firstPtyOutputAt;
+            } else if (Date.now() - lastPtyStatsLoggedAt >= 5_000) {
+              // 启动期 CC TUI 经常分多次写出，用户感知 "看到完整界面" 滞后于首帧。
+              // 这条日志反映 ws → 本地 stdout 的累计量，方便定位 "界面慢" 是否出在
+              // server 节奏（参考 server 的 "PTY stdout 累计输出统计"）。
+              log.info("pty_output 累计接收统计", {
+                sessionId,
+                totalBytes: totalPtyOutputBytes,
+                totalChunks: totalPtyOutputChunks,
+                elapsedMsSinceFirstOutput: Date.now() - (firstPtyOutputAt ?? Date.now()),
+              });
+              lastPtyStatsLoggedAt = Date.now();
+            }
+            stdout.write(buf);
             break;
           }
           case "pty_exit": {
@@ -656,6 +701,7 @@ export class CerelayClient {
   }
 
   private async resetExecutor(cwd: string): Promise<void> {
+    this.fileProxy.dispose?.();
     this.fileProxy = new FileProxyHandler(os.homedir(), cwd);
     await this.executor.close().catch(() => undefined);
     this.executor = new ToolExecutor(cwd);
