@@ -33,6 +33,7 @@ const log = createLogger("file-proxy");
  */
 export class FileProxyHandler {
   private readonly allowedPrefixes: string[];
+  private readonly rootPaths: string[];
   private readonly dedupMap: FileProxyDedupMap;
 
   // 启动诊断：从首次收到 file_proxy_request 起，每 5s 周期输出 op 计数与延迟分布。
@@ -46,6 +47,11 @@ export class FileProxyHandler {
   constructor(homeDir: string, cwd: string) {
     const resolvedHome = path.resolve(homeDir);
     const resolvedCwd = path.resolve(cwd);
+    this.rootPaths = [
+      path.join(resolvedHome, ".claude"),
+      path.join(resolvedHome, ".claude.json"),
+      path.join(resolvedCwd, ".claude"),
+    ];
     this.allowedPrefixes = [
       path.join(resolvedHome, ".claude") + path.sep,
       path.join(resolvedHome, ".claude"),
@@ -222,6 +228,16 @@ export class FileProxyHandler {
         errno,
         message,
       });
+      if (errno === 2) {
+        const rootPath = this.findRootPath(req.path);
+        if (rootPath) {
+          return {
+            ...base,
+            error: { code: errno, message },
+            shallowestMissingAncestor: await findShallowestMissingAncestor(req.path, rootPath),
+          };
+        }
+      }
       return { ...base, error: { code: errno, message } };
     }
   }
@@ -231,6 +247,14 @@ export class FileProxyHandler {
     return this.allowedPrefixes.some(
       (prefix) => normalized === prefix || (prefix.endsWith(path.sep) && normalized.startsWith(prefix))
     );
+  }
+
+  private findRootPath(filePath: string): string | null {
+    const normalized = path.resolve(filePath);
+    const roots = this.rootPaths
+      .filter((rootPath) => normalized === rootPath || normalized.startsWith(`${rootPath}${path.sep}`))
+      .sort((a, b) => b.length - a.length);
+    return roots[0] ?? null;
   }
 
   private async doGetattr(filePath: string): Promise<FileProxyStat> {
@@ -448,6 +472,36 @@ export class FileProxyHandler {
   }
 }
 
+export async function findShallowestMissingAncestor(
+  filePath: string,
+  rootPath: string,
+): Promise<string> {
+  const normalizedRoot = path.resolve(rootPath);
+  const normalizedPath = path.resolve(filePath);
+  let current = normalizedPath;
+  let lastMissing = normalizedPath;
+
+  while (current !== normalizedRoot && current !== path.dirname(current)) {
+    const parent = path.dirname(current);
+    if (!isPathWithinRoot(parent, normalizedRoot)) {
+      return lastMissing;
+    }
+    try {
+      await lstat(parent);
+      return lastMissing;
+    } catch (error) {
+      if (isEnoent(error)) {
+        lastMissing = parent;
+        current = parent;
+        continue;
+      }
+      return normalizedPath;
+    }
+  }
+
+  return lastMissing;
+}
+
 function extractErrno(err: unknown): number {
   if (err && typeof err === "object" && "errno" in err) {
     const e = (err as { errno: number }).errno;
@@ -455,6 +509,14 @@ function extractErrno(err: unknown): number {
     return Math.abs(e);
   }
   return 5; // EIO
+}
+
+function isEnoent(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+function isPathWithinRoot(filePath: string, rootPath: string): boolean {
+  return filePath === rootPath || filePath.startsWith(`${rootPath}${path.sep}`);
 }
 
 function responseBytes(resp: FileProxyResponse): number {
