@@ -2,6 +2,7 @@ import { createWriteStream, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import type { WriteStream } from "node:fs";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -67,7 +68,7 @@ export class Logger {
       const line = JSON.stringify(entry);
       if (globalConsoleOutputEnabled) {
         const output = level === "error" ? process.stderr : process.stdout;
-        output.write(line + "\n");
+        writeConsoleLine(output, line);
       }
       writeLogFile(line);
       return;
@@ -82,9 +83,9 @@ export class Logger {
     if (globalConsoleOutputEnabled) {
       const line = formatPrettyLine(entry, true);
       if (entry.level === "error") {
-        process.stderr.write(line + "\n");
+        writeConsoleLine(process.stderr, line);
       } else {
-        process.stdout.write(line + "\n");
+        writeConsoleLine(process.stdout, line);
       }
     }
   }
@@ -136,8 +137,15 @@ let globalJsonMode = false;
 let globalLogFilePath: string | null = resolveDefaultLogFilePath();
 let globalLogFileStream: ReturnType<typeof createWriteStream> | null = null;
 let globalConsoleOutputEnabled = true;
+let globalConsoleSink: ((line: string) => boolean) | undefined;
 
-export function configureLogger(options: { minLevel?: LogLevel; json?: boolean; filePath?: string | null; console?: boolean }): void {
+export function configureLogger(options: {
+  minLevel?: LogLevel;
+  json?: boolean;
+  filePath?: string | null;
+  console?: boolean;
+  consoleSink?: (line: string) => boolean;
+}): void {
   if (options.minLevel) {
     globalMinLevel = options.minLevel;
   }
@@ -153,6 +161,9 @@ export function configureLogger(options: { minLevel?: LogLevel; json?: boolean; 
   }
   if (options.console !== undefined) {
     globalConsoleOutputEnabled = options.console;
+  }
+  if (options.consoleSink !== undefined) {
+    globalConsoleSink = options.consoleSink;
   }
 }
 
@@ -174,6 +185,51 @@ function writeLogFile(line: string): void {
     return;
   }
   stream.write(line + "\n");
+}
+
+function writeConsoleLine(stream: NodeJS.WriteStream, line: string): void {
+  if (globalConsoleSink?.(line)) {
+    return;
+  }
+  stream.write(line + "\n");
+}
+
+export function flushLogger(): Promise<void> {
+  const stream = globalLogFileStream;
+  if (!stream) {
+    return Promise.resolve();
+  }
+  globalLogFileStream = null;
+  return endStream(stream);
+}
+
+function endStream(stream: WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      stream.off("finish", onFinish);
+      stream.off("error", onError);
+    };
+    const onFinish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    stream.once("finish", onFinish);
+    stream.once("error", onError);
+    stream.end();
+  });
 }
 
 function ensureLogFileStream(): ReturnType<typeof createWriteStream> | null {
