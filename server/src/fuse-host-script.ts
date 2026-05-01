@@ -893,13 +893,12 @@ class CerelayFuseOps(Operations):
 
 fuse_instance = None
 
-def send_control_response(response):
-    try:
-        os.write(CONTROL_FD, (json.dumps(response) + "\n").encode("utf-8"))
-    except OSError:
-        pass
-
 def handle_control():
+    """Control pipe handler: line-delimited JSON, fire-and-forget (no response).
+
+    Server (DaemonControlClient) writes to fd, daemon reads + applies.
+    协议设计见 spec §7.3.4。
+    """
     global fuse_instance
     try:
         with os.fdopen(CONTROL_FD, "r", encoding="utf-8", buffering=1) as control:
@@ -927,16 +926,17 @@ def handle_control():
                 elif msg_type == "put_negative":
                     path = message.get("path")
                     if isinstance(path, str) and path:
-                        _cache.put_negative(path)
-                    send_control_response({"ok": True})
+                        _cache.put_negative_perm(path)
                 elif msg_type == "invalidate_negative_prefix":
-                    prefix = message.get("prefix", message.get("path"))
-                    if isinstance(prefix, str) and prefix:
-                        _cache.invalidate_negative(prefix)
-                    send_control_response({"ok": True})
+                    path = message.get("path")
+                    if isinstance(path, str) and path:
+                        _cache.invalidate_negative(path)
                 elif msg_type == "invalidate_cache":
-                    _cache.clear()
-                    send_control_response({"ok": True})
+                    # 精确清理某 path 的 stat/readdir/read 缓存 (非 clear-all)
+                    path = message.get("path")
+                    if isinstance(path, str) and path:
+                        _cache.invalidate(path)
+                # 未知 type: 静默忽略 (forward-compat)
     except OSError:
         pass
 
