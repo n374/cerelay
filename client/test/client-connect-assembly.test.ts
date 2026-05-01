@@ -8,6 +8,7 @@ import path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { CerelayClient } from "../src/client.js";
 import { DEFAULT_EXCLUDE_DIRS, type CerelayConfig } from "../src/config.js";
+import { configureLogger, createLogger } from "../src/logger.js";
 import type { CacheTaskStateMachineOptions } from "../src/cache-task-state-machine.js";
 import type { ScanCacheStore } from "../src/scan-cache.js";
 
@@ -273,4 +274,82 @@ test("CerelayClient.isCacheSyncActive 委托给 state machine 的 isInitialSyncA
 
   stateMachine.initialSyncActive = false;
   assert.equal(client.isCacheSyncActive(), false);
+});
+
+test("CerelayClient constructor immediately registers progress-view console sink", async (t) => {
+  const homedir = await makeTestHome(t);
+  const originalStdoutWrite = process.stdout.write;
+  const originalIsTTY = process.stdout.isTTY;
+  const output: string[] = [];
+  process.stdout.write = ((data: string | Buffer) => {
+    output.push(String(data));
+    return true;
+  }) as typeof process.stdout.write;
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  t.after(() => {
+    process.stdout.write = originalStdoutWrite;
+    Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+    configureLogger({ console: true, filePath: null, consoleSink: undefined });
+  });
+
+  configureLogger({ console: true, filePath: null, consoleSink: undefined });
+  const client = new CerelayClient("ws://127.0.0.1:1", "/repo", {
+    interactiveOutput: false,
+    deviceId: "device-1",
+    homedir,
+  });
+  t.after(async () => {
+    await client.close();
+  });
+
+  client.beginStartupSpinner("starting");
+  output.length = 0;
+  createLogger("constructor-sink-test").info("constructor sink line");
+
+  assert.match(output.join(""), /constructor sink line/);
+  client.endStartupSpinner();
+});
+
+test("CerelayClient routes connect-entry log through constructor sink", async (t) => {
+  const brain = await startFakeBrain();
+  t.after(async () => {
+    await stopFakeBrain(brain);
+  });
+  brain.ws.on("connection", (socket: WebSocket) => {
+    socket.send(JSON.stringify({ type: "connected" }));
+  });
+
+  const homedir = await makeTestHome(t);
+  const originalStdoutWrite = process.stdout.write;
+  const originalIsTTY = process.stdout.isTTY;
+  const output: string[] = [];
+  process.stdout.write = ((data: string | Buffer) => {
+    output.push(String(data));
+    return true;
+  }) as typeof process.stdout.write;
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  t.after(() => {
+    process.stdout.write = originalStdoutWrite;
+    Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+    configureLogger({ console: true, filePath: null, consoleSink: undefined });
+  });
+
+  configureLogger({ console: true, filePath: null, consoleSink: undefined });
+  const client = new CerelayClient(brain.url, "/repo", {
+    interactiveOutput: false,
+    deviceId: "device-1",
+    homedir,
+    isCacheTaskDisabled: () => true,
+    cacheTaskStateMachineFactory: () => new FakeCacheTaskStateMachine(),
+  });
+  t.after(async () => {
+    await client.close();
+  });
+
+  client.beginStartupSpinner("starting");
+  output.length = 0;
+  await client.connect();
+
+  assert.match(output.join(""), /client connect entry/);
+  client.endStartupSpinner();
 });

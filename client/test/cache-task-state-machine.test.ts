@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CacheTaskStateMachine } from "../src/cache-task-state-machine.js";
 import type { CerelayConfig } from "../src/config.js";
 import type { CacheSyncEvent, LocalEntry, ScopePlan } from "../src/cache-sync.js";
+import { configureLogger } from "../src/logger.js";
 import type { ScanCacheStore } from "../src/scan-cache.js";
 import type {
   CacheTaskAssignment,
@@ -93,6 +94,23 @@ const TEST_CONFIG: CerelayConfig = {
     excludeDirs: ["projects"],
   },
 };
+
+function captureLogLines(t: { after(callback: () => void): void }): string[] {
+  const lines: string[] = [];
+  configureLogger({
+    minLevel: "info",
+    console: true,
+    filePath: null,
+    consoleSink: (line) => {
+      lines.push(line);
+      return true;
+    },
+  });
+  t.after(() => {
+    configureLogger({ console: true, filePath: null, consoleSink: undefined });
+  });
+  return lines;
+}
 
 function makeEmptyPlan(scope: CacheScope, totalLocal: number): ScopePlan {
   return {
@@ -581,4 +599,56 @@ test("CacheTaskStateMachine 读取 CERELAY_DISABLE_CACHE_TASK 时跳过 hello", 
 
   assert.equal(sm.getState(), "connected-passive");
   assert.equal(sent.length, 0);
+});
+
+test("CacheTaskStateMachine handleActiveAssignment logs role and assignmentId", async (t) => {
+  const lines = captureLogLines(t);
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    disableCacheTask: false,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    watcherFactory: () => new FakeWatcher(),
+    walkScope: walkNothing,
+    hashScope: hashNothing,
+    pushInitialDeltaBatches: async () => ({ baseRevision: 3, summaries: [] }),
+  });
+
+  await sm.onConnected(async () => undefined);
+  await sm.onMessage(makeActiveAssignment());
+
+  const assignmentLog = lines.find((line) => line.includes("cache task active assignment"));
+  assert.match(assignmentLog ?? "", /role="active"/);
+  assert.match(assignmentLog ?? "", /assignmentId="assignment-1"/);
+});
+
+test("CacheTaskStateMachine runInitialSync logs per-scope stats", async (t) => {
+  const lines = captureLogLines(t);
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    disableCacheTask: false,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    watcherFactory: () => new FakeWatcher(),
+    walkScope: async ({ scope }) => scope === "claude-home"
+      ? [{ relPath: "a.json", absPath: "/tmp/a.json", size: 1, mtime: 1 }]
+      : [],
+    hashScope: async ({ scope, locals }) => ({
+      ...makeEmptyPlan(scope, locals.length),
+      cacheHits: scope === "claude-home" ? 1 : 0,
+      cacheMisses: scope === "claude-home" ? 2 : 0,
+    }),
+    pushInitialDeltaBatches: async () => ({ baseRevision: 3, summaries: [] }),
+  });
+
+  await sm.onConnected(async () => undefined);
+  await sm.onMessage(makeActiveAssignment());
+
+  const scanLog = lines.find((line) => line.includes("cache task scope scan complete") && line.includes("claude-home"));
+  const statsLog = lines.find((line) => line.includes("cache task scope cache stats") && line.includes("claude-home"));
+  assert.match(scanLog ?? "", /files=1/);
+  assert.match(statsLog ?? "", /cacheHits=1/);
+  assert.match(statsLog ?? "", /cacheMisses=2/);
 });

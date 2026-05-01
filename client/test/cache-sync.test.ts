@@ -226,6 +226,8 @@ test("buildScopePlan 接受 scanCache：命中时复用 sha256，并把 miss 写
     ["hit.json", "miss.json"],
   );
   assert.equal(plan.totalLocal, 2);
+  assert.equal(plan.cacheHits, 1);
+  assert.equal(plan.cacheMisses, 1);
   assert.equal(scanCache.lookup("claude-home", "miss.json", missStats.size, Math.floor(missStats.mtimeMs)), null);
 });
 

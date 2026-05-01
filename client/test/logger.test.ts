@@ -3,7 +3,64 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { configureLogger, createLogger } from "../src/logger.js";
+import { configureLogger, createLogger, flushLogger } from "../src/logger.js";
+
+test("consoleSink can intercept active console lines", (t) => {
+  const originalStdoutWrite = process.stdout.write;
+  const stdout: string[] = [];
+  const sinkLines: string[] = [];
+  process.stdout.write = ((data: string | Buffer) => {
+    stdout.push(String(data));
+    return true;
+  }) as typeof process.stdout.write;
+  t.after(() => {
+    process.stdout.write = originalStdoutWrite;
+    configureLogger({ console: true, json: false, filePath: null, consoleSink: undefined });
+  });
+
+  configureLogger({
+    minLevel: "info",
+    console: true,
+    filePath: null,
+    consoleSink: (line) => {
+      sinkLines.push(line);
+      return true;
+    },
+  });
+  createLogger("sink-test").info("intercept me");
+
+  assert.equal(stdout.length, 0);
+  assert.equal(sinkLines.length, 1);
+  assert.match(sinkLines[0]!, /intercept me/);
+});
+
+test("consoleSink returning false allows stdout write", (t) => {
+  const originalStdoutWrite = process.stdout.write;
+  const stdout: string[] = [];
+  process.stdout.write = ((data: string | Buffer) => {
+    stdout.push(String(data));
+    return true;
+  }) as typeof process.stdout.write;
+  t.after(() => {
+    process.stdout.write = originalStdoutWrite;
+    configureLogger({ console: true, json: false, filePath: null, consoleSink: undefined });
+  });
+
+  configureLogger({
+    minLevel: "info",
+    console: true,
+    filePath: null,
+    consoleSink: () => false,
+  });
+  createLogger("sink-test").info("write normally");
+
+  assert.ok(stdout.join("").includes("write normally"));
+});
+
+test("flushLogger resolves without an active file stream", async () => {
+  configureLogger({ filePath: null, consoleSink: undefined });
+  await assert.doesNotReject(flushLogger());
+});
 
 test("logger writes plain-text logs to the configured file", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cerelay-client-log-test-"));

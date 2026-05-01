@@ -162,7 +162,7 @@ export function configureLogger(options: {
   if (options.console !== undefined) {
     globalConsoleOutputEnabled = options.console;
   }
-  if (options.consoleSink !== undefined) {
+  if (Object.hasOwn(options, "consoleSink")) {
     globalConsoleSink = options.consoleSink;
   }
 }
