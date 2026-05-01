@@ -20,8 +20,13 @@ import type {
 } from "./protocol.js";
 import type { ClientCacheStore, PersistedManifest } from "./client-cache-store.js";
 import type { CacheTaskManager } from "./cache-task-manager.js";
+import type { AccessLedgerRuntime } from "./access-ledger.js";
+import { SessionAccessBuffer, type AccessEvent } from "./access-event-buffer.js";
+import { DaemonControlClient } from "./daemon-control.js";
 
 const log = createLogger("file-proxy-manager");
+
+// CACHE_MUTATING_OPS 定义在文件底部 (line ~1616), Phase 5.2 access tracking 复用
 
 /** FUSE daemon 发出的 JSON 请求（从 stdout 读取） */
 interface FuseRequest {
@@ -51,6 +56,12 @@ interface Deferred {
   silent?: boolean;
   /** 入队时间戳（仅 client 穿透 deferred 设置），用于计算 round-trip 耗时 */
   startedAt?: number;
+  /**
+   * 派生 access event 用的 op + 绝对路径上下文。仅 client-routed FUSE 请求
+   * (非 silent) 设置；resolveResponse 收到回应时根据 resp 派生 AccessEvent
+   * 进 buffer + 实时推 daemon control msg.
+   */
+  opForAccess?: { op: string; path: string };
 }
 
 type CacheTaskReadGate = Pick<
@@ -154,6 +165,22 @@ export class FileProxyManager {
   private readonly cacheTaskManager: CacheTaskReadGate | undefined;
   /** AccessLedger projection (启动期把 ledger.missing 注入 snapshot, 见 §7.4) */
   private readonly accessLedgerStore: AccessLedgerProjection | undefined;
+  /**
+   * 当前 session 的访问事件 buffer (Phase 5.1). flush 由 file-proxy-manager 在
+   * shutdown / 5s timer / sync_complete 时驱动 (Phase 5.3 集成).
+   * Buffer 内 events 在 flush 时应用到 ledger; 但 daemon 实时增量推送在 RPC
+   * 响应时立即发出 (不等 flush), 保证 namespace 内 CC 实时可见.
+   */
+  private readonly accessBuffer: SessionAccessBuffer = new SessionAccessBuffer();
+  /**
+   * Daemon control client 包装。spawn 后从 controlStream 实例化, 用于 fire-and-forget
+   * 推送 putNegative / invalidateNegativePrefix / invalidateCache / shutdown.
+   * 创建在 startWithRetry 之后, shutdown 之前为 null.
+   */
+  private daemonControl: DaemonControlClient | null = null;
+  /** Server-side cache hit 5s 防抖去重 (Codex 新 F1 / spec §4.4) */
+  private readonly cacheHitDebounce = new Map<string, number>();
+  private static readonly CACHE_HIT_DEBOUNCE_MS = 5000;
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -257,6 +284,157 @@ export class FileProxyManager {
     return this._mountPoint;
   }
 
+  // ============================================================
+  // Phase 5 Access Tracking - 公开访问 buffer 给上层 (server.ts) 触发 flush
+  // ============================================================
+
+  /** 暴露 buffer 给上层 — Phase 5.3 在 5s timer / sync_complete / shutdown 时调 flush */
+  getAccessBuffer(): SessionAccessBuffer {
+    return this.accessBuffer;
+  }
+
+  /** 暴露 daemon control client (有可能为 null 如果 spawn 失败) */
+  getDaemonControl(): DaemonControlClient | null {
+    return this.daemonControl;
+  }
+
+  /**
+   * 在 RPC 派发到 client 之前调用. 对 mutation op 立即记录 access event +
+   * 推 daemon invalidate_negative_prefix / invalidate_cache (实时可见).
+   */
+  private recordMutationEvent(req: FuseRequest, hand_path: string): void {
+    if (!CACHE_MUTATING_OPS.has(req.op)) return;
+
+    let event: AccessEvent | null = null;
+    switch (req.op) {
+      case "write":
+      case "create":
+      case "truncate":
+      case "setattr":
+      case "chmod":
+        event = { op: req.op as any, path: hand_path };
+        break;
+      case "mkdir":
+        event = { op: "mkdir", path: hand_path };
+        break;
+      case "unlink":
+        event = { op: "unlink", path: hand_path };
+        break;
+      case "rmdir":
+        event = { op: "rmdir", path: hand_path };
+        break;
+      case "rename": {
+        const newRoot = this.roots[req.newRoot ?? req.root];
+        if (newRoot && req.newRelPath !== undefined) {
+          const newPath = req.newRelPath ? path.join(newRoot, req.newRelPath) : newRoot;
+          event = { op: "rename", oldPath: hand_path, newPath };
+        }
+        break;
+      }
+    }
+    if (!event) return;
+    this.accessBuffer.recordEvent(event);
+    // 实时推 daemon (fire-and-forget); rename 用 newPath 做 invalidate
+    if (this.daemonControl) {
+      const targetPath = event.op === "rename" ? event.newPath : event.path;
+      if (event.op === "unlink" || event.op === "rmdir") {
+        // unlink/rmdir 不清祖先 missing - 这两个 op 是删除, 不创建新路径
+        // 但目录或文件被删后, daemon 内对应的 stat/readdir 缓存要失效
+        void this.daemonControl.invalidateCache(targetPath);
+      } else {
+        // 创建/写入: 清祖先 missing + 失效缓存 (双管齐下)
+        void this.daemonControl.invalidateNegativePrefix(targetPath);
+        void this.daemonControl.invalidateCache(targetPath);
+      }
+    }
+  }
+
+  /**
+   * 在 RPC 响应回到 server 时调用 (resolveResponse). 根据 deferred.opForAccess +
+   * resp 派生 AccessEvent 进 buffer; missing 类事件同时实时推 daemon putNegative.
+   */
+  private deriveAccessEventFromResponse(
+    opCtx: { op: string; path: string },
+    resp: FileProxyResponse,
+  ): void {
+    // ENOENT + shallowestMissingAncestor: 写 missing
+    if (resp.error?.code === 2 /* ENOENT */) {
+      const ancestor = this.normalizeMissingAncestor(resp.shallowestMissingAncestor, opCtx.path);
+      if (!ancestor) return; // 越界 / 缺字段 — 静默丢弃
+      if (opCtx.op === "getattr" || opCtx.op === "read" || opCtx.op === "readdir") {
+        this.accessBuffer.recordEvent({
+          op: opCtx.op as any,
+          path: opCtx.path,
+          result: "missing",
+          shallowestMissingAncestor: ancestor,
+        });
+        // 实时推 daemon — 让 namespace 内 CC 立即可见
+        if (this.daemonControl) {
+          void this.daemonControl.putNegative(ancestor);
+        }
+      }
+      return;
+    }
+
+    // getattr 成功: stat 字段决定 file/dir
+    if (opCtx.op === "getattr" && resp.stat) {
+      this.accessBuffer.recordEvent({
+        op: "getattr",
+        path: opCtx.path,
+        result: resp.stat.isDir ? "dir" : "file",
+        mtime: resp.stat.mtime,
+      });
+      return;
+    }
+
+    // readdir 成功: entries 字段
+    if (opCtx.op === "readdir" && resp.entries) {
+      this.accessBuffer.recordEvent({ op: "readdir", path: opCtx.path, result: "ok" });
+      return;
+    }
+
+    // read ok 不写 ledger (spec §4.3): CC read 之前必然 getattr 过, 不重复
+  }
+
+  /**
+   * 校验 client 上报的 shallowestMissingAncestor 必须位于本 session FUSE roots 内 (Codex D1).
+   * 越界返回 null, 由 caller 决定是否静默丢弃或 fallback 用原 path.
+   * 缺字段 (client 实现 bug) 也返回 null.
+   */
+  private normalizeMissingAncestor(
+    ancestor: string | undefined,
+    fallbackPath: string,
+  ): string | null {
+    const candidate = ancestor && ancestor.length > 0 ? ancestor : fallbackPath;
+    const sessionRoots = Object.values(this.roots);
+    const inRoots = sessionRoots.some(
+      (root) => candidate === root || candidate.startsWith(root + "/"),
+    );
+    if (!inRoots) {
+      log.warn("shallowestMissingAncestor 越界 root, 降级丢弃", {
+        sessionId: this.sessionId,
+        ancestor: candidate,
+        sessionRoots,
+      });
+      return null;
+    }
+    return candidate;
+  }
+
+  /**
+   * Server-side cache hit 时的 lastAccessedAt 刷新 (5s 防抖).
+   * 高频 hit 不能每次都写 buffer + 推 daemon - 没有意义且浪费. 5s 内同 path 只记一次.
+   */
+  private recordCacheHitAccess(path: string): void {
+    const now = Date.now();
+    if (this.cacheHitDebounce.has(path)) {
+      const last = this.cacheHitDebounce.get(path)!;
+      if (now - last < FileProxyManager.CACHE_HIT_DEBOUNCE_MS) return;
+    }
+    this.cacheHitDebounce.set(path, now);
+    this.accessBuffer.recordEvent({ op: "cache_hit", path });
+  }
+
   private static readonly FUSE_MAX_RETRIES = 3;
   private static readonly FUSE_RETRY_DELAY_MS = 1000;
 
@@ -355,6 +533,8 @@ export class FileProxyManager {
 
     this.fuseProcess = child;
     this.controlStream = child.stdio[3] as NodeJS.WritableStream;
+    // controlStream 是 Writable - 包装为 DaemonControlClient 用于 Phase 5 access tracking 实时推送
+    this.daemonControl = new DaemonControlClient(this.controlStream as unknown as import("node:stream").Writable);
 
     // 收集 stderr 用于异常退出时诊断
     // [FUSE-DIAG] 前缀的行是诊断专用日志（snapshot 加载汇总、cache miss path、
@@ -901,6 +1081,21 @@ export class FileProxyManager {
       return;
     }
 
+    // Phase 5.2: 派生 access event (含 ENOENT 时实时推 daemon putNegative)
+    if (deferred.opForAccess) {
+      try {
+        this.deriveAccessEventFromResponse(deferred.opForAccess, resp);
+      } catch (err) {
+        // 派生失败不能阻塞主响应链路 - warn 后继续
+        log.warn("派生 access event 失败 (降级)", {
+          sessionId: this.sessionId,
+          reqId: resp.reqId,
+          op: deferred.opForAccess.op,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // 将 Hand 响应写回 FUSE daemon stdin
     const fuseResp: Record<string, unknown> = { reqId: resp.reqId };
     if (resp.error) {
@@ -1055,6 +1250,12 @@ export class FileProxyManager {
       return;
     }
 
+    // Phase 5.2: mutation op 派生 access event + 实时推 daemon control msg
+    if (CACHE_MUTATING_OPS.has(req.op)) {
+      const handPath = relPath ? path.join(clientRoot, relPath) : clientRoot;
+      this.recordMutationEvent(req, handPath);
+    }
+
     // 运行时 cache 读优先：对 read op 在 home-claude / home-claude-json 命中
     // blob 时直接从 Server 侧返回，不穿透 Client。
     // Python FUSE daemon 也会在本地 snapshot 缓存中查（启动时预热过），所以
@@ -1067,6 +1268,9 @@ export class FileProxyManager {
         const result = await this.tryServeReadFromCache(req);
         if (result.served) {
           this.cacheHitReads++;
+          // Phase 5.2: server-side cache hit 刷 lastAccessedAt 防 aging 误清 (5s 防抖)
+          const handPath = relPath ? path.join(clientRoot, relPath) : clientRoot;
+          this.recordCacheHitAccess(handPath);
           return;
         }
         readMissReason = result.reason;
@@ -1146,6 +1350,13 @@ export class FileProxyManager {
 
       // 注册 pending，等待 Client 响应
       deferred = this.createDeferred(reqId);
+      // Phase 5.2: 记 opForAccess 让 resolveResponse 派生 AccessEvent
+      // (clientPath 已在上方计算; mutation op 不进 access event 派生 — 它们走
+      // recordMutationEvent 即时路径; access event 派生只覆盖 read-side ops)
+      const isReadSideOp = req.op === "getattr" || req.op === "readdir" || req.op === "read";
+      if (isReadSideOp) {
+        deferred.opForAccess = { op: req.op, path: clientPath };
+      }
       this.pendingRequests.set(reqId, deferred);
       if (this.pendingRequests.size > this.peakPendingRequests) {
         this.peakPendingRequests = this.pendingRequests.size;
