@@ -235,9 +235,15 @@ export class FileProxyHandler {
    * 递归扫描目录树，返回完整快照（stat + readdir + 小文件内容）。
    * 用于 FUSE 缓存预注入，消除启动时的逐文件 round-trip。
    */
+  // maxDepth 默认 8：实测 ~/.claude（典型用户场景）depth 8 覆盖 99% 的条目，
+  // depth 5 → 8 的 entries 多 ~9k（17k → 27k），snapshot json 多 ~1.8MB（3.3 → 5.1MB），
+  // 本地 stat() 时间几乎不变（fs 很便宜）。代价：wire transfer 多 ~1s。
+  // 换来：plugins/cache/<vendor>/<plugin>/<version>/skills|commands/* 这层不再
+  // 全部穿透 client（每个 ~285ms RTT），启动期收益远超传输代价。
+  // 超过 8 几乎无新条目（depth 10 仅 +400 entries），不值得。
   private async doSnapshot(
     rootPath: string,
-    maxDepth = 5,
+    maxDepth = 8,
   ): Promise<{ entries: FileProxySnapshotEntry[]; negativeEntries: string[] }> {
     const results: FileProxySnapshotEntry[] = [];
     // negativeEntries 记录 readdir 列出但 stat 失败的子项（典型场景：broken symlink）。
