@@ -108,6 +108,12 @@ services:
       - CERELAY_SOCKS_PROXY=socks5://mock-socks:1080
       - CERELAY_SOCKS_DNS_SERVER=mock-dns
       - CERELAY_SOCKS_UDP=block
+      # docker bridge 子网由 docker 自动分配（多 worktree 隔离），可能落在
+      # 172.19.0.0/16 等常见网段，正好覆盖默认 TUN 地址 172.19.0.1/30
+      # → sing-box 的 strict_route 会把 mock-socks IP 也吸进 TUN 形成 loopback
+      # → monitor 第一次 cycle 立即探测到 SOCKS proxy "不可达" → 误触发 fail-close
+      # 显式指定一个不会与 docker bridge 重叠的私有网段，规避此冲突
+      - CERELAY_SOCKS_TUN_ADDRESS=192.168.255.1/30
       - 'CERELAY_PTY_COMMAND=curl -fsS "http://echo-$(date +%s%N).test:8080/ping"'
       - CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
     cap_add:
