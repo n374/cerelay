@@ -260,10 +260,25 @@ export class FileProxyHandler {
   // 换来：plugins/cache/<vendor>/<plugin>/<version>/skills|commands/* 这层不再
   // 全部穿透 client（每个 ~285ms RTT），启动期收益远超传输代价。
   // 超过 8 几乎无新条目（depth 10 仅 +400 entries），不值得。
+  //
+  // unlimitedSubtrees：在 rootPath 下的相对路径（顶层目录名为主），命中后扫描
+  // 不受 maxDepth 限制。默认 ["plugins"]：plugins/cache/<vendor>/<plugin>/<version>/
+  // 下还有 .git/、深层 skill 子目录等，CC 启动期会探。让 plugins 整棵子树
+  // 一次性铺平到 snapshot，运行时不再因 depth 截断而穿透。
   private async doSnapshot(
     rootPath: string,
     maxDepth = 8,
+    unlimitedSubtrees: readonly string[] = ["plugins"],
   ): Promise<{ entries: FileProxySnapshotEntry[]; negativeEntries: string[] }> {
+    // 把 unlimitedSubtrees 解析成 rootPath 下的绝对路径前缀
+    const unlimitedPrefixes = unlimitedSubtrees.map((sub) => path.join(rootPath, sub));
+    const isInUnlimitedSubtree = (dirPath: string): boolean => {
+      for (const prefix of unlimitedPrefixes) {
+        if (dirPath === prefix) return true;
+        if (dirPath.startsWith(`${prefix}${path.sep}`)) return true;
+      }
+      return false;
+    };
     const results: FileProxySnapshotEntry[] = [];
     // negativeEntries 记录 readdir 列出但 stat 失败的子项（典型场景：broken symlink）。
     // FUSE daemon 启动时把这些路径预填到本地负缓存，CC 探测时直接返回 ENOENT，
@@ -277,10 +292,14 @@ export class FileProxyHandler {
     let truncatedAtMaxDepth = 0;
     const sampleChildStatErrors: string[] = [];
 
+    let unlimitedDepthHits = 0;
     const scan = async (dirPath: string, depth: number): Promise<void> => {
       if (depth > maxDepth) {
-        truncatedAtMaxDepth++;
-        return;
+        if (!isInUnlimitedSubtree(dirPath)) {
+          truncatedAtMaxDepth++;
+          return;
+        }
+        unlimitedDepthHits++;
       }
       if (depth > maxDepthSeen) maxDepthSeen = depth;
 
@@ -370,6 +389,8 @@ export class FileProxyHandler {
       maxDepth,
       maxDepthSeen,
       truncatedAtMaxDepth,
+      unlimitedSubtrees,
+      unlimitedDepthHits,
       entryCount: results.length,
       negativeEntryCount: negativeEntries.length,
       dirEntryFailures,
