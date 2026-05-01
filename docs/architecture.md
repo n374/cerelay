@@ -348,6 +348,7 @@ npm run test:smoke
 | [`acp-editor-integration.md`](./acp-editor-integration.md) | ACP stdio 模式协议、Zed / VS Code 集成 |
 | [`plan-d-mcp-shadow-tools.md`](./plan-d-mcp-shadow-tools.md) | Shadow MCP 设计（绕开 PreToolUse deny 协议约束） |
 | [`plan-acp-relay.md`](./plan-acp-relay.md) | ACP relay 设计 |
+| [`superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md`](./superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md) | Access-Ledger 驱动的 Snapshot + 增量同步缓存重构设计（修复 phase_syncing 抢跑、持久化 missing 路径、扩展 cwd-ancestor `CLAUDE.md` 覆盖） |
 | [`../CLAUDE.md`](../CLAUDE.md) | 项目级 AI 协作规范、架构特点详细约束 |
 
 ---
