@@ -828,8 +828,11 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
             head = keys[:n]
             tail = keys[-n:] if len(keys) > n else []
             return head + (["..."] + tail if tail and head[-1] != tail[0] else [])
+        # build_marker 同 server/src/index.ts 的 buildFeatureMarker，让用户看
+        # FUSE 端口日志也能立刻判断 Python 脚本是新还是旧（Docker image 重建后才更新）。
         sys.stderr.write(
-            f"[FUSE-DIAG] snapshot loaded: total={_loaded} "
+            f"[FUSE-DIAG] snapshot loaded: build_marker=snapshot-negatives+fuse-neg-cache+depth8 "
+            f"total={_loaded} "
             f"stats={len(_stat_keys)} readdirs={len(_readdir_keys)} reads={len(_read_keys)} "
             f"negatives={len(_negative_keys)} "
             f"stat_sample={_sample(_stat_keys)} "

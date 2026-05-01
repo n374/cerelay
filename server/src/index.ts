@@ -49,10 +49,16 @@ async function main(): Promise<void> {
 
   await server.start();
 
+  // Build/feature marker：升级 server 后看 server log 第一行就能确认部署是否生效。
+  // 改 BUILD_FEATURE_MARKER 字符串可以在新功能发布时让用户立刻区分新旧版本。
+  // 当前 marker 包含 P0-1（snapshot.negativeEntries / broken symlink）+ P0-2
+  // （Python FUSE 负缓存）+ doSnapshot maxDepth=8 这一波。
   log.info("Cerelay Server 已启动", {
     port: opts.port,
     model: opts.model,
     auth: opts.auth,
+    buildFeatureMarker: "snapshot-negatives+fuse-neg-cache+depth8",
+    nodeVersion: process.version,
   });
 }
 
