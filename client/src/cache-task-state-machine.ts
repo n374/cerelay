@@ -171,6 +171,20 @@ export class CacheTaskStateMachine {
   async onConnected(send: SendFn): Promise<void> {
     this.send = send;
     this.state = "connected-passive";
+    const capabilities: ClientHello["capabilities"] = {
+      cacheTaskV1: {
+        protocolVersion: 1,
+        maxFileBytes: MAX_FILE_BYTES,
+        maxBatchBytes: MAX_INFLIGHT_BYTES,
+        debounceMs: this.debounceMs,
+        watcherBackend: "chokidar",
+      },
+    };
+
+    log.info("cache task connected", {
+      capabilities,
+      disableCacheTask: this.disableCacheTask,
+    });
 
     if (this.disableCacheTask) {
       log.debug("cache task disabled by env, keep passive");
@@ -181,15 +195,7 @@ export class CacheTaskStateMachine {
       type: "client_hello",
       deviceId: this.deviceId,
       cwd: this.cwd,
-      capabilities: {
-        cacheTaskV1: {
-          protocolVersion: 1,
-          maxFileBytes: MAX_FILE_BYTES,
-          maxBatchBytes: MAX_INFLIGHT_BYTES,
-          debounceMs: this.debounceMs,
-          watcherBackend: "chokidar",
-        },
-      },
+      capabilities,
     };
     await this.sendMessage(hello);
   }
@@ -236,6 +242,21 @@ export class CacheTaskStateMachine {
   }
 
   private async handleActiveAssignment(message: CacheTaskAssignment): Promise<void> {
+    log.info("cache task active assignment", {
+      role: message.role,
+      reason: message.reason,
+      assignmentId: message.assignmentId,
+      revision: message.manifest?.revision,
+      scopeFileCounts: message.manifest
+        ? Object.fromEntries(
+          ALL_SCOPES.map((scope) => [
+            scope,
+            Object.keys(message.manifest?.scopes[scope]?.entries ?? {}).length,
+          ]),
+        )
+        : undefined,
+    });
+
     if (!message.manifest) {
       await this.sendFault({
         code: "INTERNAL_ERROR",
@@ -310,6 +331,7 @@ export class CacheTaskStateMachine {
     const walkedScopes: Array<{ scope: (typeof ALL_SCOPES)[number]; locals: LocalEntry[] }> = [];
     let totalFiles = 0;
     for (const scope of ALL_SCOPES) {
+      const scopeScanStartedAt = this.now();
       const locals = await this.walkScopeImpl({
         scope,
         homedir: this.homedir,
@@ -318,6 +340,12 @@ export class CacheTaskStateMachine {
       });
       walkedScopes.push({ scope, locals });
       totalFiles += locals.length;
+      log.info("cache task scope scan complete", {
+        scope,
+        files: locals.length,
+        bytes: locals.reduce((sum, local) => sum + local.size, 0),
+        elapsedMs: this.now() - scopeScanStartedAt,
+      });
       if (!this.isGenerationCurrent(generation, message.assignmentId)) {
         return;
       }
@@ -329,6 +357,7 @@ export class CacheTaskStateMachine {
     let totalBytes = 0;
     let completedFiles = 0;
     for (const walked of walkedScopes) {
+      const scopeHashStartedAt = this.now();
       const plan = await this.hashScopeImpl({
         scope: walked.scope,
         locals: walked.locals,
@@ -345,6 +374,15 @@ export class CacheTaskStateMachine {
         },
       });
       plans.push(plan);
+      const skippedLarge = plan.metaChanges.filter(
+        (change) => change.kind === "upsert" && change.skipped,
+      ).length;
+      log.info("cache task scope cache stats", {
+        scope: walked.scope,
+        cacheHits: 0,
+        cacheMisses: plan.uploads.length + skippedLarge,
+        elapsedMs: this.now() - scopeHashStartedAt,
+      });
       totalBytes += plan.uploads.reduce((sum, item) => sum + item.change.size, 0);
       totalBytes += plan.metaChanges.reduce(
         (sum, change) => sum + (change.kind === "upsert" ? change.size : 0),
@@ -368,6 +406,7 @@ export class CacheTaskStateMachine {
       return;
     }
 
+    const uploadStartedAt = this.now();
     const initialResult = await this.pushInitialDeltaBatchesImpl({
       assignmentId: message.assignmentId,
       baseRevision: message.manifest!.revision,
@@ -380,6 +419,17 @@ export class CacheTaskStateMachine {
       onProgress: this.onProgress,
       now: this.now,
       createBatchId: this.createBatchId,
+    });
+    log.info("cache task initial upload complete", {
+      uploadedFiles: initialResult.summaries.reduce((sum, summary) => sum + summary.pushed, 0),
+      uploadedBytes: plans.reduce(
+        (sum, plan) => sum + plan.uploads.reduce((scopeSum, item) => scopeSum + item.change.size, 0),
+        0,
+      ),
+      deletedFiles: initialResult.summaries.reduce((sum, summary) => sum + summary.deleted, 0),
+      skippedLarge: initialResult.summaries.reduce((sum, summary) => sum + summary.skippedLarge, 0),
+      abortedReason: undefined,
+      elapsedMs: this.now() - uploadStartedAt,
     });
     this.revision = initialResult.baseRevision;
     if (this.initialSyncAbortController === abortController) {
@@ -412,6 +462,10 @@ export class CacheTaskStateMachine {
       scannedAt: scanStartedAt,
     };
     await this.sendMessage(syncComplete);
+    log.info("cache task sync complete acked", {
+      revision: this.revision,
+      assignmentId: message.assignmentId,
+    });
     this.state = "assigned-watching";
     this.scheduleLiveDrain();
   }

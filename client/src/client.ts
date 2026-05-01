@@ -71,6 +71,7 @@ export class CerelayClient {
   private executor: ToolExecutor;
   private fileProxy: FileProxyHandler;
   private ptySessionId = "";
+  private ptySessionCreatedAt = 0;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly homedir: string;
   /**
@@ -111,6 +112,13 @@ export class CerelayClient {
   }
 
   connect(): Promise<void> {
+    const connectStartedAt = Date.now();
+    log.info("client connect entry", {
+      serverURL: this.serverURL,
+      cwd: this.cwd,
+      deviceId: this.deviceId.slice(0, 8),
+      homedir: this.homedir,
+    });
     return new Promise((resolve, reject) => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
         this.ws.removeAllListeners();
@@ -125,6 +133,9 @@ export class CerelayClient {
 
       ws.on("open", () => {
         void (async () => {
+          log.info("websocket open", {
+            elapsedMs: Date.now() - connectStartedAt,
+          });
           this.ws = ws;
           const disableCacheTask = this.isCacheTaskDisabledImpl();
           const config = disableCacheTask ? undefined : await this.safeLoadConfig();
@@ -190,6 +201,10 @@ export class CerelayClient {
   }
 
   async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
+    log.info("send create pty session", {
+      cwd,
+      model,
+    });
     await this.resetExecutor(cwd);
     const projectClaudeSettingsLocalContent = await readProjectClaudeSettingsLocal(cwd);
     const msg: CreatePtySession = {
@@ -209,6 +224,7 @@ export class CerelayClient {
     await this.writeJSON(msg);
     const sessionId = await this.waitForPtySessionReady();
     this.ptySessionId = sessionId;
+    this.ptySessionCreatedAt = Date.now();
     return sessionId;
   }
 
@@ -226,6 +242,7 @@ export class CerelayClient {
   }
 
   private waitForPtySessionReady(): Promise<string> {
+    const waitStartedAt = Date.now();
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -251,6 +268,10 @@ export class CerelayClient {
         switch (msg.type) {
           case "pty_session_created": {
             const created = msg as PtySessionCreated;
+            log.info("pty session ready", {
+              sessionId: created.sessionId,
+              elapsedMs: Date.now() - waitStartedAt,
+            });
             cleanup();
             resolve(created.sessionId);
             break;
@@ -410,6 +431,12 @@ export class CerelayClient {
   }
 
   async runPtyPassthrough(sessionId: string): Promise<void> {
+    log.info("run pty passthrough entry", {
+      sessionId,
+      cols: process.stdout.columns ?? 80,
+      rows: process.stdout.rows ?? 24,
+      isTTY: Boolean(process.stdin.isTTY),
+    });
     return new Promise((resolve, reject) => {
       if (!this.ws) {
         reject(new Error("WebSocket 未连接"));
@@ -512,6 +539,9 @@ export class CerelayClient {
               log.info("收到首次 pty_output", {
                 sessionId,
                 bytes: buf.length,
+                elapsedSinceCreate: this.ptySessionCreatedAt > 0
+                  ? firstPtyOutputAt - this.ptySessionCreatedAt
+                  : undefined,
                 elapsedMsSincePassthrough: firstPtyOutputAt - passthroughStartedAt,
               });
               lastPtyStatsLoggedAt = firstPtyOutputAt;
