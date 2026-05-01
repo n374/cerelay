@@ -14,6 +14,7 @@
  */
 export const PYTHON_FUSE_HOST_SCRIPT = String.raw`
 import base64
+import bisect
 import errno
 import json
 import os
@@ -59,6 +60,90 @@ _stdout_lock = threading.Lock()
 # 缓存
 # ============================================================
 
+class NegativeCache:
+    def __init__(self):
+        self._sorted = []
+        self._set = set()
+
+    def _normalize(self, path):
+        if not path:
+            return ""
+        normalized = os.path.normpath(path)
+        if normalized == ".":
+            return ""
+        return normalized
+
+    def contains(self, path):
+        """路径本身或任意父前缀已知 ENOENT 时命中。caller 持有外层锁。"""
+        normalized = self._normalize(path)
+        if not normalized:
+            return False
+        idx = bisect.bisect_right(self._sorted, normalized)
+        if idx <= 0:
+            return False
+        candidate = self._sorted[idx - 1]
+        return normalized == candidate or normalized.startswith(candidate + "/")
+
+    def put(self, path):
+        """插入 missing path；若父前缀已存在则跳过，并吸收子条目。caller 持有外层锁。"""
+        normalized = self._normalize(path)
+        if not normalized:
+            return
+        idx = bisect.bisect_right(self._sorted, normalized)
+        if idx > 0:
+            candidate = self._sorted[idx - 1]
+            if normalized == candidate or normalized.startswith(candidate + "/"):
+                return
+
+        prefix = normalized + "/"
+        start = bisect.bisect_left(self._sorted, normalized)
+        end = start
+        while end < len(self._sorted):
+            candidate = self._sorted[end]
+            if candidate == normalized or candidate.startswith(prefix):
+                end += 1
+                continue
+            break
+
+        for candidate in self._sorted[start:end]:
+            self._set.discard(candidate)
+        del self._sorted[start:end]
+        bisect.insort(self._sorted, normalized)
+        self._set.add(normalized)
+
+    def invalidate_prefix(self, prefix):
+        """清理 prefix 的祖先 missing 记录，以及 prefix 下的子记录。caller 持有外层锁。"""
+        normalized = self._normalize(prefix)
+        if not normalized:
+            return
+
+        current = normalized
+        while current and current != "/":
+            if current in self._set:
+                self._set.discard(current)
+                self._sorted.remove(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+        child_prefix = normalized + "/"
+        start = bisect.bisect_left(self._sorted, normalized)
+        end = start
+        while end < len(self._sorted):
+            candidate = self._sorted[end]
+            if candidate == normalized or candidate.startswith(child_prefix):
+                end += 1
+                continue
+            break
+        for candidate in self._sorted[start:end]:
+            self._set.discard(candidate)
+        del self._sorted[start:end]
+
+    def clear(self):
+        self._sorted.clear()
+        self._set.clear()
+
 class Cache:
     def __init__(self):
         self._lock = threading.Lock()
@@ -77,7 +162,7 @@ class Cache:
         self._read_perm = {}    # path → bytes
         # P0-1: snapshot 启动时预填的"已知 ENOENT path"（broken symlink 等）。
         # 永久有效（无 TTL）：snapshot 已经把 readdir 列出但 stat 失败的子项标好了。
-        self._negative_perm = set()
+        self._negative_perm = NegativeCache()
         # P0-2: 运行时发现的 ENOENT，缓存 _negative_ttl 秒。
         self._negative = {}   # path → expire_at (monotonic)
         self._stat_ttl = 10.0
@@ -111,7 +196,7 @@ class Cache:
     def is_negative(self, path):
         """ENOENT 命中判断。返回 True 时 caller 应该直接抛 ENOENT，不发 RPC。"""
         with self._lock:
-            if path in self._negative_perm:
+            if self._negative_perm.contains(path):
                 self.negative_hit_perm += 1
                 return True
             entry = self._negative.get(path)
@@ -132,12 +217,12 @@ class Cache:
     def put_negative_perm(self, path):
         """snapshot 启动预填的 ENOENT，永久有效。"""
         with self._lock:
-            self._negative_perm.add(path)
+            self._negative_perm.put(path)
 
     def invalidate_negative(self, path):
         """文件被创建时调用，让之前的负缓存立即失效。"""
         with self._lock:
-            self._negative_perm.discard(path)
+            self._negative_perm.invalidate_prefix(path)
             self._negative.pop(path, None)
 
     def get_stat(self, path):
@@ -239,7 +324,7 @@ class Cache:
             self._readdir_perm.pop(parent, None)
             self._readdir_perm.pop(path, None)
             # "不存在" 缓存同样要清——否则文件已经创建但 getattr 仍返 ENOENT。
-            self._negative_perm.discard(path)
+            self._negative_perm.invalidate_prefix(path)
             self._negative.pop(path, None)
 
 _cache = Cache()
