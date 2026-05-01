@@ -827,6 +827,12 @@ export class FileProxyManager {
     if (resp.snapshot) {
       fuseResp.snapshot = resp.snapshot;
     }
+    if (resp.negativeEntries) {
+      // P0-1：snapshot response 带回的 broken symlink 等"应当 ENOENT 的路径"。
+      // sendSnapshotRequest 的 deferred resolve 处会从这里取出来；不复制就丢失，
+      // 导致 server 拿到的 snapshot 永远没有 negatives 字段（已实测复现）。
+      fuseResp.negativeEntries = resp.negativeEntries;
+    }
 
     this.writeToDaemon(fuseResp);
     deferred.resolve(fuseResp);
