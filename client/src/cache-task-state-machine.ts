@@ -34,6 +34,7 @@ import type {
   CacheTaskSyncComplete,
   ClientHello,
   HandToServerMessage,
+  SyncPlan,
 } from "./protocol.js";
 
 const log = createLogger("cache-task-sm");
@@ -266,6 +267,10 @@ export class CacheTaskStateMachine {
       await this.transitionToPassive();
       return;
     }
+    if (!message.syncPlan) {
+      throw new Error("active assignment 缺少 syncPlan");
+    }
+    const syncPlan = message.syncPlan;
 
     this.generation += 1;
     const generation = this.generation;
@@ -290,7 +295,7 @@ export class CacheTaskStateMachine {
 
     try {
       await watcher.start();
-      await this.runInitialSync(message, generation);
+      await this.runInitialSync(message, generation, syncPlan);
     } catch (error) {
       // Cache sync 失败一律降级为"无缓存继续"——CLAUDE.md 明确写过缓存同步失败不阻塞 PTY session，
       // FUSE 读请求会回穿到 Client。但绝不能静默吞：异常以 error 级别打全堆栈，必要细节（ack.errorCode、
@@ -323,7 +328,7 @@ export class CacheTaskStateMachine {
     }
   }
 
-  private async runInitialSync(message: CacheTaskAssignment, generation: number): Promise<void> {
+  private async runInitialSync(message: CacheTaskAssignment, generation: number, syncPlan: SyncPlan): Promise<void> {
     const abortController = this.replaceInitialSyncAbortController();
     const scanStartedAt = this.now();
     this.onProgress?.({ kind: "scan_start" });
@@ -335,6 +340,7 @@ export class CacheTaskStateMachine {
       const locals = await this.walkScopeImpl({
         scope,
         homedir: this.homedir,
+        instruction: syncPlan.scopes[scope],
         exclude: this.exclude,
         shouldAbort: () => !this.isGenerationCurrent(generation, message.assignmentId),
       });

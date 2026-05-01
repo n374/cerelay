@@ -11,6 +11,7 @@ import type {
   CacheTaskDelta,
   CacheTaskDeltaAck,
   CacheTaskUpsertChange,
+  ScopeWalkInstruction,
 } from "./protocol.js";
 
 const log = createLogger("cache-sync");
@@ -99,6 +100,7 @@ export interface ScanOptions {
 export interface WalkScopeArgs {
   scope: CacheScope;
   homedir: string;
+  instruction?: ScopeWalkInstruction;
   exclude?: (relPath: string) => boolean;
   shouldAbort?: () => boolean;
 }

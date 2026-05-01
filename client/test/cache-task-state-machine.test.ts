@@ -72,6 +72,12 @@ function makeActiveAssignment(): CacheTaskAssignment {
         "claude-json": { entries: {} },
       },
     },
+    syncPlan: {
+      scopes: {
+        "claude-home": { subtrees: [], files: [], knownMissing: [] },
+        "claude-json": { subtrees: [], files: [], knownMissing: [] },
+      },
+    },
   };
 }
 
@@ -156,6 +162,7 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
   const watcher = new FakeWatcher();
   const scanCache = new FakeScanCache();
   const walkedScopes: string[] = [];
+  const walkedInstructions: unknown[] = [];
   const hashedScopes: string[] = [];
   let watcherExclude: ((relPath: string) => boolean) | undefined;
   let pushCalled = false;
@@ -173,8 +180,9 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
       return watcher;
     },
     onProgress: (event) => progress.push(event),
-    walkScope: async ({ scope, exclude }) => {
+    walkScope: async ({ scope, exclude, instruction }) => {
       walkedScopes.push(scope);
+      walkedInstructions.push(instruction);
       if (scope === "claude-home") {
         assert.equal(exclude?.("projects/foo"), true);
         assert.equal(exclude?.("projectsx/foo"), false);
@@ -236,6 +244,10 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
 
   assert.equal(pushCalled, true);
   assert.deepEqual(walkedScopes, ["claude-home", "claude-json"]);
+  assert.deepEqual(walkedInstructions, [
+    { subtrees: [], files: [], knownMissing: [] },
+    { subtrees: [], files: [], knownMissing: [] },
+  ]);
   assert.deepEqual(hashedScopes, ["claude-home", "claude-json"]);
   assert.equal(watcherExclude?.("projects/demo"), true);
   assert.equal(watcherExclude?.("projectsx/demo"), false);
@@ -253,6 +265,25 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
   if (syncComplete?.type === "cache_task_sync_complete") {
     assert.equal(syncComplete.baseRevision, 4);
   }
+});
+
+test("CacheTaskStateMachine active assignment 缺少 syncPlan 时抛错", async () => {
+  const sm = new CacheTaskStateMachine({
+    cwd: "/repo",
+    deviceId: "device-1",
+    disableCacheTask: false,
+    setIntervalFn: noopInterval as unknown as typeof setInterval,
+    clearIntervalFn: (() => undefined) as typeof clearInterval,
+    walkScope: walkNothing,
+    hashScope: hashNothing,
+    pushInitialDeltaBatches: async () => ({ baseRevision: 3, summaries: [] }),
+  });
+
+  await sm.onConnected(async () => undefined);
+  await assert.rejects(
+    () => sm.onMessage({ ...makeActiveAssignment(), syncPlan: undefined }),
+    /active assignment 缺少 syncPlan/,
+  );
 });
 
 test("CacheTaskStateMachine initial pipeline 失败时仍会 flush scan cache", async () => {
