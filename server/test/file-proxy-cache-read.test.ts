@@ -211,7 +211,10 @@ test("syncing 状态下 cache read 强制穿透 Client", async (t) => {
   assert.equal(hit.served, false);
 });
 
-test("non-ready 时 collectAndWriteSnapshot 会回退向 Client 拉 home roots snapshot", async (t) => {
+test("phase=degraded 时 collectAndWriteSnapshot 会回退向 Client 拉 home roots snapshot", async (t) => {
+  // Phase 4.1 (spec §7.2): snapshot 收集阻塞等 cache ready, 仅 phase=degraded/idle/不存在
+  // 时才退化为 fallback (兜底 walk client). phase=syncing 现在是阻塞等待, 而非立即 fallback.
+  // 本测试覆盖 fallback 兜底路径 — 用 phase=degraded 触发.
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
@@ -229,7 +232,7 @@ test("non-ready 时 collectAndWriteSnapshot 会回退向 Client 拉 home roots s
       registerMutationHintForPath: async () => {},
       describeTaskState: () => ({
         exists: true,
-        phase: "syncing",
+        phase: "degraded", // Phase 4.1: 立即触发 fallback (不再用 syncing 永远 hang)
         activeClientId: null,
         assignmentId: null,
         revision: 0,
