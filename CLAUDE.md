@@ -256,6 +256,7 @@ cerelay/
 - Server 侧凭证必须作为 `home-claude/.credentials.json` shadow file 暴露给 runtime，且读写、truncate 都应作用在 Server 侧本地凭证文件。
 - 凭证的真实存放位置为 `${CERELAY_DATA_DIR:-/var/lib/cerelay}/credentials/default/.credentials.json`（由 docker-compose 的 `cerelay-data` named volume 持久化）。首次启动文件不存在是允许的——CC `login` 会通过 FUSE create 创建该文件；shadow file 映射必须**总是注入**，不得因为文件不存在就跳过，否则写入会穿透到 Client 侧，违反隔离约束。
 - Data 目录（`${CERELAY_DATA_DIR:-/var/lib/cerelay}`）还用于存放 Client 文件同步缓存（`client-cache/<deviceId>/<cwdHash>/`），禁止把业务数据写到容器根文件系统其他位置。
+- `~/.claude/settings.json` 中的"登录态字段"——`env.ANTHROPIC_BASE_URL` / `env.ANTHROPIC_API_KEY` / `env.ANTHROPIC_AUTH_TOKEN` / 顶层 `apiKeyHelper`——必须经 `server/src/claude-settings-redaction.ts` 在 server → CC 出口处过滤后才能进入 namespace。三处出口（启动期 snapshot 预热 / 运行时 cache 命中 / 运行时 Client 穿透）**必须全部 redact**，不得依赖 Client 侧清洁。Client 端 settings.json 原文不变、cache blob 也保留 Client 原文不过滤，过滤只发生在 server → namespace 最后一公里；这样 Client 改动经 cache delta 同步后再次读取仍然是过滤版。Login-state fields in `~/.claude/settings.json` MUST be redacted at the server→CC egress (3 paths) — never trust Client-side cleanliness. 详见 `docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md`。**`~/.claude.json` 中的同类字段（`apiKeyHelper` / `oauthAccount` 等）暂不过滤** / not yet handled，后续若发现实际泄漏再扩展，参考 spec §9.1。
 
 ```typescript
 // 关键调用位置：session.ts 中的 createSessionRuntime()

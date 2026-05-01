@@ -4,8 +4,13 @@ import { existsSync } from "node:fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { createLogger } from "./logger.js";
 import { PYTHON_FUSE_HOST_SCRIPT } from "./fuse-host-script.js";
+import {
+  isClaudeHomeSettingsJson,
+  redactClaudeSettingsLoginState,
+} from "./claude-settings-redaction.js";
 import type {
   CacheScope,
   FileProxyRequest,
@@ -38,6 +43,12 @@ interface Deferred {
   resolve: (resp: Record<string, unknown>) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /**
+   * true = 内部发起的请求（如 settings.json 全文穿透），响应不要自动写回 Python
+   * daemon，而是把 raw FileProxyResponse 交给 resolve 调用方继续处理。
+   * 默认 false（外部 FUSE → server 链路，原有行为：响应转写到 Python daemon）。
+   */
+  silent?: boolean;
 }
 
 type CacheTaskReadGate = Pick<
@@ -434,14 +445,19 @@ export class FileProxyManager {
   private cacheEntryToSnapshot(
     absPath: string,
     entry: import("./protocol.js").CacheEntry,
-    _scope: CacheScope,
-    _relPath: string,
+    scope: CacheScope,
+    relPath: string,
   ): FileProxySnapshotEntry {
     let data: string | undefined;
     if (!entry.skipped && entry.sha256 && this.cacheAvailable()) {
       const buf = this.cacheStore!.readBlobSync(this.deviceId!, this.clientCwd, entry.sha256);
       if (buf) {
-        data = buf.toString("base64");
+        // 出口 #1：~/.claude/settings.json 灌进 Python 启动 snapshot 缓存前 redact 登录态字段。
+        // size-preserving padding 保证 stat.size（取自 entry.size）与实际 data 一致。
+        const out = isClaudeHomeSettingsJson(scope, relPath)
+          ? redactClaudeSettingsLoginState(buf)
+          : buf;
+        data = out.toString("base64");
       }
       // blob 缺失（被删 / 损坏）时不带 data，FUSE read 时会穿透 Client
     }
@@ -484,8 +500,15 @@ export class FileProxyManager {
     );
     if (!entry || entry.skipped || !entry.sha256) return false;
 
-    const buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
+    let buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
     if (!buf) return false;
+
+    // 出口 #2：~/.claude/settings.json 命中 cache 后、切片前 redact 登录态字段。
+    // size-preserving padding 保证 buf.byteLength 与 entry.size / stat.size 一致，
+    // offset/size 切片语义不变。
+    if (isClaudeHomeSettingsJson(scope, cacheRelPath)) {
+      buf = redactClaudeSettingsLoginState(buf);
+    }
 
     const offset = req.offset ?? 0;
     const size = req.size ?? buf.byteLength;
@@ -568,6 +591,13 @@ export class FileProxyManager {
     }
     this.pendingRequests.delete(resp.reqId);
     clearTimeout(deferred.timer);
+
+    // silent 路径：内部发起的 Client 请求（如 settings.json 全文穿透），
+    // 把 raw response 交给调用方处理，不自动写回 Python daemon。
+    if (deferred.silent) {
+      deferred.resolve(resp as unknown as Record<string, unknown>);
+      return;
+    }
 
     // 将 Hand 响应写回 FUSE daemon stdin
     const fuseResp: Record<string, unknown> = { reqId: resp.reqId };
@@ -675,6 +705,22 @@ export class FileProxyManager {
     // 正常情况下这条路径只在 Python cache 被失效时才会触发，作为兜底。
     if (req.op === "read" && this.cacheAvailable() && await this.tryServeReadFromCache(req)) {
       return;
+    }
+
+    // 出口 #3：~/.claude/settings.json 的 read 命中 cache miss / bypass / 未启用 cache
+    // 三种穿透场景。Client doRead 严格按 (offset,size) 切片返回，server 看不到全文
+    // 就无法判断哪些字节属于登录态字段。专用分支：拉全文 → redact → 本地切片。
+    {
+      const scope = rootToCacheScope(root);
+      const cacheRelPath = scope ? toCacheRelPath(scope, relPath) : "";
+      if (
+        req.op === "read" &&
+        scope !== null &&
+        isClaudeHomeSettingsJson(scope, cacheRelPath)
+      ) {
+        await this.handleSettingsJsonReadPassthrough(req, clientRoot);
+        return;
+      }
     }
 
     // 构建 Client 侧绝对路径
@@ -799,6 +845,137 @@ export class FileProxyManager {
       }
       await sleep(50);
     }
+  }
+
+  /**
+   * 出口 #3 settings.json 专用穿透分支。
+   * Client doRead 严格按 (offset,size) 切片返回，无法在 server 侧 redact 部分内容；
+   * 此分支强制拉全文 → size-preserving redact → 按 Python 原始 (offset,size) 切片。
+   *
+   * 成本：cache 中没有 manifest entry 时多一次 getattr round-trip。
+   * 该路径仅在 cache miss / mutation hint bypass / cache 未启用 时触发，
+   * Python FUSE 端有 read TTL 缓存吸收热点请求，频率很低。
+   */
+  private async handleSettingsJsonReadPassthrough(
+    req: FuseRequest,
+    clientRoot: string,
+  ): Promise<void> {
+    const clientPath = req.relPath ? path.join(clientRoot, req.relPath) : clientRoot;
+    const offsetOrig = req.offset ?? 0;
+    const sizeOrig = req.size ?? 0;
+
+    try {
+      // 1. 拉全文 size：优先看 cache manifest（无额外 round-trip）；不可用时 stat
+      let fullSize = await this.tryGetSettingsJsonSizeFromCache();
+      if (fullSize === null) {
+        const statResp = await this.sendClientRequest({
+          op: "getattr",
+          path: clientPath,
+        });
+        if (statResp.error || !statResp.stat) {
+          throw new Error(
+            `getattr failed: ${statResp.error?.message ?? "no stat in response"}`,
+          );
+        }
+        fullSize = statResp.stat.size;
+      }
+
+      if (fullSize === 0) {
+        this.writeToDaemon({ reqId: req.reqId, data: "" });
+        return;
+      }
+
+      // 2. 拉全文内容
+      const readResp = await this.sendClientRequest({
+        op: "read",
+        path: clientPath,
+        offset: 0,
+        size: fullSize,
+      });
+      if (readResp.error) {
+        throw new Error(`read failed: ${readResp.error.message}`);
+      }
+      const fullBuf = Buffer.from(readResp.data ?? "", "base64");
+
+      // 3. redact（size-preserving，输出长度 ≤ fullSize）
+      const redacted = redactClaudeSettingsLoginState(fullBuf);
+
+      // 4. 按 Python 原始 (offsetOrig, sizeOrig) 切片回 Python
+      const end = Math.min(offsetOrig + sizeOrig, redacted.byteLength);
+      const slice = offsetOrig >= redacted.byteLength
+        ? Buffer.alloc(0)
+        : redacted.subarray(offsetOrig, end);
+
+      this.writeToDaemon({ reqId: req.reqId, data: slice.toString("base64") });
+    } catch (err) {
+      log.warn("settings.json passthrough 失败", {
+        sessionId: this.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.writeToDaemon({
+        reqId: req.reqId,
+        error: { code: 5, message: `EIO: settings.json passthrough failed: ${err}` },
+      });
+    }
+  }
+
+  /**
+   * 从 cacheStore 的 manifest 拿 ~/.claude/settings.json 的真实 size，
+   * 跳过 stat round-trip。manifest 不可用 / entry 缺失时返回 null。
+   */
+  private async tryGetSettingsJsonSizeFromCache(): Promise<number | null> {
+    if (!this.cacheStore || !this.deviceId) return null;
+    try {
+      const entry = await this.cacheStore.lookupEntry(
+        this.deviceId,
+        this.clientCwd,
+        "claude-home",
+        "settings.json",
+      );
+      if (!entry) return null;
+      return entry.size;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 内部发起的 Client 请求：复用 pendingRequests registry 但走 silent 路径，
+   * 响应不自动写回 Python daemon，而是返回给调用方继续处理。
+   * 用于 settings.json 全文穿透等需要 server 主动消费 Client 响应的场景。
+   */
+  private sendClientRequest(
+    partial: Omit<FileProxyRequest, "type" | "reqId" | "sessionId">,
+  ): Promise<FileProxyResponse> {
+    return new Promise<FileProxyResponse>((resolve, reject) => {
+      const reqId = `internal-${randomUUID()}`;
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(reqId);
+        reject(new Error("ETIMEDOUT: Client response timeout"));
+      }, 30_000);
+
+      this.pendingRequests.set(reqId, {
+        resolve: (resp) => {
+          resolve(resp as unknown as FileProxyResponse);
+        },
+        reject: (err) => {
+          reject(err);
+        },
+        timer,
+        silent: true,
+      });
+
+      this.sendToClient({
+        type: "file_proxy_request",
+        reqId,
+        sessionId: this.sessionId,
+        ...partial,
+      }).catch((err) => {
+        this.pendingRequests.delete(reqId);
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
   }
 
   private collectMutationHintTargets(
