@@ -151,6 +151,12 @@ export interface FileProxyResponse {
   data?: string;
   written?: number;
   snapshot?: FileProxySnapshotEntry[];
+  /**
+   * snapshot 期间扫到的"应当返回 ENOENT 的路径"，例如 broken symlink 或者
+   * readdir 列出但 stat 失败的条目。FUSE daemon 启动时把这些路径预填到本地
+   * 负缓存，CC 探测时直接返回 ENOENT 不再穿透 client。
+   */
+  negativeEntries?: string[];
 }
 
 // ============================================================

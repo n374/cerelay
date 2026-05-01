@@ -204,6 +204,11 @@ export interface FileProxyResponse {
   data?: string;
   written?: number;
   snapshot?: FileProxySnapshotEntry[];
+  /**
+   * snapshot 期间扫到的"应当返回 ENOENT 的路径"。例如 broken symlink、
+   * readdir 列出但 stat 失败的条目。FUSE 启动时直接预填到本地负缓存。
+   */
+  negativeEntries?: string[];
 }
 
 // ============================================================

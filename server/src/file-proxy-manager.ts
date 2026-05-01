@@ -482,16 +482,19 @@ export class FileProxyManager {
       rootsToFetchFromClient.map(async ([rootName, clientPath]) => {
         const reqId = `snapshot-${rootName}-${Date.now()}`;
         const resp = await this.sendSnapshotRequest(reqId, rootName, clientPath);
-        return { rootName, entries: resp };
+        return { rootName, entries: resp?.snapshot, negativeEntries: resp?.negativeEntries };
       })
     );
 
-    // 组装快照 JSON：{ stats: {fusePath: statObj}, readdirs: {fusePath: entries}, reads: {fusePath: base64} }
+    // 组装快照 JSON：{ stats, readdirs, reads, negatives }
+    // negatives：snapshot 期间发现的 broken symlink 等"应当 ENOENT 的路径"，FUSE
+    // daemon 启动时预填到本地负缓存，避免 CC 反复探测时全程 RTT。
     const snapshot: {
       stats: Record<string, Record<string, unknown>>;
       readdirs: Record<string, string[]>;
       reads: Record<string, string>;
-    } = { stats: {}, readdirs: {}, reads: {} };
+      negatives: string[];
+    } = { stats: {}, readdirs: {}, reads: {}, negatives: [] };
 
     let entryCount = 0;
 
@@ -526,15 +529,21 @@ export class FileProxyManager {
     // 2. 再写入 Client 穿透拿到的条目（project-claude 等）
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
-      const { rootName, entries } = result.value;
-      if (!entries) continue;
-      for (const entry of entries) {
-        entryCount++;
-        const cachePath = entry.path;
-        snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
-        if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
-        if (entry.data) snapshot.reads[cachePath] = entry.data;
-        recordSampleFor(`client:${rootName}`, cachePath);
+      const { rootName, entries, negativeEntries } = result.value;
+      if (entries) {
+        for (const entry of entries) {
+          entryCount++;
+          const cachePath = entry.path;
+          snapshot.stats[cachePath] = statToFuseFormat(entry.stat);
+          if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
+          if (entry.data) snapshot.reads[cachePath] = entry.data;
+          recordSampleFor(`client:${rootName}`, cachePath);
+        }
+      }
+      if (negativeEntries) {
+        for (const negPath of negativeEntries) {
+          snapshot.negatives.push(negPath);
+        }
       }
     }
 
@@ -558,6 +567,8 @@ export class FileProxyManager {
       statKeyCount: Object.keys(snapshot.stats).length,
       readdirKeyCount: Object.keys(snapshot.readdirs).length,
       readKeyCount: Object.keys(snapshot.reads).length,
+      negativeCount: snapshot.negatives.length,
+      negativeSample: snapshot.negatives.slice(0, 10),
     });
   }
 
@@ -734,7 +745,10 @@ export class FileProxyManager {
     reqId: string,
     rootName: string,
     clientPath: string,
-  ): Promise<import("./protocol.js").FileProxySnapshotEntry[] | undefined> {
+  ): Promise<{
+    snapshot?: import("./protocol.js").FileProxySnapshotEntry[];
+    negativeEntries?: string[];
+  } | undefined> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(reqId);
@@ -744,7 +758,11 @@ export class FileProxyManager {
 
       this.pendingRequests.set(reqId, {
         resolve: (resp) => {
-          resolve((resp as { snapshot?: import("./protocol.js").FileProxySnapshotEntry[] }).snapshot);
+          const r = resp as {
+            snapshot?: import("./protocol.js").FileProxySnapshotEntry[];
+            negativeEntries?: string[];
+          };
+          resolve({ snapshot: r.snapshot, negativeEntries: r.negativeEntries });
         },
         reject: () => resolve(undefined),
         timer,

@@ -65,9 +65,15 @@ class Cache:
         self._stat = {}     # path → (timestamp, stat_dict)
         self._readdir = {}  # path → (timestamp, entries)
         self._read = {}     # path → (timestamp, bytes)
+        # P0-1: snapshot 启动时预填的"已知 ENOENT path"（broken symlink 等）。
+        # 永久有效（无 TTL）：snapshot 已经把 readdir 列出但 stat 失败的子项标好了。
+        self._negative_perm = set()
+        # P0-2: 运行时发现的 ENOENT，缓存 _negative_ttl 秒。
+        self._negative = {}   # path → expire_at (monotonic)
         self._stat_ttl = 10.0
         self._readdir_ttl = 10.0
         self._read_ttl = 10.0
+        self._negative_ttl = 30.0
         self._read_max_size = 256 * 1024  # 256KB
         # 诊断计数器：区分 "key 不在 cache" 和 "在但 TTL 过期"，让用户判断 snapshot
         # 是不完整还是只是被 TTL 限制。
@@ -80,6 +86,10 @@ class Cache:
         self.read_hit = 0
         self.read_miss_absent = 0
         self.read_miss_expired = 0
+        # 负缓存命中计数：分别统计 snapshot 预填（perm）和运行时学到的（runtime）
+        self.negative_hit_perm = 0
+        self.negative_hit_runtime = 0
+        self.negative_recorded = 0
         # 抽样未命中的 path（区分缺失 vs 过期），帮诊断"为什么没命中"
         self.miss_samples = []  # list of (kind, reason, path)
         self._miss_sample_cap = 40
@@ -87,6 +97,38 @@ class Cache:
     def _record_miss_sample(self, kind, reason, path):
         if len(self.miss_samples) < self._miss_sample_cap:
             self.miss_samples.append((kind, reason, path))
+
+    def is_negative(self, path):
+        """ENOENT 命中判断。返回 True 时 caller 应该直接抛 ENOENT，不发 RPC。"""
+        with self._lock:
+            if path in self._negative_perm:
+                self.negative_hit_perm += 1
+                return True
+            entry = self._negative.get(path)
+            if entry is not None:
+                if time.monotonic() < entry:
+                    self.negative_hit_runtime += 1
+                    return True
+                # 过期，懒清
+                self._negative.pop(path, None)
+        return False
+
+    def put_negative(self, path):
+        """运行时记录 ENOENT，缓存 _negative_ttl 秒。snapshot 注入的 perm 不走这里。"""
+        with self._lock:
+            self._negative[path] = time.monotonic() + self._negative_ttl
+            self.negative_recorded += 1
+
+    def put_negative_perm(self, path):
+        """snapshot 启动预填的 ENOENT，永久有效。"""
+        with self._lock:
+            self._negative_perm.add(path)
+
+    def invalidate_negative(self, path):
+        """文件被创建时调用，让之前的负缓存立即失效。"""
+        with self._lock:
+            self._negative_perm.discard(path)
+            self._negative.pop(path, None)
 
     def get_stat(self, path):
         with self._lock:
@@ -152,6 +194,10 @@ class Cache:
             parent = os.path.dirname(path)
             self._readdir.pop(parent, None)
             self._readdir.pop(path, None)
+            # 写/创建发生时，之前缓存的"不存在"必须立刻失效——否则文件已经创建
+            # 但 getattr 仍然返 ENOENT 会让 CC 看不到自己刚写的文件。
+            self._negative_perm.discard(path)
+            self._negative.pop(path, None)
 
 _cache = Cache()
 
@@ -387,12 +433,23 @@ class CerelayFuseOps(Operations):
         if cached:
             return cached
 
-        resp = send_request({
-            "reqId": next_req_id(),
-            "op": "getattr",
-            "root": root_name,
-            "relPath": rel_path,
-        })
+        # 负缓存命中：snapshot 预填（broken symlink）或运行时学到（CC 反复探测的
+        # 不存在文件）。直接抛 ENOENT，不发 RPC 给 server。
+        if _cache.is_negative(hand_path):
+            raise FuseOSError(errno.ENOENT)
+
+        try:
+            resp = send_request({
+                "reqId": next_req_id(),
+                "op": "getattr",
+                "root": root_name,
+                "relPath": rel_path,
+            })
+        except FuseOSError as e:
+            # ENOENT 落入负缓存；其他错误（EIO 等）不缓存，避免短期错误污染。
+            if e.errno == errno.ENOENT:
+                _cache.put_negative(hand_path)
+            raise
         result = stat_from_resp(resp["stat"])
         _cache.put_stat(hand_path, result)
         return result
@@ -749,6 +806,7 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
         _stat_keys = list(_snapshot.get("stats", {}).keys())
         _readdir_keys = list(_snapshot.get("readdirs", {}).keys())
         _read_keys = list(_snapshot.get("reads", {}).keys())
+        _negative_keys = list(_snapshot.get("negatives", []))
         _loaded = 0
         for path_key, stat_val in _snapshot.get("stats", {}).items():
             _cache.put_stat(path_key, stat_val)
@@ -758,6 +816,9 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
             _loaded += 1
         for path_key, data_val in _snapshot.get("reads", {}).items():
             _cache.put_read_full(path_key, base64.b64decode(data_val))
+            _loaded += 1
+        for neg_path in _negative_keys:
+            _cache.put_negative_perm(neg_path)
             _loaded += 1
         # 诊断：snapshot 载入完毕的总条数 + 各类型 key 数 + 头/尾抽样 path。
         # 用 [FUSE-DIAG] 前缀以便 server 端把这一行提到 INFO。
@@ -770,9 +831,11 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
         sys.stderr.write(
             f"[FUSE-DIAG] snapshot loaded: total={_loaded} "
             f"stats={len(_stat_keys)} readdirs={len(_readdir_keys)} reads={len(_read_keys)} "
+            f"negatives={len(_negative_keys)} "
             f"stat_sample={_sample(_stat_keys)} "
             f"readdir_sample={_sample(_readdir_keys)} "
-            f"read_sample={_sample(_read_keys)}\n"
+            f"read_sample={_sample(_read_keys)} "
+            f"negative_sample={_sample(_negative_keys)}\n"
         )
     except Exception as e:
         sys.stderr.write(f"[FUSE-DIAG] snapshot load failed (cold start): {e}\n")
@@ -796,6 +859,9 @@ def _cache_stats_reporter():
             stat_h, stat_a, stat_e = _cache.stat_hit, _cache.stat_miss_absent, _cache.stat_miss_expired
             rd_h, rd_a, rd_e = _cache.readdir_hit, _cache.readdir_miss_absent, _cache.readdir_miss_expired
             rd_r_h, rd_r_a, rd_r_e = _cache.read_hit, _cache.read_miss_absent, _cache.read_miss_expired
+            neg_perm = _cache.negative_hit_perm
+            neg_runtime = _cache.negative_hit_runtime
+            neg_recorded = _cache.negative_recorded
             samples = list(_cache.miss_samples[last_drained:last_drained + 20])
             last_drained = len(_cache.miss_samples)
         sys.stderr.write(
@@ -803,6 +869,7 @@ def _cache_stats_reporter():
             f"stat(hit={stat_h} absent={stat_a} expired={stat_e}) "
             f"readdir(hit={rd_h} absent={rd_a} expired={rd_e}) "
             f"read(hit={rd_r_h} absent={rd_r_a} expired={rd_r_e}) "
+            f"negative(hit_perm={neg_perm} hit_runtime={neg_runtime} recorded={neg_recorded}) "
             f"recent_miss_samples={samples}\n"
         )
 

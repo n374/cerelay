@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import {
   access,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -181,8 +182,10 @@ export class FileProxyHandler {
           );
           return { ...base };
 
-        case "snapshot":
-          return { ...base, snapshot: await this.doSnapshot(req.path) };
+        case "snapshot": {
+          const result = await this.doSnapshot(req.path);
+          return { ...base, snapshot: result.entries, negativeEntries: result.negativeEntries };
+        }
 
         default:
           return {
@@ -232,13 +235,19 @@ export class FileProxyHandler {
    * 递归扫描目录树，返回完整快照（stat + readdir + 小文件内容）。
    * 用于 FUSE 缓存预注入，消除启动时的逐文件 round-trip。
    */
-  private async doSnapshot(rootPath: string, maxDepth = 5): Promise<FileProxySnapshotEntry[]> {
+  private async doSnapshot(
+    rootPath: string,
+    maxDepth = 5,
+  ): Promise<{ entries: FileProxySnapshotEntry[]; negativeEntries: string[] }> {
     const results: FileProxySnapshotEntry[] = [];
+    // negativeEntries 记录 readdir 列出但 stat 失败的子项（典型场景：broken symlink）。
+    // FUSE daemon 启动时把这些路径预填到本地负缓存，CC 探测时直接返回 ENOENT，
+    // 避免每次都全程 RTT 到 client。
+    const negativeEntries: string[] = [];
     // 诊断：scan() 入口失败、子项 stat 失败、最深 depth、被 maxDepth 截断的目录数。
-    // 用来回答 "为什么 server 端 FUSE 还在 perforate skills/bytedcli 这种 depth 浅的路径"——
-    // 如果 stat 静默失败被 silent-skip，snapshot 就不全；如果 maxDepth 过浅，深路径不被覆盖。
     let dirEntryFailures = 0;
     let childStatFailures = 0;
+    let brokenSymlinks = 0;
     let maxDepthSeen = 0;
     let truncatedAtMaxDepth = 0;
     const sampleChildStatErrors: string[] = [];
@@ -271,7 +280,7 @@ export class FileProxyHandler {
 
       results.push({ path: dirPath, stat: dirStat, entries });
 
-      // 并行 stat 所有条目
+      // 并行 stat 所有条目。stat() 跟随 symlink，broken symlink 会抛 ENOENT。
       const childStats = await Promise.allSettled(
         entries.map(async (entry) => {
           const fullPath = path.join(dirPath, entry);
@@ -285,23 +294,35 @@ export class FileProxyHandler {
             gid: st.gid,
             isDir: st.isDirectory(),
           };
-          return { fullPath, fileStat, isDir: st.isDirectory(), size: st.size };
+          return { fullPath, fileStat, isDir: st.isDirectory() };
         })
       );
 
       const subdirs: Promise<void>[] = [];
       for (let i = 0; i < childStats.length; i++) {
         const result = childStats[i];
+        const fullPath = path.join(dirPath, entries[i]);
         if (result.status !== "fulfilled") {
           childStatFailures++;
           if (sampleChildStatErrors.length < 10) {
-            const failedPath = path.join(dirPath, entries[i]);
             const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-            sampleChildStatErrors.push(`${failedPath} :: ${reason}`);
+            sampleChildStatErrors.push(`${fullPath} :: ${reason}`);
+          }
+          // stat 失败但 readdir 列出了它——大概率 broken symlink。用 lstat 复核：
+          // 是 symlink → 计入 negativeEntries（让 FUSE 直接返回 ENOENT，不再穿透）。
+          // 不是 symlink → 偶发 race（文件刚被删等），暂不缓存（让运行时按需穿透）。
+          try {
+            const linkStat = await lstat(fullPath);
+            if (linkStat.isSymbolicLink()) {
+              brokenSymlinks++;
+              negativeEntries.push(fullPath);
+            }
+          } catch {
+            // lstat 也失败说明条目真的没了；不进负缓存，运行时再决定
           }
           continue;
         }
-        const { fullPath, fileStat, isDir } = result.value;
+        const { fileStat, isDir } = result.value;
 
         if (isDir) {
           results.push({ path: fullPath, stat: fileStat });
@@ -325,12 +346,14 @@ export class FileProxyHandler {
       maxDepthSeen,
       truncatedAtMaxDepth,
       entryCount: results.length,
+      negativeEntryCount: negativeEntries.length,
       dirEntryFailures,
       childStatFailures,
+      brokenSymlinks,
       sampleChildStatErrors,
       durationMs: Date.now() - startedAt,
     });
-    return results;
+    return { entries: results, negativeEntries };
   }
 
   private async doRead(

@@ -140,6 +140,49 @@ test("file proxy remains scoped to Claude config paths, not user project files",
   );
 });
 
+test("FileProxyHandler.snapshot 把 broken symlink 记入 negativeEntries", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-snap-neg-home-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-snap-neg-cwd-"));
+  const claudeDir = path.join(home, ".claude");
+  await fs.mkdir(path.join(claudeDir, "skills"), { recursive: true });
+  await fs.writeFile(path.join(claudeDir, "skills", "real-skill.md"), "ok");
+  // 一个 broken symlink：指向不存在的 target
+  await fs.symlink("/this/path/definitely/does/not/exist", path.join(claudeDir, "skills", "broken-link"));
+  // 一个正常 symlink：指向已存在的兄弟文件
+  await fs.symlink("real-skill.md", path.join(claudeDir, "skills", "good-link"));
+
+  const handler = new FileProxyHandler(home, cwd);
+  const resp = await handler.handle({
+    type: "file_proxy_request",
+    reqId: "snap-neg",
+    sessionId: "pty-neg",
+    op: "snapshot",
+    path: claudeDir,
+  });
+
+  assert.equal(resp.error, undefined);
+  const negs = resp.negativeEntries ?? [];
+  assert.deepEqual(
+    negs,
+    [path.join(claudeDir, "skills", "broken-link")],
+    "broken symlink 必须出现在 negativeEntries，正常 symlink 不应出现",
+  );
+
+  const snapPaths = (resp.snapshot ?? []).map((e) => e.path);
+  assert.ok(
+    snapPaths.includes(path.join(claudeDir, "skills", "real-skill.md")),
+    "真实文件继续在 snapshot 里",
+  );
+  assert.ok(
+    snapPaths.includes(path.join(claudeDir, "skills", "good-link")),
+    "正常 symlink 解析后的 target 也应在 snapshot 里",
+  );
+  assert.ok(
+    !snapPaths.includes(path.join(claudeDir, "skills", "broken-link")),
+    "broken symlink 不应出现在 snapshot stat 区，因为它没有可用 stat",
+  );
+});
+
 test("ToolExecutor dispatches tools and formats results", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cerelay-client-executor-"));
   await fs.writeFile(path.join(cwd, "note.txt"), "hello");
