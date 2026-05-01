@@ -152,6 +152,14 @@ export class CerelayServer {
   }
 
   async start(): Promise<void> {
+    // Phase 5.3 + 12: 启动期对所有已知 deviceId 跑一次 ledger aging
+    // (missing 30 天未访问 → 清; file/dir 永久保留)
+    await this.runLedgerAging().catch((err) => {
+      log.warn("启动期 ledger aging 失败 (非致命)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
     await new Promise<void>((resolve, reject) => {
       this.httpServer.once("error", reject);
       this.httpServer.listen(this.port, () => {
@@ -159,6 +167,54 @@ export class CerelayServer {
         resolve();
       });
     });
+  }
+
+  private async runLedgerAging(): Promise<void> {
+    const ageDays = parseInt(process.env.CERELAY_LEDGER_AGING_DAYS ?? "30", 10);
+    if (!Number.isFinite(ageDays) || ageDays <= 0) return;
+    const ageMs = ageDays * 24 * 3600 * 1000;
+    const now = Date.now();
+
+    // 列出 access-ledger 目录下所有 deviceId, 逐一 load + age + persist
+    const fs = await import("node:fs/promises");
+    const rootDir = this.accessLedgerStore.rootDir();
+    let devices: string[];
+    try {
+      devices = await fs.readdir(rootDir);
+    } catch {
+      // ENOENT - 目录还没创建过, 没 ledger 可 age
+      return;
+    }
+
+    let totalCleaned = 0;
+    for (const deviceId of devices) {
+      // sanitize: 跳过 dot files / 异常名
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(deviceId)) continue;
+      try {
+        const ledger = await this.accessLedgerStore.load(deviceId);
+        const before = ledger.missingSortedSnapshot().length;
+        ledger.runAging(now, ageMs);
+        const after = ledger.missingSortedSnapshot().length;
+        if (before !== after) {
+          ledger.bumpRevision();
+          await this.accessLedgerStore.persist(ledger);
+          totalCleaned += before - after;
+          log.info("启动期 aging 完成", {
+            deviceId,
+            removed: before - after,
+            remaining: after,
+          });
+        }
+      } catch (err) {
+        log.warn("启动期 aging 单个 device 失败", {
+          deviceId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (totalCleaned > 0) {
+      log.info("启动期 ledger aging 总计完成", { totalCleaned, ageDays });
+    }
   }
 
   getListenPort(): number {
@@ -706,6 +762,8 @@ export class CerelayServer {
         cacheStore: message.deviceId ? this.cacheStore : undefined,
         deviceId: message.deviceId,
         cacheTaskManager: message.deviceId ? this.cacheTaskManager : undefined,
+        // Phase 4.2 / 5: 注入 AccessLedger - 启动期 missing 投影 + 运行期 access tracking flush
+        accessLedgerStore: message.deviceId ? this.accessLedgerStore : undefined,
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
       // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，
