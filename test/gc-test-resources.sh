@@ -9,7 +9,7 @@ fi
 
 test_slug_for_branch() {
   branch=$1
-  slug=$(echo "$branch" | tr -c 'a-zA-Z0-9' '_' | cut -c1-40)
+  slug=$(printf '%s' "$branch" | tr -c 'a-zA-Z0-9' '_' | cut -c1-40)
   printf '%s\n' "$slug"
 }
 
@@ -78,8 +78,8 @@ test_gc_compose_projects() {
     project_normalized=$(printf '%s\n' "$project_name" | test_lower)
 
     case "$project_normalized" in
-      cerelay_*)
-        project_slug=${project_normalized#cerelay_}
+      cerelay_test_*)
+        project_slug=${project_normalized#cerelay_test_}
         ;;
       *)
         continue
