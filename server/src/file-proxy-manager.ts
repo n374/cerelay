@@ -191,6 +191,21 @@ export class FileProxyManager {
   private static readonly LEDGER_FLUSH_INTERVAL_MS = 5000;
   /** flush 互斥: 防止多个调用并发 read-modify-write 同一 ledger */
   private flushInFlight: Promise<void> | null = null;
+  /**
+   * Phase 6: SeedWhitelist capture 模式. 由 CERELAY_CAPTURE_SEED=path/to/output.json
+   * env 触发. 启用时:
+   *   1. 跳过 snapshot 反向构造 (避免 daemon 命中 perm cache 后不发 RPC, 漏采)
+   *   2. 累积所有 daemon 收到的 RPC 路径 + 结果, shutdown 时 dump 到指定 JSON 路径
+   * 后续用 scripts/seed-whitelist-codegen.ts 把 JSON 转 ts const 覆写 seed-whitelist.ts.
+   */
+  private readonly captureSeedPath: string | undefined;
+  private readonly captureBuffer: Array<{
+    op: string;
+    path: string;
+    result: "ok" | "missing";
+    isDir?: boolean;
+    mtime?: number;
+  }> = [];
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -203,6 +218,8 @@ export class FileProxyManager {
     this.deviceId = options.deviceId;
     this.cacheTaskManager = options.cacheTaskManager;
     this.accessLedgerStore = options.accessLedgerStore;
+    // Phase 6: capture mode 由 env 触发 (dev-only)
+    this.captureSeedPath = process.env.CERELAY_CAPTURE_SEED;
 
     this.roots = {
       "home-claude": path.join(this.clientHomeDir, ".claude"),
@@ -758,6 +775,21 @@ export class FileProxyManager {
   private async collectAndWriteSnapshot(snapshotFile: string): Promise<void> {
     const startedAt = Date.now();
 
+    // === Phase 6 SeedWhitelist capture 模式 ===
+    // 写一个空 snapshot 跳过 daemon perm cache 预热 — 让所有 RPC 穿透 client,
+    // 这样 captureBuffer 才能记录到完整访问路径列表 (否则命中 perm cache 不发 RPC).
+    if (this.captureSeedPath) {
+      log.info("CAPTURE_SEED 模式: 跳过 snapshot 反向构造", {
+        sessionId: this.sessionId,
+        capturePath: this.captureSeedPath,
+      });
+      const emptySnapshot = JSON.stringify({
+        stats: {}, readdirs: {}, reads: {}, negatives: [],
+      });
+      await writeFile(snapshotFile, emptySnapshot, "utf8");
+      return;
+    }
+
     // === Defect 1 修复 (spec §7.2): 阻塞等 cache ready, 无超时 ===
     // 之前 phase=syncing 时直接走 fallback (client 全量) — 跟 cache 同步抢跑导致即便
     // cache 已持久化 27000+ entries 仍走全量。现在: phase=syncing 阻塞等 ready,
@@ -1169,6 +1201,31 @@ export class FileProxyManager {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+
+      // Phase 6: capture 模式 — 累积 RPC 访问路径
+      if (this.captureSeedPath) {
+        if (resp.error?.code === 2) {
+          this.captureBuffer.push({
+            op: deferred.opForAccess.op,
+            path: deferred.opForAccess.path,
+            result: "missing",
+          });
+        } else if (resp.stat) {
+          this.captureBuffer.push({
+            op: deferred.opForAccess.op,
+            path: deferred.opForAccess.path,
+            result: "ok",
+            isDir: resp.stat.isDir,
+            mtime: resp.stat.mtime,
+          });
+        } else if (resp.entries) {
+          this.captureBuffer.push({
+            op: deferred.opForAccess.op,
+            path: deferred.opForAccess.path,
+            result: "ok",
+          });
+        }
+      }
     }
 
     // 将 Hand 响应写回 FUSE daemon stdin
@@ -1246,6 +1303,26 @@ export class FileProxyManager {
       await this.flushAccessBufferIfNeeded();
     } catch {
       // flushAccessBufferIfNeeded 内部已经处理了所有 error; 这里兜底
+    }
+
+    // Phase 6: capture 模式 dump JSON
+    if (this.captureSeedPath && this.captureBuffer.length > 0) {
+      try {
+        await writeFile(
+          this.captureSeedPath,
+          JSON.stringify({ events: this.captureBuffer }, null, 2),
+          "utf8",
+        );
+        log.info("CAPTURE_SEED 已写出", {
+          path: this.captureSeedPath,
+          eventCount: this.captureBuffer.length,
+        });
+      } catch (err) {
+        log.warn("CAPTURE_SEED 写出失败 (降级)", {
+          path: this.captureSeedPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // 发送 shutdown 控制消息
