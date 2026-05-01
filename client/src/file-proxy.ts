@@ -16,6 +16,7 @@ import {
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { createLogger } from "./logger.js";
+import { FileProxyDedupMap } from "./file-proxy-diagnostics.js";
 import type {
   FileProxyRequest,
   FileProxyResponse,
@@ -32,6 +33,7 @@ const log = createLogger("file-proxy");
  */
 export class FileProxyHandler {
   private readonly allowedPrefixes: string[];
+  private readonly dedupMap: FileProxyDedupMap;
 
   // 启动诊断：从首次收到 file_proxy_request 起，每 5s 周期输出 op 计数与延迟分布。
   // 60s 后停止；shutdown 时也停止。Server 侧已有 FUSE op 统计，client 侧的统计反映
@@ -51,6 +53,9 @@ export class FileProxyHandler {
       path.join(resolvedCwd, ".claude") + path.sep,
       path.join(resolvedCwd, ".claude"),
     ];
+    this.dedupMap = new FileProxyDedupMap({
+      roots: [resolvedHome, resolvedCwd],
+    });
   }
 
   async handle(req: FileProxyRequest): Promise<FileProxyResponse> {
@@ -64,10 +69,23 @@ export class FileProxyHandler {
     }
     this.opCounters.set(req.op, (this.opCounters.get(req.op) ?? 0) + 1);
     const startedAt = Date.now();
+    let resp: FileProxyResponse | undefined;
     try {
-      return await this.handleInternal(req);
+      resp = await this.handleInternal(req);
+      return resp;
     } finally {
-      this.totalHandledMs += Date.now() - startedAt;
+      const elapsedMs = Date.now() - startedAt;
+      this.totalHandledMs += elapsedMs;
+      if (resp) {
+        this.dedupMap.record({
+          op: req.op,
+          path: req.path,
+          status: resp.error ? "error" : "ok",
+          errno: resp.error?.code,
+          bytes: responseBytes(resp),
+          elapsedMs,
+        });
+      }
     }
   }
 
@@ -105,6 +123,7 @@ export class FileProxyHandler {
 
   /** 销毁实例（停止 startup stats timer），由 client.resetExecutor 调用。 */
   dispose(): void {
+    this.dedupMap.dispose();
     this.stopStartupStatsTimer();
   }
 
@@ -415,4 +434,23 @@ function extractErrno(err: unknown): number {
     return Math.abs(e);
   }
   return 5; // EIO
+}
+
+function responseBytes(resp: FileProxyResponse): number {
+  if (typeof resp.data === "string") {
+    return Buffer.from(resp.data, "base64").length;
+  }
+  if (typeof resp.written === "number") {
+    return resp.written;
+  }
+  if (resp.snapshot) {
+    return Buffer.byteLength(JSON.stringify(resp.snapshot));
+  }
+  if (resp.entries) {
+    return Buffer.byteLength(JSON.stringify(resp.entries));
+  }
+  if (resp.stat) {
+    return Buffer.byteLength(JSON.stringify(resp.stat));
+  }
+  return 0;
 }
