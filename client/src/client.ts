@@ -532,26 +532,17 @@ export class CerelayClient {
         finish(new Error("WebSocket 连接已关闭"));
       };
 
-      const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-      let spinnerIndex = 0;
-      let spinnerActive = true;
-      const spinnerTimer = setInterval(() => {
-        if (!spinnerActive) return;
-        const frame = spinnerFrames[spinnerIndex % spinnerFrames.length];
-        stdout.write(`\r\x1b[36m${frame} 正在启动 Claude Code...\x1b[0m\x1b[K`);
-        spinnerIndex++;
-      }, 100);
-
-      stopSpinner = () => {
-        if (!spinnerActive) return;
-        spinnerActive = false;
-        clearInterval(spinnerTimer);
-        stdout.write("\r\x1b[K");
-      };
+      // PTY 启动 spinner ——"正在启动 Claude Code..."。统一走 cacheSyncView 的
+      // pty-startup phase，跟 cache sync 的 scan/upload spinner 共享 100% 帧 /
+      // trailing \n / printPersistent 等不变量；如果 cache sync 还在跑，本 phase
+      // 会进 pending 队列等其结束后再激活，避免两个 spinner 争 stdout
+      this.beginStartupSpinner();
+      stopSpinner = () => this.endStartupSpinner();
 
       const wrappedOnMessage = (raw: string) => {
-        if (spinnerActive && raw.includes('"pty_output"')) {
-          stopSpinner();
+        // PTY 第一帧到达 → 启动完成，无论 phase 是否已激活都收尾
+        if (raw.includes('"pty_output"')) {
+          stopSpinner?.();
         }
         onMessage(raw);
       };
@@ -574,19 +565,18 @@ export class CerelayClient {
     if (!process.stdout.isTTY) {
       return;
     }
-    if (!this.cacheSyncView) {
-      this.cacheSyncView = new CacheSyncProgressView();
-    }
-    this.cacheSyncView.handle(event);
-    if (event.kind === "upload_done" || event.kind === "skipped") {
-      this.disposeCacheSyncView();
+    this.ensureProgressView().handle(event);
+    // upload_done / skipped 只是 cache sync 自身两个 phase 的终点；如果 PTY 启动
+    // spinner 仍在跑或排队，view 不能 dispose——交由 endStartupSpinner 收尾
+    if (event.kind === "skipped") {
+      this.tryDisposeProgressView();
     }
   }
 
   /**
-   * 写一行持久输出（如 `[PTY 已连接]`、日志路径），保证不会与启动期 cache sync
-   * spinner 互相破坏：sync 活动时走 progress view 的 print-above-spinner 路径，
-   * 否则直接 stdout。所有需要在启动早期阶段打印的"非 spinner"行都应走此 API。
+   * 写一行持久输出（如 `[PTY 已连接]`、日志路径）。如果当前有任何活跃 phase
+   * （cache sync 或 pty-startup），走 view 的 print-above-spinner 路径，避免
+   * 污染 spinner 的 cursor 行追踪；否则直接 stdout。
    */
   printAboveSyncProgress(content: string): void {
     if (this.cacheSyncView) {
@@ -594,6 +584,44 @@ export class CerelayClient {
       return;
     }
     process.stdout.write(content);
+  }
+
+  /**
+   * 启动 "正在启动 Claude Code..." spinner。统一走 view 的 pty-startup phase——
+   * 如果 cache sync 还在跑，phase 会进 pending 队列等当前 phase 结束后再激活；
+   * 同一时刻最多只有一个 spinner 在写 stdout。非 TTY 直接跳过。
+   */
+  beginStartupSpinner(message?: string): void {
+    if (!process.stdout.isTTY) return;
+    this.ensureProgressView().beginPtyStartup(message);
+  }
+
+  /**
+   * 结束 "正在启动 Claude Code..." spinner（PTY 第一帧到达 / pty_exit / 错误）。
+   * 调用后如果所有 phase 都已结束，view 会被 dispose 掉释放 timer 等资源。
+   */
+  endStartupSpinner(): void {
+    this.cacheSyncView?.endPtyStartup();
+    this.tryDisposeProgressView();
+  }
+
+  private ensureProgressView(): CacheSyncProgressView {
+    if (!this.cacheSyncView) {
+      this.cacheSyncView = new CacheSyncProgressView();
+    }
+    return this.cacheSyncView;
+  }
+
+  /**
+   * 如果当前没有任何活跃 phase，就 dispose view 释放 timer。
+   * 不能粗暴地一律 dispose——cache sync 和 pty-startup phase 可能交叠。
+   */
+  private tryDisposeProgressView(): void {
+    if (!this.cacheSyncView) return;
+    if (this.cacheSyncView.isIdle()) {
+      this.cacheSyncView.dispose();
+      this.cacheSyncView = null;
+    }
   }
 
   private disposeCacheSyncView(): void {
