@@ -55,7 +55,7 @@ interface Deferred {
 
 type CacheTaskReadGate = Pick<
   CacheTaskManager,
-  "registerMutationHintForPath" | "shouldUseCacheSnapshot" | "shouldBypassCacheRead"
+  "registerMutationHintForPath" | "shouldUseCacheSnapshot" | "shouldBypassCacheRead" | "describeTaskState"
 >;
 
 export interface FileProxyManagerOptions {
@@ -117,6 +117,15 @@ export class FileProxyManager {
   private lastStatsLoggedAt = 0;
   private startupStatsTimer: ReturnType<typeof setInterval> | null = null;
   private readonly fuseDaemonReadyAt: { value: number | null } = { value: null };
+  /** 同时在飞的 client 穿透请求数瞬时峰值，用于回答"实际并发能跑到多少" */
+  private peakPendingRequests = 0;
+  /**
+   * 已经向 Client 穿透过的路径 → 累计次数 + miss reason。让用户直接看到具体哪些
+   * 文件没命中 cache，便于优化（比如 maxDepth 不够、cache 范围未覆盖、文件已被
+   * 用户改写但 cache 失效后没回填等）。第一次出现时单独 INFO log；周期 stats
+   * 用 top-N 方式回放热点。
+   */
+  private readonly perforatedPaths = new Map<string, { count: number; reason: string }>();
 
   /** FUSE 虚拟根到 Hand 侧绝对路径的映射 */
   private readonly roots: Record<string, string>;
@@ -159,6 +168,35 @@ export class FileProxyManager {
     return this.cacheTaskManager
       ? this.cacheTaskManager.shouldUseCacheSnapshot(this.deviceId!, this.clientCwd)
       : true;
+  }
+
+  /**
+   * 对外暴露 cache 不可用原因。snapshot 收集 / 启动诊断 log 时用，让用户直接看到
+   * "为什么 usedCacheSnapshot=false"——区分 deviceId 缺失、cacheStore 未注入、
+   * cacheTaskManager 状态尚未 ready 等不同根因。
+   */
+  private explainCacheAvailability(): {
+    available: boolean;
+    reason: string;
+    taskState?: ReturnType<CacheTaskReadGate["describeTaskState"]>;
+  } {
+    if (!this.cacheStore) {
+      return { available: false, reason: "no_cache_store" };
+    }
+    if (!this.deviceId) {
+      return { available: false, reason: "no_device_id" };
+    }
+    if (!this.cacheTaskManager) {
+      return { available: true, reason: "ok_no_task_manager_gate" };
+    }
+    const state = this.cacheTaskManager.describeTaskState(this.deviceId, this.clientCwd);
+    if (!state.exists) {
+      return { available: false, reason: "task_state_missing", taskState: state };
+    }
+    if (state.phase !== "ready") {
+      return { available: false, reason: `phase_${state.phase}`, taskState: state };
+    }
+    return { available: true, reason: "ok_phase_ready", taskState: state };
   }
 
   get mountPoint(): string {
@@ -367,9 +405,27 @@ export class FileProxyManager {
       cacheHitReads: this.cacheHitReads,
       clientRoundTripMs: this.clientRoundTripMs,
       pendingRequests: this.pendingRequests.size,
+      peakPendingRequests: this.peakPendingRequests,
       opCounts: ops,
+      topPerforatedPaths: this.topPerforatedPaths(15),
     });
     this.lastStatsLoggedAt = Date.now();
+  }
+
+  /**
+   * 取穿透次数 top-N 的 (op, root, relPath, reason, count) 列表，方便用户
+   * 一眼看出"哪些路径频繁不命中 cache"作为优化突破口。
+   */
+  private topPerforatedPaths(n: number): Array<{ op: string; path: string; reason: string; count: number }> {
+    const entries: Array<{ op: string; path: string; reason: string; count: number }> = [];
+    for (const [key, value] of this.perforatedPaths) {
+      const sepIdx = key.indexOf("\0");
+      const op = sepIdx >= 0 ? key.slice(0, sepIdx) : "?";
+      const path = sepIdx >= 0 ? key.slice(sepIdx + 1) : key;
+      entries.push({ op, path, reason: value.reason, count: value.count });
+    }
+    entries.sort((a, b) => b.count - a.count);
+    return entries.slice(0, n);
   }
 
   /**
@@ -451,11 +507,14 @@ export class FileProxyManager {
 
     await writeFile(snapshotFile, JSON.stringify(snapshot), "utf8");
 
+    const availability = this.explainCacheAvailability();
     log.info("FUSE 缓存快照已收集", {
       sessionId: this.sessionId,
       entryCount,
       cachedEntryCount,
       usedCacheSnapshot: shouldUseCacheSnapshot,
+      cacheAvailability: availability.reason,
+      cacheTaskState: availability.taskState,
       clientFetchedRoots: rootsToFetchFromClient.map(([r]) => r),
       durationMs: Date.now() - startedAt,
     });
@@ -546,15 +605,23 @@ export class FileProxyManager {
   }
 
   /**
-   * 尝试从 cache 返回一次 FUSE read。命中返回 true（已写回 FUSE daemon），
-   * 未命中返回 false（调用方继续穿透 Client）。
+   * 尝试从 cache 返回一次 FUSE read。命中返回 { served: true }，未命中返回
+   * { served: false, reason } 让调用方记录 miss 原因。reason 取值（用于诊断 log）：
+   *   - no_cache_store / no_device_id：cache 子系统未启用
+   *   - no_scope：root 不属于 cache 覆盖范围（如 project-claude）
+   *   - phase_not_ready / phase_*：cache task 状态机还没 ready
+   *   - bypass_pending：写后短期穿透窗口
+   *   - entry_missing / entry_skipped：manifest 里没记录 / 大文件未同步
+   *   - blob_missing：sha256 落盘的 blob 文件丢失
    */
-  private async tryServeReadFromCache(req: FuseRequest): Promise<boolean> {
-    if (!this.cacheStore || !this.deviceId) return false;
+  private async tryServeReadFromCache(req: FuseRequest): Promise<{ served: true } | { served: false; reason: string }> {
+    if (!this.cacheStore) return { served: false, reason: "no_cache_store" };
+    if (!this.deviceId) return { served: false, reason: "no_device_id" };
     const scope = rootToCacheScope(req.root);
-    if (!scope) return false;
+    if (!scope) return { served: false, reason: "no_scope" };
     if (this.cacheTaskManager && !this.cacheTaskManager.shouldUseCacheSnapshot(this.deviceId, this.clientCwd)) {
-      return false;
+      const state = this.cacheTaskManager.describeTaskState(this.deviceId, this.clientCwd);
+      return { served: false, reason: state.phase ? `phase_${state.phase}` : "task_state_missing" };
     }
 
     const cacheRelPath = toCacheRelPath(scope, req.relPath);
@@ -567,7 +634,7 @@ export class FileProxyManager {
         cacheRelPath,
       )
     ) {
-      return false;
+      return { served: false, reason: "bypass_pending" };
     }
     const entry = await this.cacheStore.lookupEntry(
       this.deviceId,
@@ -575,10 +642,12 @@ export class FileProxyManager {
       scope,
       cacheRelPath,
     );
-    if (!entry || entry.skipped || !entry.sha256) return false;
+    if (!entry) return { served: false, reason: "entry_missing" };
+    if (entry.skipped) return { served: false, reason: "entry_skipped" };
+    if (!entry.sha256) return { served: false, reason: "entry_no_sha256" };
 
     let buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
-    if (!buf) return false;
+    if (!buf) return { served: false, reason: "blob_missing" };
 
     // 出口 #2：~/.claude/settings.json 命中 cache 后、切片前 redact 登录态字段。
     // size-preserving padding 保证 buf.byteLength 与 entry.size / stat.size 一致，
@@ -594,7 +663,7 @@ export class FileProxyManager {
       reqId: req.reqId,
       data: slice.toString("base64"),
     });
-    return true;
+    return { served: true };
   }
 
   /** 列出 dir 下的直接子项（子目录名 + 直接子文件名） */
@@ -717,6 +786,7 @@ export class FileProxyManager {
     cacheHitReads: number;
     clientRoundTripMs: number;
     pendingRequests: number;
+    peakPendingRequests: number;
     opCounts: Record<string, number>;
   } {
     const ops: Record<string, number> = {};
@@ -732,6 +802,7 @@ export class FileProxyManager {
       cacheHitReads: this.cacheHitReads,
       clientRoundTripMs: this.clientRoundTripMs,
       pendingRequests: this.pendingRequests.size,
+      peakPendingRequests: this.peakPendingRequests,
       opCounts: ops,
     };
   }
@@ -829,9 +900,18 @@ export class FileProxyManager {
     // blob 时直接从 Server 侧返回，不穿透 Client。
     // Python FUSE daemon 也会在本地 snapshot 缓存中查（启动时预热过），所以
     // 正常情况下这条路径只在 Python cache 被失效时才会触发，作为兜底。
-    if (req.op === "read" && this.cacheAvailable() && await this.tryServeReadFromCache(req)) {
-      this.cacheHitReads++;
-      return;
+    let readMissReason: string | undefined;
+    if (req.op === "read") {
+      if (!this.cacheAvailable()) {
+        readMissReason = !this.cacheStore ? "no_cache_store" : "no_device_id";
+      } else {
+        const result = await this.tryServeReadFromCache(req);
+        if (result.served) {
+          this.cacheHitReads++;
+          return;
+        }
+        readMissReason = result.reason;
+      }
     }
 
     // 出口 #3：~/.claude/settings.json 的 read 命中 cache miss / bypass / 未启用 cache
@@ -871,6 +951,24 @@ export class FileProxyManager {
         : undefined,
     };
 
+    // 路径穿透追踪：read 用 cache miss reason；其他 op（getattr/readdir/write/...）
+    // 标 reason 为 op 名本身。让用户直接看到具体哪些路径在跑 client round-trip。
+    const perforationKey = `${req.op}\0${root}/${relPath}`;
+    const reasonForPerforation = readMissReason ?? `op_${req.op}`;
+    const existing = this.perforatedPaths.get(perforationKey);
+    if (!existing) {
+      this.perforatedPaths.set(perforationKey, { count: 1, reason: reasonForPerforation });
+      log.info("FUSE 穿透 client 首次出现", {
+        sessionId: this.sessionId,
+        op: req.op,
+        root,
+        relPath,
+        reason: reasonForPerforation,
+      });
+    } else {
+      existing.count++;
+    }
+
     const mutationTargets = this.collectMutationHintTargets(req);
     let deferred: Deferred | undefined;
 
@@ -890,6 +988,9 @@ export class FileProxyManager {
       // 注册 pending，等待 Client 响应
       deferred = this.createDeferred(reqId);
       this.pendingRequests.set(reqId, deferred);
+      if (this.pendingRequests.size > this.peakPendingRequests) {
+        this.peakPendingRequests = this.pendingRequests.size;
+      }
       await this.sendToClient(clientReq);
     } catch (err) {
       if (deferred) {

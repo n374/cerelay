@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { ClientCacheStore } from "./client-cache-store.js";
 import type { ClientRegistry } from "./client-registry.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("cache-task-manager");
 import type {
   CacheScope,
   CacheTaskAckErrorCode,
@@ -263,6 +266,13 @@ export class CacheTaskManager {
         return this.reassignActiveClient(task, clientId, "resync");
       }
       task.phase = "ready";
+      log.info("cache task 进入 ready 状态", {
+        deviceId: task.deviceId,
+        cwd: task.cwd,
+        assignmentId: task.assignmentId,
+        revision: task.revision,
+        activeClientId: task.activeClientId,
+      });
       return [];
     });
 
@@ -313,6 +323,43 @@ export class CacheTaskManager {
   shouldUseCacheSnapshot(deviceId: string, cwd: string): boolean {
     const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
     return task?.phase === "ready";
+  }
+
+  /**
+   * 诊断接口：返回当前 (deviceId, cwd) 对应的 task 状态摘要，供 FileProxyManager
+   * 在 cache snapshot 不可用时打印原因——区分 "task 不存在"、"phase=syncing 还在跑"、
+   * "phase=degraded 失联" 等场景，避免用户只看到 usedCacheSnapshot=false 而不知所以。
+   */
+  describeTaskState(deviceId: string, cwd: string): {
+    exists: boolean;
+    phase: TaskPhase | null;
+    activeClientId: string | null;
+    assignmentId: string | null;
+    revision: number | null;
+    candidateClientCount: number;
+    lastHeartbeatAt: number | null;
+  } {
+    const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
+    if (!task) {
+      return {
+        exists: false,
+        phase: null,
+        activeClientId: null,
+        assignmentId: null,
+        revision: null,
+        candidateClientCount: 0,
+        lastHeartbeatAt: null,
+      };
+    }
+    return {
+      exists: true,
+      phase: task.phase,
+      activeClientId: task.activeClientId,
+      assignmentId: task.assignmentId,
+      revision: task.revision,
+      candidateClientCount: task.candidateClientIds.size,
+      lastHeartbeatAt: task.lastHeartbeatAt,
+    };
   }
 
   shouldBypassCacheRead(deviceId: string, cwd: string, scope: CacheScope, relPath: string): boolean {

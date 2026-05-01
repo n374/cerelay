@@ -725,12 +725,24 @@ if _snapshot_file and os.path.isfile(_snapshot_file):
 os.makedirs(MOUNT_POINT, exist_ok=True)
 
 try:
+    # Tuning rationale (Plan: 启动期 FUSE 穿透优化):
+    #   nothreads=False         libfuse 多线程派发 op；CC 并发 syscall 才能并发处理。
+    #   max_background=10       libfuse 允许同时在飞的请求数（默认 12，显式锁定 10
+    #                           作为 CC parallelism 的上限）。
+    #   attr_timeout / entry_timeout = 10.0
+    #                           内核 stat / dentry 缓存 TTL 从默认 1.0s 提到 10.0s，
+    #                           启动期的重复 getattr 大量直接命中内核缓存，不再穿透。
+    #                           ~/.claude 命名空间内只有 CC 在写，写后 kernel 自身
+    #                           会失效相关条目，cache 一致性安全。
     fuse_instance = FUSE(
         CerelayFuseOps(),
         MOUNT_POINT,
         foreground=True,
         nothreads=False,
         allow_other=False,
+        max_background=10,
+        attr_timeout=10.0,
+        entry_timeout=10.0,
     )
 except Exception as e:
     sys.stderr.write(f"FUSE mount failed: {e}\n")

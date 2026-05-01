@@ -244,7 +244,7 @@ test("出口 #2: settings.json 命中 cache 后切片是 redact 后字节", asyn
     size: original.byteLength,
   });
 
-  assert.equal(handled, true, "tryServeReadFromCache 必须命中");
+  assert.equal(handled.served, true, "tryServeReadFromCache 必须命中");
   assert.equal(daemonWrites.length, 1, "必须正好写一次 daemon");
   const written = daemonWrites[0].data;
   assert.equal(written.reqId, "rq-1");
