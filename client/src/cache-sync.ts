@@ -70,6 +70,8 @@ export interface ScopePlan {
   metaChanges: CacheTaskChange[];
   truncated: boolean;
   totalLocal: number;
+  cacheHits: number;
+  cacheMisses: number;
 }
 
 export interface ScopeSyncSummary {
@@ -483,6 +485,8 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
   args.scanCache?.pruneToPresent(args.scope, localPaths);
 
   const adds: CacheTaskUpsertChange[] = [];
+  let cacheHits = 0;
+  let cacheMisses = 0;
   for (const local of args.locals) {
     if (args.shouldAbort?.()) {
       break;
@@ -492,7 +496,15 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
       args.onHashProgress?.();
       continue;
     }
-    adds.push(await buildUpsertChange(args.scope, local, args.scanCache));
+    const { change, cacheHit } = await buildUpsertChange(args.scope, local, args.scanCache);
+    adds.push(change);
+    if (!change.skipped) {
+      if (cacheHit) {
+        cacheHits += 1;
+      } else {
+        cacheMisses += 1;
+      }
+    }
     args.onHashProgress?.();
   }
 
@@ -528,6 +540,8 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
     metaChanges,
     truncated: truncatedAdds,
     totalLocal: args.locals.length,
+    cacheHits,
+    cacheMisses,
   };
 }
 
@@ -623,16 +637,19 @@ async function buildUpsertChange(
   scope: CacheScope,
   local: LocalEntry,
   scanCache?: ScanCacheStore,
-): Promise<CacheTaskUpsertChange> {
+): Promise<{ change: CacheTaskUpsertChange; cacheHit: boolean }> {
   if (local.size > MAX_FILE_BYTES) {
     return {
-      kind: "upsert",
-      scope,
-      path: local.relPath,
-      size: local.size,
-      mtime: local.mtime,
-      sha256: null,
-      skipped: true,
+      cacheHit: false,
+      change: {
+        kind: "upsert",
+        scope,
+        path: local.relPath,
+        size: local.size,
+        mtime: local.mtime,
+        sha256: null,
+        skipped: true,
+      },
     };
   }
 
@@ -647,13 +664,16 @@ async function buildUpsertChange(
     });
   }
   return {
-    kind: "upsert",
-    scope,
-    path: local.relPath,
-    size: local.size,
-    mtime: local.mtime,
-    sha256,
-    contentBase64: buffer.toString("base64"),
+    cacheHit: Boolean(cachedSha),
+    change: {
+      kind: "upsert",
+      scope,
+      path: local.relPath,
+      size: local.size,
+      mtime: local.mtime,
+      sha256,
+      contentBase64: buffer.toString("base64"),
+    },
   };
 }
 

@@ -379,8 +379,8 @@ export class CacheTaskStateMachine {
       ).length;
       log.info("cache task scope cache stats", {
         scope: walked.scope,
-        cacheHits: 0,
-        cacheMisses: plan.uploads.length + skippedLarge,
+        cacheHits: plan.cacheHits,
+        cacheMisses: plan.cacheMisses,
         elapsedMs: this.now() - scopeHashStartedAt,
       });
       totalBytes += plan.uploads.reduce((sum, item) => sum + item.change.size, 0);

@@ -101,6 +101,8 @@ function makeEmptyPlan(scope: CacheScope, totalLocal: number): ScopePlan {
     metaChanges: [],
     truncated: false,
     totalLocal,
+    cacheHits: 0,
+    cacheMisses: 0,
   };
 }
 
@@ -191,6 +193,8 @@ test("CacheTaskStateMachine 收到 active assignment 后启动 watcher、推 ini
           metaChanges: [],
           truncated: false,
           totalLocal: locals.length,
+          cacheHits: 0,
+          cacheMisses: locals.length,
         };
       }
       return makeEmptyPlan(scope, locals.length);

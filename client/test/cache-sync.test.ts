@@ -343,6 +343,8 @@ test("pushInitialDeltaBatches 保留 file_pushed/file_acked 事件契约并预�
         metaChanges: [{ kind: "delete", scope: "claude-home", path: "gone.json" }],
         truncated: false,
         totalLocal: 2,
+        cacheHits: 0,
+        cacheMisses: 0,
       },
     ],
     sendDelta: async (delta) => {
@@ -406,6 +408,8 @@ test("pushInitialDeltaBatches 在 initial 阶段保留多文件并发 in-flight"
       metaChanges: [],
       truncated: false,
       totalLocal: 3,
+        cacheHits: 0,
+        cacheMisses: 0,
     }],
     sendDelta: async (delta) => {
       sent.push(delta);
@@ -464,6 +468,8 @@ test("pushInitialDeltaBatches 在达到 capacity 水位前阻塞后续 push", as
       metaChanges: [],
       truncated: false,
       totalLocal: 3,
+        cacheHits: 0,
+        cacheMisses: 0,
     }],
     sendDelta: async (delta) => {
       sent.push(delta);
@@ -514,6 +520,8 @@ test("pushInitialDeltaBatches abort 时清理 ack listener 并抛 InitialSyncAbo
       metaChanges: [],
       truncated: false,
       totalLocal: 2,
+        cacheHits: 0,
+        cacheMisses: 0,
     }],
     sendDelta: async (delta) => {
       sent.push(delta);
@@ -594,6 +602,8 @@ test("pushInitialDeltaBatches: 多 future 同时被 reject 不留下 unhandled r
         metaChanges: [],
         truncated: false,
         totalLocal: 3,
+        cacheHits: 0,
+        cacheMisses: 0,
       }],
       sendDelta: async (delta) => {
         // Server 立刻拒收（模拟 server 端 STORE_WRITE_FAILED：每个文件都失败）
