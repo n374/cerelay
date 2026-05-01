@@ -14,6 +14,7 @@ import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
@@ -34,6 +35,7 @@ import type {
   ToolResult,
 } from "./protocol.js";
 import { ClientCacheStore } from "./client-cache-store.js";
+import { AccessLedgerStore } from "./access-ledger.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
 import { CacheTaskManager } from "./cache-task-manager.js";
@@ -89,6 +91,9 @@ export class CerelayServer {
   private readonly cacheStore = new ClientCacheStore({
     dataDir: process.env.CERELAY_DATA_DIR?.trim() || "/var/lib/cerelay",
   });
+  private readonly accessLedgerStore = new AccessLedgerStore({
+    dataDir: process.env.CERELAY_DATA_DIR?.trim() || "/var/lib/cerelay",
+  });
   private readonly cacheTaskManager: CacheTaskManager;
   private readonly cacheTaskSweepTimer: NodeJS.Timeout;
 
@@ -106,6 +111,8 @@ export class CerelayServer {
     this.cacheTaskManager = new CacheTaskManager({
       registry: this.clients,
       store: this.cacheStore,
+      accessLedgerStore: this.accessLedgerStore,
+      getHomedirForDevice: () => homedir(),
       sendToClient: async (clientId, message) => {
         await this.sendToClient(clientId, message);
       },

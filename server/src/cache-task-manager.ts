@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { AccessLedgerRuntime, type AccessLedgerStore } from "./access-ledger.js";
 import { ClientCacheStore } from "./client-cache-store.js";
 import type { ClientRegistry } from "./client-registry.js";
 import { createLogger } from "./logger.js";
+import { computeSyncPlan } from "./sync-plan.js";
 
 const log = createLogger("cache-task-manager");
 import type {
@@ -50,6 +53,8 @@ interface CacheTaskManagerOptions {
   now?: () => number;
   createAssignmentId?: () => string;
   createMutationId?: () => string;
+  accessLedgerStore?: AccessLedgerStore;
+  getHomedirForDevice?: (deviceId: string) => string;
 }
 
 interface OutboundMessage {
@@ -69,6 +74,8 @@ export class CacheTaskManager {
   private readonly now: () => number;
   private readonly createAssignmentId: () => string;
   private readonly createMutationId: () => string;
+  private readonly accessLedgerStore: AccessLedgerStore | null;
+  private readonly getHomedirForDevice: (deviceId: string) => string;
   private readonly tasks = new Map<string, CacheTaskRecord>();
   private readonly mutexChains = new Map<string, Promise<void>>();
 
@@ -83,6 +90,8 @@ export class CacheTaskManager {
     this.now = options.now ?? (() => Date.now());
     this.createAssignmentId = options.createAssignmentId ?? (() => randomUUID());
     this.createMutationId = options.createMutationId ?? (() => randomUUID());
+    this.accessLedgerStore = options.accessLedgerStore ?? null;
+    this.getHomedirForDevice = options.getHomedirForDevice ?? (() => homedir());
   }
 
   async registerHello(clientId: string, hello: ClientHello): Promise<void> {
@@ -504,7 +513,7 @@ export class CacheTaskManager {
     const actions: OutboundMessage[] = [
       {
         clientId: winner,
-        message: this.buildActiveAssignment(task, manifest, reason),
+        message: await this.buildActiveAssignment(task, manifest, reason),
       },
     ];
 
@@ -535,7 +544,7 @@ export class CacheTaskManager {
     return [
       {
         clientId,
-        message: this.buildActiveAssignment(task, manifest, reason),
+        message: await this.buildActiveAssignment(task, manifest, reason),
       },
     ];
   }
@@ -576,14 +585,22 @@ export class CacheTaskManager {
       })[0]?.id ?? null;
   }
 
-  private buildActiveAssignment(
+  private async buildActiveAssignment(
     task: CacheTaskRecord,
     manifest: Awaited<ReturnType<ClientCacheStore["loadManifest"]>>,
     reason: Extract<CacheTaskAssignmentReason, "elected" | "failover" | "resync">,
-  ): CacheTaskAssignment {
+  ): Promise<CacheTaskAssignment> {
     if (!task.assignmentId) {
       throw new Error("active assignment 缺少 assignmentId");
     }
+    const ledger = this.accessLedgerStore
+      ? await this.accessLedgerStore.load(task.deviceId)
+      : new AccessLedgerRuntime(task.deviceId);
+    const syncPlan = computeSyncPlan({
+      ledger,
+      homedir: this.getHomedirForDevice(task.deviceId),
+    });
+
     return {
       type: "cache_task_assignment",
       deviceId: task.deviceId,
@@ -600,6 +617,7 @@ export class CacheTaskManager {
           "claude-json": { ...manifest.scopes["claude-json"], entries: { ...manifest.scopes["claude-json"].entries } },
         },
       },
+      syncPlan,
     };
   }
 
