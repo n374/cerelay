@@ -10,7 +10,7 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { ToolExecutor, summarizeToolResult, formatToolError } from "./executor.js";
 import { FileProxyHandler } from "./file-proxy.js";
 import { UI, CacheSyncProgressView } from "./ui.js";
-import { createLogger, configureLogger } from "./logger.js";
+import { createLogger, configureLogger, flushLogger } from "./logger.js";
 import { getOrCreateDeviceId } from "./device-id.js";
 import {
   DEFAULT_EXCLUDE_DIRS,
@@ -73,6 +73,7 @@ export class CerelayClient {
   private ptySessionId = "";
   private ptySessionCreatedAt = 0;
   private writeChain: Promise<void> = Promise.resolve();
+  private closeInProgress = false;
   private readonly homedir: string;
   /**
    * 本机设备 ID，用于 Server 侧文件缓存按 (deviceId, cwd) 隔离。
@@ -169,7 +170,14 @@ export class CerelayClient {
             }
             this.pendingMessages.push(raw);
           });
-          ws.on("close", () => {
+          ws.on("close", (code, reason) => {
+            log.info("websocket close event", {
+              code,
+              reason: reason.toString(),
+            });
+            if (this.closeInProgress) {
+              return;
+            }
             void this.cacheTaskStateMachine?.onDisconnected();
             this.cacheTaskStateMachine = null;
             this.disposeCacheSyncView();
@@ -185,19 +193,47 @@ export class CerelayClient {
     });
   }
 
-  close(): void {
-    log.debug("关闭 CerelayClient", {
+  async close(): Promise<void> {
+    const closeStartedAt = Date.now();
+    log.info("client close entry", {
       ptySessionId: this.ptySessionId,
       connected: Boolean(this.ws),
     });
-    if (this.ws) {
-      this.ws.close();
+    this.closeInProgress = true;
+    this.fileProxy.dispose?.();
+    const stateMachine = this.cacheTaskStateMachine;
+    const disconnectStartedAt = Date.now();
+    await stateMachine?.onDisconnected();
+    log.info("cache task disconnected during close", {
+      elapsedMs: Date.now() - disconnectStartedAt,
+    });
+    this.cacheTaskStateMachine = null;
+    const ws = this.ws;
+    if (ws) {
+      await waitForWebSocketClose(ws);
       this.ws = null;
     }
-    void this.cacheTaskStateMachine?.onDisconnected();
-    this.cacheTaskStateMachine = null;
     this.disposeCacheSyncView();
-    void this.executor.close().catch(() => undefined);
+    const executorStartedAt = Date.now();
+    try {
+      await this.executor.close();
+      log.info("executor closed during client close", {
+        ok: true,
+        elapsedMs: Date.now() - executorStartedAt,
+      });
+    } catch (error) {
+      log.info("executor closed during client close", {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        elapsedMs: Date.now() - executorStartedAt,
+      });
+    } finally {
+      this.closeInProgress = false;
+    }
+    log.info("client close complete", {
+      elapsedMs: Date.now() - closeStartedAt,
+    });
+    await flushLogger();
   }
 
   async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
@@ -809,6 +845,31 @@ function summarizeUnknown(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function waitForWebSocketClose(ws: WebSocket): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, 500);
+    timeout.unref?.();
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.off("close", onClose);
+    };
+    ws.once("close", onClose);
+    if (ws.readyState !== WebSocket.CLOSING) {
+      ws.close();
+    }
+  });
 }
 
 async function readProjectClaudeSettingsLocal(cwd: string): Promise<string | undefined> {

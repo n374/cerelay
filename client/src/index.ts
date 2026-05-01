@@ -5,7 +5,9 @@ import path from "node:path";
 import process from "node:process";
 import { Command } from "commander";
 import { CerelayClient } from "./client.js";
-import { configureLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
+import { configureLogger, createLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
+
+const log = createLogger("cli");
 
 const program = new Command();
 
@@ -86,6 +88,7 @@ function buildServerURL(server: string, key?: string): string {
 // ============================================================
 
 async function runPtyMode(server: string, key: string | undefined, cwdOverride?: string): Promise<void> {
+  const runStartedAt = Date.now();
   const cwd = cwdOverride ?? process.cwd();
   const serverURL = buildServerURL(server, key);
   const client = new CerelayClient(serverURL, cwd, { interactiveOutput: false });
@@ -96,18 +99,23 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
   let interrupting = false;
   const handleInterrupt = (signal: NodeJS.Signals) => {
     if (interrupting) {
+      log.info("interrupt received again", {
+        signal,
+        exitCode: 130,
+      });
       // 用户连按两次 Ctrl+C：放弃优雅退出，立刻硬退
       process.stderr.write("\n\x1b[31m[强制退出]\x1b[0m\n");
       process.exit(130);
     }
     interrupting = true;
+    log.info("interrupt received", {
+      signal,
+    });
     process.stderr.write(`\n\x1b[33m[已中断 ${signal}, 正在退出...]\x1b[0m\n`);
-    try {
-      client.close();
-    } catch {
-      // ignore
-    }
     process.exitCode = 130;
+    void client.close()
+      .catch(() => undefined)
+      .finally(() => process.exit(130));
     // 给 WS close + 缓存 onDisconnected 一点时间走完，但不等太久；用户已经在催了
     setTimeout(() => process.exit(130), 500).unref();
   };
@@ -126,14 +134,23 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
     if (logFilePath) {
       client.printAboveSyncProgress(`\x1b[90m日志文件: ${logFilePath} （查看: npm start -- logs）\x1b[0m\r\n`);
     }
+    const passthroughStartedAt = Date.now();
     await client.runPtyPassthrough(sessionId);
+    log.info("pty passthrough exited", {
+      sessionId,
+      elapsedMs: Date.now() - passthroughStartedAt,
+    });
   } catch (err) {
     process.stderr.write(`\x1b[31mPTY passthrough 失败: ${err instanceof Error ? err.message : String(err)}\x1b[0m\n`);
     process.exitCode = 1;
   } finally {
     process.off("SIGINT", handleInterrupt);
     process.off("SIGTERM", handleInterrupt);
-    client.close();
+    log.info("runPtyMode exiting", {
+      code: process.exitCode ?? 0,
+      totalDurationMs: Date.now() - runStartedAt,
+    });
+    await client.close();
   }
 }
 
