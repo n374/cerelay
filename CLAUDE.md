@@ -2,6 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 文档结构与职责 / Documentation Structure & Responsibility
+
+> **强制约束**：在本仓库新增 / 修改文档时必须遵循以下职责划分。违反约束的提交应当在 review 阶段被打回。
+
+| 文档 | 受众 | 该放什么 | **不该放什么** |
+|---|---|---|---|
+| [`README.md`](./README.md) | **用户** | 能做什么、前置条件、快速开始、鉴权、代理、Web UI、用户级 env vars、license | 架构图、组件分层表、内部模块路径、系统级 env vars、Plan 设计文档 |
+| [`docs/architecture.md`](./docs/architecture.md) | **贡献者 / 开发者** | 架构总览、技术选型、核心机制、项目结构、系统级 env vars、测试架构、子文档索引 | 用户安装步骤、商业 license 文案、单一专题深挖（应下沉到 `docs/<topic>.md`） |
+| `docs/<topic>.md` | 单一专题受众 | 一个特性 / 模块的完整设计与协议（如 Plan D shadow MCP、ACP relay、Docker 部署） | 跨模块的总览（应在 architecture.md） |
+| `CLAUDE.md`（本文档） | **AI 协作** | AI 工作约定、项目级强制约束（如 Phase 抽象约束、本节文档职责约束） | 大段重复 architecture.md 的描述性架构介绍——只在不便表达"必须 / 禁止"规则时补充 |
+
+**新增文档的检查清单**：
+
+1. **写之前先决定受众**：用户视角的怎么用 → README；贡献者视角的怎么实现 → architecture.md 或 docs/`<topic>`.md
+2. **新建 `docs/<topic>.md` 必须做两件事**：
+   - 在 `docs/architecture.md` §11 子文档索引 表格里登记
+   - 如果 README 也涉及该专题，README 用一句话提及并链接到 sub-doc，**禁止把整段细节抄进 README**
+3. **CLAUDE.md 与 architecture.md 重叠时**：架构描述以 architecture.md 为准；CLAUDE.md 只保留"必须 / 禁止"形式的强制约束 + 跨链接
+4. **修改 README 时反向检查**：新加内容是否其实属于 architecture.md / sub-doc？如果是请挪过去并在 README 里只放一句话指引
+
+参考实现：[`docs/architecture.md` §12 文档维护原则](./docs/architecture.md#12-文档维护原则--documentation-maintenance-principles)。
+
 ## 项目概述 / Project Overview
 
 **Cerelay** 是 Claude Code 的分体式架构实现。核心设计：用户在 Client 端交互，Hand 在本地执行工具，Server 端负责通过 Claude Agent SDK 驱动推理，并通过 WebSocket 将工具调用转发回 Client。

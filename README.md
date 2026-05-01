@@ -1,113 +1,75 @@
 # Cerelay
 
-**Cerelay** (cerebral + relay) 是 Claude Code 的分体式架构实现。Server 端托管 Claude Code PTY 会话，Client 端在本地执行工具调用；FUSE 文件代理只投影 Claude 运行所需的配置文件，两者通过 WebSocket 双向通信。
+**Cerelay**（cerebral + relay）让你在远端跑一个统一的 Claude Code 服务，本地用 `cerelay` CLI 接入；工具调用始终在本机执行，文件、shell、git 都用你本地的环境，远端只负责模型与 PTY。
 
-**Cerelay** is a split-architecture implementation of Claude Code. The Server hosts Claude Code PTY sessions, the Client executes tool calls locally, FUSE only projects the Claude runtime config files, and both sides communicate over WebSocket.
+**Cerelay** lets you run a centralized Claude Code service remotely, then connect to it from your local machine via the `cerelay` CLI. Tool calls always run locally — your files, shell, and git stay on your machine while the remote handles the model and PTY.
 
-## 架构 / Architecture
+> 想了解 Cerelay 的内部架构、技术选型、核心机制？请看 [`docs/architecture.md`](./docs/architecture.md)。
+>
+> Looking for the internal architecture, technology choices, or implementation details? See [`docs/architecture.md`](./docs/architecture.md).
 
-```text
-Client (TypeScript)  ←— WebSocket —→  Server (TypeScript)  ←→  Claude Code PTY / claude CLI
-  ├─ 本地工具执行                        ├─ PTY 会话托管
-  ├─ MCP Runtime                        ├─ Hook 拦截 + 工具转发
-  └─ 配置文件代理 / Config File Proxy      └─ Runtime 隔离 + 鉴权
-```
+---
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Server
-    participant PTY as Claude Code PTY
+## 能做什么 / What You Get
 
-    C->>S: WebSocket create_pty_session / prompt
-    S->>PTY: spawn claude CLI in PTY
-    PTY-->>S: pty_output / text stream
-    S-->>C: pty_output / text_chunk
-    PTY->>S: PreToolUse hook (tool_call)
-    S-->>C: tool_call (Read/Write/Bash/...)
-    C->>C: 本地执行工具
-    C-->>S: tool_result
-    S-->>PTY: hook result / pty_input
-    PTY-->>S: pty_exit / session_end
-    S-->>C: pty_exit / session_end
-```
+- **远端托管 Claude Code**：API key、登录态、依赖都集中在 Server 端，本地只装一个 CLI。
+- **工具调用在本机执行**：`Read` / `Write` / `Edit` / `Bash` / `Grep` / `Glob` 全部走你本地的真实文件系统，不需要把代码上传到远端。
+- **多账号 / 多代理出口**：一个 Server 容器对应一套凭证 + 代理出口，账号之间用并列容器实例隔离。
+- **代理穿透**：Client 支持 `HTTPS_PROXY` / `NO_PROXY`；Server 容器侧支持透明 SOCKS5（fail-closed）。
+- **编辑器集成**：除了 CLI，还提供 ACP (stdio JSON-RPC) 模式，可被 Zed / VS Code 等编辑器作为 Claude Code 调用。
+- **Web UI（可选）**：浏览器接入 Server，复用同一 WebSocket 协议。
 
-**核心设计 / Key Design**:
-
-- **PTY Hook 拦截**：Server 通过 Claude Code 的 `PreToolUse` hook 接管工具调用，转发到 Client 执行
-- **Session Runtime**：Docker 下每个 PTY session 有独立 mount namespace，Claude 看到的 `HOME`/`cwd` 对齐 Client 本地路径
-- **MCP 代理**：Server 读取 Claude 的 MCP 配置下发给 Client，Client 负责连接 MCP Server 并执行工具
-- **Client 文件访问**：Claude 的 `Read`/`Write`/`Edit`/`Bash`/`Grep`/`Glob` 等工具调用必须通过 hook 转发到 Client，在 Client 的当前目录和真实文件系统中执行；绝对路径与相对路径的语义应和用户本地一致
-- **FUSE 配置投影**：FUSE 只用于投影 Claude 配置视图（`~/.claude`、`~/.claude.json`、`{cwd}/.claude/settings.local.json`）以及 Server 侧 shadow 文件，不用于把用户项目根目录或整个 Client 文件系统暴露给容器
+---
 
 ## 前置条件 / Prerequisites
 
 ### Client 侧 / Client Side
 
-Client 在用户本地机器运行，负责执行 Claude 的工具调用（Read/Write/Bash/Grep 等）。以下为 Client 侧的系统级依赖：
-
-The Client runs on the user's local machine and executes Claude's tool calls (Read/Write/Bash/Grep, etc.). System-level dependencies for the Client:
+Client 在你本机运行，下面这些是系统级依赖：
 
 | 依赖 / Dependency | 级别 / Level | 说明 / Description |
 |---|---|---|
-| **Node.js** >= 18 | 必须 / Required | 运行时环境，需要 `node` 和 `npm`。Node 18+ 内置 `fetch` API，供 WebFetch 工具使用 / Runtime, requires `node` and `npm`. Node 18+ provides built-in `fetch` API for WebFetch tool |
-| **bash** | 必须 / Required | Bash 工具硬编码使用 `/bin/bash` 执行命令 / Bash tool uses `/bin/bash` (hardcoded path) to execute commands |
-| **git** | 强烈推荐 / Strongly recommended | Claude Code 的大部分操作依赖 `git`（diff、blame、commit 等）/ Most Claude Code operations depend on `git` (diff, blame, commit, etc.) |
-| **grep** | 推荐 / Recommended | Grep 工具优先调用系统 `grep -rn`，不可用时回退到纯 Node.js 实现 / Grep tool prefers system `grep -rn`, falls back to pure Node.js implementation |
+| **Node.js** >= 18 | 必须 / Required | 运行时环境，需要 `node` 和 `npm`。Node 18+ 内置 `fetch` API |
+| **bash** | 必须 / Required | Bash 工具硬编码使用 `/bin/bash` |
+| **git** | 强烈推荐 / Strongly recommended | Claude Code 大量操作依赖 `git`（diff、blame、commit 等） |
+| **grep** | 推荐 / Recommended | Grep 工具优先用系统 `grep -rn`，不可用则回退纯 Node 实现 |
 
-> **编译工具链不是必须的 / Build toolchain is NOT required**：Client 的所有 npm 依赖（`ws`、`commander`、`@modelcontextprotocol/sdk`、`http-proxy-agent`、`https-proxy-agent`）均为纯 JavaScript 包，`npm install` 无需 `gcc`/`g++`/`make`/`python`。
->
-> All npm dependencies are pure JavaScript — no native compilation toolchain (`gcc`/`g++`/`make`/`python`) is needed for `npm install`.
+> **不需要本地编译工具链**：Client 所有 npm 依赖均为纯 JavaScript 包，`npm install` 不依赖 `gcc`/`g++`/`make`/`python`。
 
-**macOS 安装示例 / macOS example**：
+**macOS**：
 
 ```bash
-# Node.js（通过 nvm 或 Homebrew）
 brew install node@20       # 或 nvm install 20
-
-# Git（macOS 通常自带 Xcode Command Line Tools 中的 git）
-xcode-select --install     # 如果还没装过 / if not installed yet
+xcode-select --install     # 如未装过
 ```
 
-**Linux（Debian/Ubuntu）安装示例 / Linux (Debian/Ubuntu) example**：
+**Linux (Debian/Ubuntu)**：
 
 ```bash
-# Node.js（通过 NodeSource）
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# 系统依赖 / System dependencies
-sudo apt-get install -y git bash grep
+sudo apt-get install -y nodejs git bash grep
 ```
 
 ### Server 侧 / Server Side
 
-- **Docker**（仅 Server 容器模式需要 / required only for Docker mode）
-- **Claude CLI**（仅 Server 本地直跑模式需要，需已认证：`claude auth` / required only for local mode, must be authenticated）
-- **TypeScript**：编译依赖 `tsc`，已包含在 `devDependencies` 中，`npm install` 后即可用 / Build dependency, included in `devDependencies`
+- **Docker**（容器模式，推荐）
+- 或本地直跑：已安装并认证的 `claude` CLI（`claude auth`）
+
+---
 
 ## 快速开始 / Quick Start
 
-### 安装依赖 / Install Dependencies
+### 1. 安装依赖 / Install
 
 ```bash
 npm install
 ```
 
-> `npm install` 会自动安装所有 workspace（server / client / web）的依赖，包括 TypeScript 编译器。
->
-> 如需单独为某个 workspace 添加依赖 / To add a dependency to a specific workspace:
->
-> ```bash
-> npm install <package> -w client          # 生产依赖
-> npm install <package> --save-dev -w client  # 开发依赖
-> ```
+> `npm install` 自动安装所有 workspace（server / client / web）的依赖。
 
-### 启动 Server / Start the Server
+### 2. 启动 Server / Start the Server
 
 #### Docker（推荐） / Docker (Recommended)
-
-前置条件：Docker、`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
 
 ```bash
 npm run server:up          # 启动容器
@@ -115,56 +77,27 @@ npm run server:logs        # 查看日志
 npm run server:down        # 停止容器
 ```
 
-容器使用 `cerelay-data` named volume 持久化登录凭证（`/var/lib/cerelay/credentials/default/.credentials.json`）。首次启动凭证为空，连上 Client 后执行 `claude login` 即可，凭证会自动写入 volume 并在后续重启中保留。
+容器使用 `cerelay-data` named volume 持久化登录凭证。首次启动凭证为空，连上 Client 后执行 `claude login` 即可。
 
-也可通过环境变量覆盖：
-
-```bash
-cp .env.example .env       # 可选，按需修改
-LOG_LEVEL=debug npm run server:up
-```
-
-启用容器级透明 SOCKS5 代理（fail-closed）：
-
-```bash
-CERELAY_SOCKS_PROXY=socks5://user:pass@proxy.example.com:1080 npm run server:up
-```
-
-也支持紧凑格式：
-
-```bash
-CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
-```
-
-开启后，容器内所有公网出站流量都经由 sing-box TUN 走 SOCKS5；代理异常或 sing-box 退出时，入口脚本会终止主进程，让容器断开并由 Docker 重启策略接管。
-
-DNS 默认通过代理上的 TCP 上游解析，不依赖代理 UDP。`CERELAY_SOCKS_UDP=forward`（默认）会继续放行非 DNS UDP；如需更严格的 fail-closed 策略，可设为 `block`，让 sing-box 显式拒绝其他 UDP。
-
-注意：该模式依赖 Linux 容器能力（`NET_ADMIN`、`/dev/net/tun`、`nftables`），适合部署在原生 Linux Docker 主机上。
+> 容器化部署的完整指南（卷映射、镜像构建、SOCKS5 代理细节）见 [`docs/brain-docker.md`](./docs/brain-docker.md)。
 
 #### 本地直跑 / Run Locally
-
-需本机已安装并认证 `claude` CLI：
 
 ```bash
 cd server && npm start -- --port 8765 --model claude-sonnet-4-20250514
 ```
 
-### 安装 Client CLI / Install the Client CLI
+### 3. 安装 Client CLI / Install the Client CLI
 
-#### 方式 A：单文件 Bundle（推荐） / Single-file Bundle (Recommended)
+#### 方式 A：单文件 Bundle（推荐）
 
-通过 Docker 构建一个自包含的单文件，产物仅依赖 Node.js >= 18，不需要 `node_modules`：
-
-Build a self-contained single file via Docker. The output only requires Node.js >= 18, no `node_modules` needed:
+通过 Docker 构建一个自包含的单文件，产物仅依赖 Node.js >= 18：
 
 ```bash
 cd client && npm run bundle:docker
 ```
 
 产物位于 `client/dist/cerelay-bundle.mjs`（约 1.2MB）。安装到系统：
-
-Output is at `client/dist/cerelay-bundle.mjs` (~1.2MB). Install system-wide:
 
 ```bash
 mkdir -p ~/.local/bin
@@ -173,85 +106,48 @@ printf '#!/bin/sh\nexec node "$HOME/.local/bin/cerelay.mjs" "$@"\n' > ~/.local/b
 chmod +x ~/.local/bin/cerelay
 ```
 
-> 也可本地 bundle（需先 `npm install`）/ Local bundle (requires `npm install` first):
-> ```bash
-> cd client && npm run bundle
-> ```
+> 也可本地 bundle（需先 `npm install`）：`cd client && npm run bundle`
 
-#### 方式 B：源码安装 / Source Install
-
-将 `cerelay` 命令安装到 `~/.local/bin`（包含 `dist/` + `node_modules/`）：
-
-Install the `cerelay` command to `~/.local/bin` (includes `dist/` + `node_modules/`):
+#### 方式 B：源码安装
 
 ```bash
 cd client && npm run install:global
 ```
 
-确保 `~/.local/bin` 在你的 `PATH` 中。如未配置，在 `~/.zshrc` 或 `~/.bashrc` 中添加：
+会把 `cerelay` 命令安装到 `~/.local/bin`（包含 `dist/` + `node_modules/`）。卸载：`cd client && npm run uninstall:global`。
 
-Make sure `~/.local/bin` is in your `PATH`. If not, add to `~/.zshrc` or `~/.bashrc`:
+确保 `~/.local/bin` 在 `PATH` 里（如未配置，加到 `~/.zshrc` / `~/.bashrc`）：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-卸载 / Uninstall:
+### 4. 启动 Client / Start the Client
 
-```bash
-cd client && npm run uninstall:global
-```
-
-### 启动 Client / Start the Client
-
-安装后可在任意目录直接启动，`--cwd` 默认为当前目录：
-
-After installation, run from any directory (`--cwd` defaults to current directory):
+安装后可在任意目录直接启动，`--cwd` 默认当前目录：
 
 ```bash
 cerelay --server localhost:8765
 ```
 
-`--server` 支持多种格式 / `--server` accepts multiple formats:
+`--server` 支持多种格式：
 
 ```bash
 cerelay --server localhost:8765            # ws://localhost:8765/ws
 cerelay --server http://example.com        # ws://example.com/ws
-cerelay --server https://example.com       # wss://example.com/ws（自动 TLS）
+cerelay --server https://example.com       # wss://example.com/ws
 cerelay --server wss://example.com/prefix  # wss://example.com/prefix/ws
 ```
 
-也可从源码启动 / Or run from source:
+也可从源码启动：`cd client && npm start -- --server localhost:8765 --cwd /path/to/project`。
 
-```bash
-cd client && npm start -- --server localhost:8765 --cwd /path/to/project
-```
-
-查看 Client 日志 / View Client logs:
+查看 Client 日志：
 
 ```bash
 cerelay logs
 ```
 
-### 通过代理连接 / Connecting Through a Proxy
-
-Client 支持 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量，兼容 Caddy Forward Proxy 等 CONNECT 代理：
-
-Client supports `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables, compatible with Caddy Forward Proxy and other CONNECT proxies:
-
-```bash
-# 通过 HTTP 代理连接 Server
-HTTPS_PROXY=http://proxy.internal:8080 cerelay --server https://remote-server.example.com
-
-# 跳过代理（直连）
-NO_PROXY=localhost,127.0.0.1 cerelay --server localhost:8765
-```
-
-- `https://` 目标使用 `HTTPS_PROXY`，`http://` 目标使用 `HTTP_PROXY`
-- `ALL_PROXY` 作为通用回退
-- `NO_PROXY` 支持精确匹配、后缀匹配（`.example.com`）、端口匹配（`host:port`）和通配符（`*`）
-
-### 启动 Web UI（可选） / Start the Web UI (Optional)
+### 5. 启动 Web UI（可选） / Start the Web UI
 
 ```bash
 cd web && npm start -- --port 8766 --server localhost:8765
@@ -259,23 +155,25 @@ cd web && npm start -- --port 8766 --server localhost:8765
 
 打开 http://localhost:8766。
 
+---
+
 ## 鉴权 / Authentication
 
-### CERELAY_KEY（简单共享密钥）
+### `CERELAY_KEY`（Server ↔ Client 共享密钥）
 
-Server 通过 `CERELAY_KEY` 环境变量设置共享密钥，Client 连接时需匹配：
+Server 通过 `CERELAY_KEY` 设置共享密钥，Client 连接时需匹配：
 
 ```bash
-# Server 端
+# Server
 CERELAY_KEY=my-secret npm run server:up
 
-# Client 端 / Client
+# Client
 CERELAY_KEY=my-secret cerelay --server localhost:8765
 # 或 / or
 cerelay --server localhost:8765 --key my-secret
 ```
 
-建议将 `CERELAY_KEY` 写入 `~/.zshrc` 或 `~/.bashrc`，避免每次输入：
+建议写入 `~/.zshrc` / `~/.bashrc`：
 
 ```bash
 export CERELAY_KEY=my-secret
@@ -283,20 +181,17 @@ export CERELAY_KEY=my-secret
 
 ### Claude Code 登录态
 
-容器内 Claude Code 的登录凭证由 `cerelay-data` named volume 持久化，路径：`/var/lib/cerelay/credentials/default/.credentials.json`（容器内）。
+容器内 Claude Code 的凭证由 `cerelay-data` volume 持久化。
 
-- **推荐方式**：首次启动容器 → 连接 Client → 在 Client 中执行 `claude login` 完成登录；凭证会通过 FUSE shadow file 写入并持久化到 volume，重启容器不需要重新登录。
-- **可选 seed**：通过 `CLAUDE_CREDENTIALS` 环境变量一次性写入凭证 JSON：
-
-```bash
-CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
-```
+- **推荐**：首次启动容器 → 连接 Client → 执行 `claude login`，凭证写入 volume，重启不需重登。
+- **可选 seed**：通过 `CLAUDE_CREDENTIALS` 一次性注入凭证 JSON：
+  ```bash
+  CLAUDE_CREDENTIALS='{"claudeAiOauth":{...}}' npm run server:up
+  ```
 
 ### 多账号 / Multi-account
 
-透明 SOCKS5 代理是**容器级**能力，不是 session 级能力。一个容器只能稳定对应一套代理出口，因此多账号应部署为多个并列容器实例，而不是 Docker-in-Docker。
-
-推荐做法：每个账号用独立的 `COMPOSE_PROJECT_NAME`，docker-compose 会为每个 project 生成独立的 `cerelay-data` volume，凭证彼此隔离。
+透明 SOCKS5 代理是**容器级**而非 session 级，多账号应部署多个并列容器实例：
 
 ```bash
 # 账号 A
@@ -312,100 +207,101 @@ CERELAY_SOCKS_PROXY=socks5://userB:passB@proxy-b.example.com:1080 \
 npm run server:up
 ```
 
-这样每个实例都有独立的：
+每个实例都有独立的：Claude 凭证、宿主机端口、容器网络出口、Docker 生命周期。
 
-- Claude 凭证
-- 宿主机端口
-- 容器网络出口
-- Docker 生命周期
+---
 
-## 项目结构 / Project Structure
+## 通过代理连接 / Connecting Through a Proxy
 
-```text
-cerelay/
-├── server/                   # Server（Claude Code PTY 托管）
-│   └── src/
-│       ├── server.ts         # HTTP + WebSocket + PTY / tool relay
-│       ├── pty-session.ts    # Claude Code PTY 会话
-│       ├── claude-tool-bridge.ts      # PreToolUse hook 桥接
-│       └── claude-session-runtime.ts  # Mount namespace 隔离
-├── client/                   # Client（本地工具执行）
-│   └── src/
-│       ├── index.ts          # CLI 入口（默认 PTY 模式）
-│       ├── client.ts         # WebSocket 客户端
-│       ├── executor.ts       # 工具分发（Read/Write/Edit/Bash/Grep/Glob）
-│       ├── mcp/runtime.ts    # MCP Runtime 桥接
-│       └── file-proxy.ts     # 文件代理客户端
-├── web/                      # 浏览器 UI（可选）
-├── docker-compose.yml
-├── Dockerfile
-└── docker-entrypoint.sh
-```
+### Client 侧（连接 Server）
 
-## 开发 / Development
-
-### 构建 / Build
+Client 支持 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，兼容 Caddy Forward Proxy 等 CONNECT 代理：
 
 ```bash
-npm run test:workspaces       # 编译并测试所有 workspace
-cd server && npm run build    # 单独编译
+# 通过 HTTP 代理连接 Server
+HTTPS_PROXY=http://proxy.internal:8080 cerelay --server https://remote-server.example.com
+
+# 跳过代理（直连）
+NO_PROXY=localhost,127.0.0.1 cerelay --server localhost:8765
 ```
 
-### 类型检查 / Type Check
+- `https://` 目标用 `HTTPS_PROXY`，`http://` 目标用 `HTTP_PROXY`
+- `ALL_PROXY` 作为通用回退
+- `NO_PROXY` 支持精确匹配、后缀匹配（`.example.com`）、端口匹配（`host:port`）和通配符（`*`）
+
+### Server 侧（容器透明 SOCKS5）
 
 ```bash
-cd server && npm run typecheck
-cd client && npm run typecheck
+CERELAY_SOCKS_PROXY=socks5://user:pass@proxy.example.com:1080 npm run server:up
+# 紧凑格式
+CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
 ```
 
-### 测试 / Testing
+容器内所有公网出站流量都经由 sing-box TUN 走 SOCKS5；代理异常或 sing-box 退出时容器会自动断开，由 Docker 重启策略接管。依赖 Linux 容器能力（`NET_ADMIN`、`/dev/net/tun`、`nftables`）。
 
-```bash
-npm test                      # 全部测试（smoke + workspaces）
-npm run test:smoke            # 烟测（Docker entrypoint）
-npm run test:workspaces       # 各 workspace 单元/集成测试
+> 完整代理参数（DNS、UDP 策略、TUN 段等）见 [`docs/brain-docker.md`](./docs/brain-docker.md) 与 [`docs/architecture.md` §8](./docs/architecture.md#8-系统级环境变量--system-level-environment-variables)。
 
-# 单个 workspace
-cd server && npm test
-cd client && npm test
-cd web && npm test
-```
+---
 
-## 环境变量 / Environment Variables
+## 用户环境变量 / User-facing Environment Variables
+
+> 这里只列与"使用 cerelay"直接相关的变量。系统级 / 部署调试相关变量见 [`docs/architecture.md` §8](./docs/architecture.md#8-系统级环境变量--system-level-environment-variables)。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `CERELAY_KEY` | — | Client 连接共享密钥 |
-| `SERVER_PORT` | `8765` | 容器内监听端口 |
-| `SERVER_HOST_PORT` | `8765` | 宿主机映射端口 |
+| `CERELAY_KEY` | — | Client 连接 Server 的共享密钥 |
+| `SERVER_PORT` | `8765` | 容器内 Server 监听端口 |
+| `SERVER_HOST_PORT` | `8765` | Docker 映射到宿主机的端口 |
 | `MODEL` | `claude-sonnet-4-20250514` | 默认 Claude 模型 |
-| `LOG_LEVEL` | `info` | 日志级别 |
-| `CERELAY_ENABLE_MOUNT_NAMESPACE` | `true` | 是否启用 mount namespace 隔离 |
-| `CERELAY_SOCKS_PROXY` | — | 容器级透明 SOCKS5 代理，支持 `socks5://...` 或 `host:port[:user:pass]` |
-| `CERELAY_SOCKS_DNS_SERVER` | `1.1.1.1` | TUN 模式下走代理解析的上游 DNS |
-| `CERELAY_SOCKS_UDP` | `forward` | UDP 策略：`forward` 继续放行，`block` 显式拒绝非 DNS UDP |
-| `CERELAY_SOCKS_TUN_ADDRESS` | `172.19.0.1/30` | sing-box TUN 地址段 |
-| `CERELAY_SOCKS_TUN_MTU` | `9000` | sing-box TUN MTU |
-| `CLAUDE_CREDENTIALS` | — | 可选：seed 登录凭证 JSON（写入 Data volume） |
-| `CERELAY_DATA_DIR` | `/var/lib/cerelay` | 容器内持久化数据目录（凭证 + Client 缓存） |
 | `ANTHROPIC_API_KEY` | — | Claude API Key |
-| `HTTP_PROXY` | — | Client 连接 ws:// 目标时使用的代理 |
-| `HTTPS_PROXY` | — | Client 连接 wss:// 目标时使用的代理 |
-| `ALL_PROXY` | — | 代理通用回退（优先级低于上面两个） |
+| `ANTHROPIC_AUTH_TOKEN` | — | 可选：替代 API key 的 auth token |
+| `CLAUDE_CREDENTIALS` | — | 可选：seed 登录凭证 JSON（写入 Data volume） |
+| `CERELAY_SOCKS_PROXY` | — | 容器级透明 SOCKS5 代理 |
+| `HTTP_PROXY` | — | Client 连 `ws://` 目标用的代理 |
+| `HTTPS_PROXY` | — | Client 连 `wss://` 目标用的代理 |
+| `ALL_PROXY` | — | 代理通用回退 |
 | `NO_PROXY` | — | 不走代理的地址列表（逗号分隔） |
+
+---
+
+## 编辑器集成 / Editor Integration
+
+`cerelay` 也可以作为 ACP（Agent Communication Protocol）stdio server 启动，被 Zed / VS Code 等编辑器作为 Claude Code 调用：
+
+```bash
+cerelay acp --server localhost:8765 --cwd /your/project
+```
+
+完整的协议字段、初始化握手、编辑器配置示例见 [`docs/acp-editor-integration.md`](./docs/acp-editor-integration.md)。
+
+---
+
+## 文档地图 / Documentation Map
+
+| 文档 | 受众 | 内容 |
+|---|---|---|
+| `README.md`（本文档） | **用户** | 怎么跑、怎么连、鉴权、代理、能力总览 |
+| [`docs/architecture.md`](./docs/architecture.md) | 贡献者 / 开发者 | 架构总览、技术选型、核心机制、系统级 env vars |
+| [`docs/brain-docker.md`](./docs/brain-docker.md) | 部署者 | Docker 部署指南、卷与镜像、SOCKS5 代理细节 |
+| [`docs/acp-editor-integration.md`](./docs/acp-editor-integration.md) | 编辑器集成者 | ACP stdio 协议、Zed / VS Code 配置 |
+| [`docs/plan-d-mcp-shadow-tools.md`](./docs/plan-d-mcp-shadow-tools.md) | 贡献者 | Shadow MCP 设计（绕开 hook deny 协议约束） |
+| [`docs/plan-acp-relay.md`](./docs/plan-acp-relay.md) | 贡献者 | ACP relay 设计 |
+| [`CLAUDE.md`](./CLAUDE.md) | AI 协作 | 项目级 AI 协作规范、强制约束 |
+
+---
 
 ## 许可证 / License
 
-本项目采用 [PolyForm Noncommercial License 1.0.0](./LICENSE) 发布。
+本项目采用 [PolyForm Noncommercial License 1.0.0](./LICENSE)。
 
 This project is licensed under the [PolyForm Noncommercial License 1.0.0](./LICENSE).
 
 **Copyright (c) 2026 n374**
 
-简要说明 / Summary（**以 LICENSE 全文为准 / the full LICENSE text governs**）：
+简要说明（**以 LICENSE 全文为准**）：
 
-- ✅ **允许 / Permitted**：个人学习、研究、教育、慈善、政府等任何 **非商业用途** 下的使用、修改、再分发 / use, modify, and redistribute for any **noncommercial purpose** (personal study, research, education, charity, government, etc.).
-- ❌ **禁止 / Prohibited**：任何形式的商业用途 / any form of **commercial use**.
-- ✍️ **必须保留署名 / Attribution required**：分发本项目（含修改版本与衍生作品）时必须保留版权声明、本许可证全文以及 `Required Notice: Copyright (c) 2026 n374` / when redistributing the project (including modifications and derivative works), you must keep the copyright notice, the full license text, and the `Required Notice: Copyright (c) 2026 n374` line.
+- ✅ **允许 / Permitted**：个人学习、研究、教育、慈善、政府等任何 **非商业用途** 下的使用、修改、再分发
+- ❌ **禁止 / Prohibited**：任何形式的商业用途
+- ✍️ **必须保留署名 / Attribution required**：分发本项目（含修改版本与衍生作品）时必须保留版权声明、本许可证全文以及 `Required Notice: Copyright (c) 2026 n374`
 
 如需商业授权，请联系作者 / For commercial licensing, please contact the author.
