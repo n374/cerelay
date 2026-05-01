@@ -41,3 +41,48 @@ test("computeSyncPlan claude-json scope 永远恒定", () => {
   const plan = computeSyncPlan({ ledger, homedir: "/Users/foo" });
   assert.deepEqual(plan.scopes["claude-json"]?.subtrees, [{ relPath: "", maxDepth: 0 }]);
 });
+
+test("computeSyncPlan 中间目录补齐: 叶子 file 的父链 dir 自动加进 files", () => {
+  const ledger = new AccessLedgerRuntime("dev1");
+  // ledger 只记叶子 file, 没 readdir 父 dir (复现用户日志中 projects/<sid>/conv.jsonl 场景)
+  ledger.upsertFilePresent("/Users/foo/.claude/projects/sid-A/conv.jsonl", 1);
+  ledger.upsertFilePresent("/Users/foo/.claude/sessions/x.json", 2);
+  ledger.upsertFilePresent("/Users/foo/.claude/backups/old.json", 3);
+
+  const plan = computeSyncPlan({ ledger, homedir: "/Users/foo" });
+  const home = plan.scopes["claude-home"];
+  assert.ok(home);
+
+  // 中间父目录必须被补齐进 files (让 client walk stat 它们)
+  assert.ok(home.files.includes("projects"), "projects 父目录应被补齐");
+  assert.ok(home.files.includes("projects/sid-A"), "projects/sid-A 应被补齐");
+  assert.ok(home.files.includes("sessions"), "sessions 父目录应被补齐");
+  assert.ok(home.files.includes("backups"), "backups 父目录应被补齐");
+  // 叶子 file 自身仍在
+  assert.ok(home.files.includes("projects/sid-A/conv.jsonl"));
+});
+
+test("computeSyncPlan 中间目录补齐: 已被 subtree 覆盖的不重复加", () => {
+  const ledger = new AccessLedgerRuntime("dev1");
+  ledger.upsertDirPresent("/Users/foo/.claude/skills", 1, true);  // skills 是 subtree
+  ledger.upsertFilePresent("/Users/foo/.claude/skills/lark/main.md", 2);
+
+  const plan = computeSyncPlan({ ledger, homedir: "/Users/foo" });
+  const home = plan.scopes["claude-home"];
+
+  // skills/lark 不应进 files (被 skills subtree 覆盖)
+  assert.ok(!home?.files.includes("skills/lark"));
+});
+
+test("computeSyncPlan 中间目录补齐: 父链节点不在 missing 时才加", () => {
+  const ledger = new AccessLedgerRuntime("dev1");
+  ledger.upsertMissing("/Users/foo/.claude/plugins/themes", 1);
+
+  const plan = computeSyncPlan({ ledger, homedir: "/Users/foo" });
+  const home = plan.scopes["claude-home"];
+
+  // plugins 是 themes 的父 — 中间补齐加 plugins (它不在 missing)
+  assert.ok(home?.files.includes("plugins"));
+  // themes 自身在 knownMissing
+  assert.ok(home?.knownMissing.includes("plugins/themes"));
+});
