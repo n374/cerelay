@@ -315,6 +315,16 @@ class Cache:
             # "不存在" 缓存同样要清——否则文件已经创建但 getattr 仍返 ENOENT。
             self._negative_perm.invalidate_prefix(path)
 
+    def clear(self):
+        with self._lock:
+            self._stat.clear()
+            self._readdir.clear()
+            self._read.clear()
+            self._stat_perm.clear()
+            self._readdir_perm.clear()
+            self._read_perm.clear()
+            self._negative_perm.clear()
+
 _cache = Cache()
 
 # ============================================================
@@ -883,6 +893,12 @@ class CerelayFuseOps(Operations):
 
 fuse_instance = None
 
+def send_control_response(response):
+    try:
+        os.write(CONTROL_FD, (json.dumps(response) + "\n").encode("utf-8"))
+    except OSError:
+        pass
+
 def handle_control():
     global fuse_instance
     try:
@@ -894,7 +910,8 @@ def handle_control():
                     message = json.loads(line)
                 except Exception:
                     continue
-                if message.get("type") == "shutdown":
+                msg_type = message.get("type")
+                if msg_type == "shutdown":
                     # 请求 FUSE 退出
                     if fuse_instance:
                         try:
@@ -907,6 +924,19 @@ def handle_control():
                         except Exception:
                             pass
                     break
+                elif msg_type == "put_negative":
+                    path = message.get("path")
+                    if isinstance(path, str) and path:
+                        _cache.put_negative(path)
+                    send_control_response({"ok": True})
+                elif msg_type == "invalidate_negative_prefix":
+                    prefix = message.get("prefix", message.get("path"))
+                    if isinstance(prefix, str) and prefix:
+                        _cache.invalidate_negative(prefix)
+                    send_control_response({"ok": True})
+                elif msg_type == "invalidate_cache":
+                    _cache.clear()
+                    send_control_response({"ok": True})
     except OSError:
         pass
 
