@@ -1,6 +1,21 @@
 # Access-Ledger 驱动的 Cache 重构 / Access-Ledger-Driven Cache Refactor — Implementation Plan
 
+> **状态 / Status**: Implemented (master @ 1610514). 7 个 Phase 全部落地.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+## 实施总结 / Implementation Summary
+
+- **31 个 commit** (`9aba1e2` → `1610514`), 含 4 个修复 commit (Phase 3 fix / Defect 1 fix / Defect 2 fix / SyncPlan 中间目录补齐)
+- **server tests**: 305 / 300 pass / 5 skipped / 0 fail; **client tests**: 135 / 135 pass / 0 fail
+- **关键 e2e 防穿透回归**:
+  - `e2e-runtime-negative-persisted.test.ts`: 跨 session missing 持久化端到端
+  - `e2e-daemon-no-perforation.test.ts`: spawn python3 跑 daemon 简化链路, mock send_request 计数, 编程化断言"已注入 path 不穿透"
+  - `e2e-cross-cwd-and-mutations.test.ts`: 跨 cwd 共享 + 9 种 mutation op 全覆盖
+- **没在 macOS 跑 capture 跑性能基准**(spawn FUSE 限制):
+  - SeedWhitelist 用 hand-curated minimal fixture (基于 CC 已知行为 + 用户实测日志). 后续可由 `scripts/seed-whitelist-codegen.ts` 用真实 capture 数据覆写
+  - 性能基准需要 Linux + docker 环境实测 (见 §14.4 目标), 单元/集成测试已覆盖正确性
+- **V2 候选** (本期不实施): cwd-ancestor `CLAUDE.md` / dirIndex / blob 跨 cwd 去重
 
 **Goal:** 把当前两套并存的"启动期文件加速"机制（ClientCacheStore manifest+blob、FUSE snapshot 预热）整合到一个由 AccessLedger 驱动的统一架构，修复 Defect 1 (snapshot 抢跑) 和 Defect 2 (负缓存不持久)。
 
