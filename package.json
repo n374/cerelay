@@ -10,8 +10,10 @@
     "server:up": "docker compose up --build --force-recreate --remove-orphans -d",
     "server:down": "docker compose down",
     "server:logs": "docker compose logs -f cerelay-server",
-    "test": "npm run test:smoke && npm run test:workspaces",
-    "test:container": "sh ./test/run-container-tests.sh"
+    "test": "sh ./test/run-host-tests.sh",
+    "test:container": "sh ./test/run-container-tests.sh",
+    "test:gc": "sh ./test/gc-test-resources.sh",
+    "test:gc:all": "sh ./test/gc-test-resources.sh --all"
   },
   "workspaces": ["server", "client", "web"]
 }

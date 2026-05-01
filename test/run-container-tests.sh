@@ -2,10 +2,17 @@
 
 set -eu
 
-compose_cmd="docker compose -f docker-compose.test.yml"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+. "$script_dir/test-env-common.sh"
+. "$script_dir/gc-test-resources.sh"
+
+test_gc_resources
+
+compose_cmd="docker compose -p $COMPOSE_PROJECT_NAME -f docker-compose.test.yml"
 
 cleanup() {
-  $compose_cmd down -v --remove-orphans >/dev/null 2>&1 || true
+  $compose_cmd down --remove-orphans >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT INT TERM
