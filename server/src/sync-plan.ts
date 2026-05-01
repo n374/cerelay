@@ -41,6 +41,12 @@ export function computeSyncPlan({ ledger, homedir }: ComputeSyncPlanArgs): SyncP
 
     if (entry.kind === "dir" && entry.readdirObserved) {
       homeInstruction.subtrees.push({ relPath, maxDepth: -1 });
+    } else if (entry.kind === "dir") {
+      // dir 但 readdirObserved=false (CC stat 过但没 readdir): 当 maxDepth=0 subtree
+      // 处理, 让 client readdir 它一次 (不下钻子目录) — 直接子项 file 进 manifest,
+      // server 反向构造 snapshot 时从 file 父链派生 dir 自身 stat 进 daemon _stat_perm,
+      // CC 启动后 getattr 该 dir 命中不穿透.
+      homeInstruction.subtrees.push({ relPath, maxDepth: 0 });
     } else if (entry.kind === "file") {
       homeInstruction.files.push(relPath);
     }

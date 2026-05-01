@@ -62,6 +62,30 @@ test("loadMissingForDevice 跨 cwd 共享: 同 device 多次 missing 都被返�
   assert.equal(missing.length, 2);
 });
 
+test("loadDirsForDevice 返回 dir entries (含 readdirObserved=true / false), 排除 file/missing", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ledger-"));
+  const store = new AccessLedgerStore({ dataDir: dir });
+  const runtime = new AccessLedgerRuntime("dev-D");
+  runtime.upsertDirPresent("/Users/foo/.claude/projects", 1, false);
+  runtime.upsertDirPresent("/Users/foo/.claude/skills", 2, true);
+  runtime.upsertFilePresent("/Users/foo/.claude/settings.json", 3);
+  runtime.upsertMissing("/Users/foo/.claude/themes", 4);
+  await store.persist(runtime);
+
+  const dirs = await store.loadDirsForDevice("dev-D");
+  assert.deepEqual(dirs.sort(), [
+    "/Users/foo/.claude/projects",
+    "/Users/foo/.claude/skills",
+  ]);
+});
+
+test("loadDirsForDevice 不存在的 deviceId 返回空数组 (不抛)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ledger-"));
+  const store = new AccessLedgerStore({ dataDir: dir });
+  const dirs = await store.loadDirsForDevice("dev-NEW");
+  assert.deepEqual(dirs, []);
+});
+
 test("loadMissingForDevice 返回的 path 可以被 FileProxyManager 投影按 root 过滤", async () => {
   // 模拟 FileProxyManager 的过滤逻辑: 仅注入位于本 session FUSE roots 内的 missing
   const dir = mkdtempSync(path.join(tmpdir(), "ledger-"));

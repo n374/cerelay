@@ -25,14 +25,23 @@ test("computeSyncPlan 非空 ledger 反向构造 plan: home subtree + files", ()
   assert.ok(home.knownMissing.includes("plugins/themes"));
 });
 
-test("computeSyncPlan 不要把 readdirObserved=false 的 dir 当 subtree", () => {
+test("computeSyncPlan readdirObserved=false 的 dir 进 subtree maxDepth=0 (一次 readdir 不下钻)", () => {
   const ledger = new AccessLedgerRuntime("dev1");
-  ledger.upsertDirPresent("/Users/foo/.claude/skills", 1, false);
-  ledger.upsertFilePresent("/Users/foo/.claude/skills/a.md", 2);
+  // dir 但 readdirObserved=false (例如 CC 仅 getattr 过, 没 readdir)
+  ledger.upsertDirPresent("/Users/foo/.claude/projects", 1, false);
+  // 也加一个 readdirObserved=true 的对照
+  ledger.upsertDirPresent("/Users/foo/.claude/skills", 2, true);
+
   const plan = computeSyncPlan({ ledger, homedir: "/Users/foo" });
   const home = plan.scopes["claude-home"];
-  assert.ok(!home?.subtrees.some((subtree) => subtree.relPath === "skills"));
-  assert.ok(home?.files.includes("skills/a.md"));
+  // readdirObserved=false dir 进 subtree, 但 maxDepth=0 (只 readdir 自己)
+  const projectsSubtree = home?.subtrees.find((s) => s.relPath === "projects");
+  assert.ok(projectsSubtree, "readdirObserved=false 的 dir 应进 subtrees");
+  assert.equal(projectsSubtree?.maxDepth, 0, "maxDepth=0 - 只 readdir 这一级, 不下钻");
+  // readdirObserved=true 的 dir 进 subtree maxDepth=-1 (下钻整棵)
+  const skillsSubtree = home?.subtrees.find((s) => s.relPath === "skills");
+  assert.ok(skillsSubtree);
+  assert.equal(skillsSubtree?.maxDepth, -1);
 });
 
 test("computeSyncPlan claude-json scope 永远恒定", () => {

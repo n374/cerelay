@@ -23,6 +23,7 @@ import type { CacheTaskManager } from "./cache-task-manager.js";
 import type { AccessLedgerRuntime } from "./access-ledger.js";
 import { SessionAccessBuffer, type AccessEvent } from "./access-event-buffer.js";
 import { DaemonControlClient } from "./daemon-control.js";
+import { SEED_WHITELIST } from "./seed-whitelist.js";
 
 const log = createLogger("file-proxy-manager");
 
@@ -110,6 +111,7 @@ export interface FileProxyManagerOptions {
  */
 export interface AccessLedgerProjection {
   loadMissingForDevice(deviceId: string): Promise<string[]>;
+  loadDirsForDevice(deviceId: string): Promise<string[]>;
   load(deviceId: string): Promise<AccessLedgerRuntime>;
   persist(runtime: AccessLedgerRuntime): Promise<void>;
 }
@@ -898,27 +900,23 @@ export class FileProxyManager {
     //    投影范围：仅本 session 的 FUSE roots 内的 missing path。同 device 跨 cwd
     //    共享 ledger，但 daemon 只关心自己的 roots（避免污染其他 cwd 视图）。
     let ledgerMissingInjected = 0;
+    let seedMissingInjected = 0;
+    const negativesSeen = new Set(snapshot.negatives);
+
     if (this.accessLedgerStore && this.deviceId) {
       try {
         const allMissing = await this.accessLedgerStore.loadMissingForDevice(this.deviceId);
         const sessionRoots = Object.values(this.roots);
-        const seen = new Set(snapshot.negatives);
         for (const missingPath of allMissing) {
           const inRoots = sessionRoots.some(
             (root) => missingPath === root || missingPath.startsWith(root + "/"),
           );
-          if (inRoots && !seen.has(missingPath)) {
+          if (inRoots && !negativesSeen.has(missingPath)) {
             snapshot.negatives.push(missingPath);
-            seen.add(missingPath);
+            negativesSeen.add(missingPath);
             ledgerMissingInjected++;
           }
         }
-        log.info("ledger.missing 注入 snapshot", {
-          sessionId: this.sessionId,
-          deviceId: this.deviceId,
-          totalLedgerMissing: allMissing.length,
-          injectedToSnapshot: ledgerMissingInjected,
-        });
       } catch (err) {
         log.warn("ledger.missing 投影失败 (降级, 不阻塞 snapshot 写出)", {
           sessionId: this.sessionId,
@@ -927,6 +925,65 @@ export class FileProxyManager {
         });
       }
     }
+
+    // 4. 注入 SeedWhitelist.knownMissing - 兜底冷启动场景 (新 device / ledger 空时
+    //    ledger.missing 没条目, SeedWhitelist 已知"CC 启动期常探但默认不存在"的路径
+    //    必须也进 daemon _negative_perm, 否则全部穿透 client). claude-home scope
+    //    的 knownMissing relPath 转绝对路径; claude-json scope 一般无 knownMissing.
+    {
+      const homeRoot = this.roots["home-claude"];
+      const homeKnownMissing = SEED_WHITELIST.scopes["claude-home"]?.knownMissing ?? [];
+      if (homeRoot) {
+        for (const relPath of homeKnownMissing) {
+          const absPath = relPath ? path.join(homeRoot, relPath) : homeRoot;
+          if (!negativesSeen.has(absPath)) {
+            snapshot.negatives.push(absPath);
+            negativesSeen.add(absPath);
+            seedMissingInjected++;
+          }
+        }
+      }
+    }
+
+    // 5. 注入 ledger 中的 dir entries 为合成 dir stat — 解决 cache-sync file-only
+    //    限制: manifest 不含 dir entry, CC 在 stat 已知 ledger 学过的父 dir 时穿透.
+    //    实测案例: projects (CC stat 过但 readdirObserved=false, 子 sid 目录又没
+    //    file 子项, 所以 manifest 完全没 projects/* 任何 entry, buildSnapshotFromManifest
+    //    无法从父链派生 projects dir stat). 直接从 ledger.dir 合成 stat 注入 snapshot.
+    let ledgerDirsInjected = 0;
+    if (this.accessLedgerStore && this.deviceId) {
+      try {
+        const allDirs = await this.accessLedgerStore.loadDirsForDevice(this.deviceId);
+        const sessionRoots = Object.values(this.roots);
+        const statsSeen = new Set(Object.keys(snapshot.stats));
+        for (const dirPath of allDirs) {
+          const inRoots = sessionRoots.some(
+            (root) => dirPath === root || dirPath.startsWith(root + "/"),
+          );
+          if (!inRoots) continue;
+          if (statsSeen.has(dirPath)) continue;
+          // 合成 dir stat (跟 buildSnapshotFromManifest 派生父 dir 时用同一 makeDirStat)
+          snapshot.stats[dirPath] = statToFuseFormat(makeDirStat());
+          statsSeen.add(dirPath);
+          ledgerDirsInjected++;
+        }
+      } catch (err) {
+        log.warn("ledger.dirs 投影失败 (降级, 不阻塞 snapshot 写出)", {
+          sessionId: this.sessionId,
+          deviceId: this.deviceId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    log.info("missing 注入 snapshot", {
+      sessionId: this.sessionId,
+      deviceId: this.deviceId,
+      ledgerMissingInjected,
+      seedMissingInjected,
+      ledgerDirsInjected,
+      totalNegatives: snapshot.negatives.length,
+    });
 
     const snapshotJson = JSON.stringify(snapshot);
     await writeFile(snapshotFile, snapshotJson, "utf8");

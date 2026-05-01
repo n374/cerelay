@@ -266,6 +266,31 @@ export class AccessLedgerStore {
     }
   }
 
+  /**
+   * 仅返回 deviceId 持久 ledger 中的 dir 路径列表 (含 readdirObserved=true / false).
+   * 供 FileProxyManager 启动期把 dir entries 合成 stat 注入 daemon snapshot — 解决
+   * cache-sync 是 file-only / manifest 不含 dir entry, 导致 CC stat 已知存在的父 dir
+   * 时穿透 client 的问题 (实测 projects/sessions/backups 这种纯目录场景).
+   */
+  async loadDirsForDevice(deviceId: string): Promise<string[]> {
+    try {
+      const raw = await readFile(this.ledgerPath(deviceId), "utf8");
+      const data = JSON.parse(raw) as AccessLedgerData;
+      if (data?.version !== 1 || data.deviceId !== deviceId || !data.entries) return [];
+      const result: string[] = [];
+      for (const [entryPath, entry] of Object.entries(data.entries)) {
+        if (entry.kind === "dir") result.push(entryPath);
+      }
+      return result;
+    } catch (err) {
+      log.debug("loadDirsForDevice returned empty", {
+        deviceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
   async load(deviceId: string): Promise<AccessLedgerRuntime> {
     const runtime = new AccessLedgerRuntime(deviceId);
     try {
