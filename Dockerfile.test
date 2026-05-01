@@ -41,6 +41,7 @@ COPY client/ ./client/
 COPY web/ ./web/
 COPY test/ ./test/
 COPY docker/ ./docker/
+COPY scripts/ ./scripts/
 COPY docker-compose.yml ./docker-compose.yml
 COPY docker-compose.test.yml ./docker-compose.test.yml
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
