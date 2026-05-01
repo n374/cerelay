@@ -101,12 +101,17 @@ export interface FileProxyManagerOptions {
 }
 
 /**
- * FileProxyManager 不需要 AccessLedgerStore 的全部能力 — 只需要"按 deviceId 查
- * missing 路径"。用专门的接口避免把 server/src/access-ledger.ts 全模块依赖塞进
- * file-proxy-manager 的 unit test 路径。
+ * FileProxyManager 跟 AccessLedger 的依赖契约:
+ * - loadMissingForDevice: snapshot 启动期投影 missing (Phase 4.2)
+ * - load + persist: Phase 5.3 定时 flush 时 read-modify-write
+ *
+ * 用专门接口避免把 server/src/access-ledger.ts 全模块依赖塞进 file-proxy-manager
+ * 的 unit test 路径。
  */
 export interface AccessLedgerProjection {
   loadMissingForDevice(deviceId: string): Promise<string[]>;
+  load(deviceId: string): Promise<AccessLedgerRuntime>;
+  persist(runtime: AccessLedgerRuntime): Promise<void>;
 }
 
 /**
@@ -181,6 +186,11 @@ export class FileProxyManager {
   /** Server-side cache hit 5s 防抖去重 (Codex 新 F1 / spec §4.4) */
   private readonly cacheHitDebounce = new Map<string, number>();
   private static readonly CACHE_HIT_DEBOUNCE_MS = 5000;
+  /** Phase 5.3: ledger flush 5s 定时器 */
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly LEDGER_FLUSH_INTERVAL_MS = 5000;
+  /** flush 互斥: 防止多个调用并发 read-modify-write 同一 ledger */
+  private flushInFlight: Promise<void> | null = null;
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -291,6 +301,69 @@ export class FileProxyManager {
   /** 暴露 buffer 给上层 — Phase 5.3 在 5s timer / sync_complete / shutdown 时调 flush */
   getAccessBuffer(): SessionAccessBuffer {
     return this.accessBuffer;
+  }
+
+  /**
+   * Phase 5.3: 把 buffer 内 events flush 到持久 ledger.
+   *
+   * - buffer 空 → no-op
+   * - 没有 accessLedgerStore / deviceId → no-op (cache 子系统未启用)
+   * - 并发 flush 通过 flushInFlight 串行化, 避免多并发 read-modify-write 写丢
+   * - 失败降级 warn, events 仍在 buffer 中等下次 flush (除非已经 drained 到本地变量)
+   */
+  async flushAccessBufferIfNeeded(): Promise<void> {
+    if (!this.accessLedgerStore || !this.deviceId) return;
+    if (this.accessBuffer.isEmpty()) return;
+
+    // 串行化: 等上一个 flush 完成
+    if (this.flushInFlight) {
+      await this.flushInFlight.catch(() => {/* 上次失败不影响本次 */});
+    }
+
+    const promise = (async () => {
+      const beforeSize = this.accessBuffer.size();
+      try {
+        const ledger = await this.accessLedgerStore!.load(this.deviceId!);
+        await this.accessBuffer.flush(ledger);
+        await this.accessLedgerStore!.persist(ledger);
+        log.debug("ledger flushed", {
+          sessionId: this.sessionId,
+          deviceId: this.deviceId,
+          flushedEvents: beforeSize,
+        });
+      } catch (err) {
+        log.warn("ledger flush 失败 (降级, 不阻塞)", {
+          sessionId: this.sessionId,
+          deviceId: this.deviceId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+
+    this.flushInFlight = promise;
+    try {
+      await promise;
+    } finally {
+      if (this.flushInFlight === promise) {
+        this.flushInFlight = null;
+      }
+    }
+  }
+
+  /** Phase 5.3: 启动 5s flush 定时器 (仅在 ledger 子系统已启用时启动) */
+  private startFlushTimer(): void {
+    if (this.flushTimer) return;
+    if (!this.accessLedgerStore || !this.deviceId) return;
+    this.flushTimer = setInterval(() => {
+      void this.flushAccessBufferIfNeeded();
+    }, FileProxyManager.LEDGER_FLUSH_INTERVAL_MS);
+  }
+
+  private stopFlushTimer(): void {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 
   /** 暴露 daemon control client (有可能为 null 如果 spawn 失败) */
@@ -535,6 +608,8 @@ export class FileProxyManager {
     this.controlStream = child.stdio[3] as NodeJS.WritableStream;
     // controlStream 是 Writable - 包装为 DaemonControlClient 用于 Phase 5 access tracking 实时推送
     this.daemonControl = new DaemonControlClient(this.controlStream as unknown as import("node:stream").Writable);
+    // Phase 5.3: spawn 完成后启 flush timer (定时把 buffer 写到 ledger)
+    this.startFlushTimer();
 
     // 收集 stderr 用于异常退出时诊断
     // [FUSE-DIAG] 前缀的行是诊断专用日志（snapshot 加载汇总、cache miss path、
@@ -1164,6 +1239,14 @@ export class FileProxyManager {
   async shutdown(): Promise<void> {
     this.destroyed = true;
     this.stopStartupStatsTimer();
+    this.stopFlushTimer();
+
+    // Phase 5.3: shutdown 必 flush (保证 session 学到的 events 落盘)
+    try {
+      await this.flushAccessBufferIfNeeded();
+    } catch {
+      // flushAccessBufferIfNeeded 内部已经处理了所有 error; 这里兜底
+    }
 
     // 发送 shutdown 控制消息
     if (this.controlStream) {
