@@ -242,6 +242,30 @@ export class AccessLedgerStore {
     return path.join(this.options.dataDir, "access-ledger");
   }
 
+  /**
+   * 仅返回 deviceId 持久 ledger 中的 missing 路径列表。供 FileProxyManager 启动期
+   * 注入 snapshot.negatives 用 (spec §7.4)。比 load() 更轻 — 不重建二级索引。
+   * load 失败 (ENOENT / 解析错) 返回空数组, 不抛。
+   */
+  async loadMissingForDevice(deviceId: string): Promise<string[]> {
+    try {
+      const raw = await readFile(this.ledgerPath(deviceId), "utf8");
+      const data = JSON.parse(raw) as AccessLedgerData;
+      if (data?.version !== 1 || data.deviceId !== deviceId || !data.entries) return [];
+      const result: string[] = [];
+      for (const [entryPath, entry] of Object.entries(data.entries)) {
+        if (entry.kind === "missing") result.push(entryPath);
+      }
+      return result;
+    } catch (err) {
+      log.debug("loadMissingForDevice returned empty", {
+        deviceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
   async load(deviceId: string): Promise<AccessLedgerRuntime> {
     const runtime = new AccessLedgerRuntime(deviceId);
     try {

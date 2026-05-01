@@ -81,6 +81,21 @@ export interface FileProxyManagerOptions {
   deviceId?: string;
   /** Cache task ready gate / mutation hint 协调器 */
   cacheTaskManager?: CacheTaskReadGate;
+  /**
+   * AccessLedger 存储器（可选）。提供后启动期会把 ledger.missing 投影到 snapshot
+   * 的 negatives 字段，daemon 启动时灌进 _negative_perm（spec §7.4）。未提供时退化
+   * 为不注入持久 missing（仅 broken symlink 走原 negativeEntries 路径）。
+   */
+  accessLedgerStore?: AccessLedgerProjection;
+}
+
+/**
+ * FileProxyManager 不需要 AccessLedgerStore 的全部能力 — 只需要"按 deviceId 查
+ * missing 路径"。用专门的接口避免把 server/src/access-ledger.ts 全模块依赖塞进
+ * file-proxy-manager 的 unit test 路径。
+ */
+export interface AccessLedgerProjection {
+  loadMissingForDevice(deviceId: string): Promise<string[]>;
 }
 
 /**
@@ -137,6 +152,8 @@ export class FileProxyManager {
   private readonly deviceId: string | undefined;
   /** Cache task ready gate / mutation hint 协调器 */
   private readonly cacheTaskManager: CacheTaskReadGate | undefined;
+  /** AccessLedger projection (启动期把 ledger.missing 注入 snapshot, 见 §7.4) */
+  private readonly accessLedgerStore: AccessLedgerProjection | undefined;
 
   constructor(options: FileProxyManagerOptions) {
     this.runtimeRoot = options.runtimeRoot;
@@ -148,6 +165,7 @@ export class FileProxyManager {
     this.cacheStore = options.cacheStore;
     this.deviceId = options.deviceId;
     this.cacheTaskManager = options.cacheTaskManager;
+    this.accessLedgerStore = options.accessLedgerStore;
 
     this.roots = {
       "home-claude": path.join(this.clientHomeDir, ".claude"),
@@ -586,6 +604,40 @@ export class FileProxyManager {
         for (const negPath of negativeEntries) {
           snapshot.negatives.push(negPath);
         }
+      }
+    }
+
+    // 3. 注入 AccessLedger 持久化的 missing 路径（spec §7.4 Defect 2 修复）
+    //    投影范围：仅本 session 的 FUSE roots 内的 missing path。同 device 跨 cwd
+    //    共享 ledger，但 daemon 只关心自己的 roots（避免污染其他 cwd 视图）。
+    let ledgerMissingInjected = 0;
+    if (this.accessLedgerStore && this.deviceId) {
+      try {
+        const allMissing = await this.accessLedgerStore.loadMissingForDevice(this.deviceId);
+        const sessionRoots = Object.values(this.roots);
+        const seen = new Set(snapshot.negatives);
+        for (const missingPath of allMissing) {
+          const inRoots = sessionRoots.some(
+            (root) => missingPath === root || missingPath.startsWith(root + "/"),
+          );
+          if (inRoots && !seen.has(missingPath)) {
+            snapshot.negatives.push(missingPath);
+            seen.add(missingPath);
+            ledgerMissingInjected++;
+          }
+        }
+        log.info("ledger.missing 注入 snapshot", {
+          sessionId: this.sessionId,
+          deviceId: this.deviceId,
+          totalLedgerMissing: allMissing.length,
+          injectedToSnapshot: ledgerMissingInjected,
+        });
+      } catch (err) {
+        log.warn("ledger.missing 投影失败 (降级, 不阻塞 snapshot 写出)", {
+          sessionId: this.sessionId,
+          deviceId: this.deviceId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
