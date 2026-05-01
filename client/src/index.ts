@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { Command } from "commander";
 import { CerelayClient } from "./client.js";
-import { configureLogger, createLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
+import { configureLogger, createLogger, flushLogger, getLogFilePath, resolveDefaultLogFilePath, type LogLevel } from "./logger.js";
 
 const log = createLogger("cli");
 
@@ -117,7 +117,9 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
       .catch(() => undefined)
       .finally(() => process.exit(130));
     // 给 WS close + 缓存 onDisconnected 一点时间走完，但不等太久；用户已经在催了
-    setTimeout(() => process.exit(130), 500).unref();
+    setTimeout(() => {
+      void flushLogger().finally(() => process.exit(130));
+    }, 1500).unref();
   };
   process.on("SIGINT", handleInterrupt);
   process.on("SIGTERM", handleInterrupt);

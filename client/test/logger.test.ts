@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { configureLogger, createLogger, flushLogger } from "../src/logger.js";
+import { configureLogger, createLogger, endStream, flushLogger } from "../src/logger.js";
 
 test("consoleSink can intercept active console lines", (t) => {
   const originalStdoutWrite = process.stdout.write;
@@ -60,6 +62,25 @@ test("consoleSink returning false allows stdout write", (t) => {
 test("flushLogger resolves without an active file stream", async () => {
   configureLogger({ filePath: null, consoleSink: undefined });
   await assert.doesNotReject(flushLogger());
+});
+
+test("endStream resolves immediately for an already-ended stream", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cerelay-client-log-ended-"));
+  const logPath = path.join(dir, "client.log");
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const endedStream = createWriteStream(logPath);
+  endedStream.end();
+  await once(endedStream, "finish");
+
+  const result = await Promise.race([
+    endStream(endedStream).then(() => "ok"),
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 50)),
+  ]);
+
+  assert.strictEqual(result, "ok");
 });
 
 test("logger writes plain-text logs to the configured file", async (t) => {

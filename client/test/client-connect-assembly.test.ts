@@ -107,8 +107,8 @@ test("CerelayClient disableCacheTask=true 时不装配 loadConfig/openScanCache"
       return stateMachine;
     },
   });
-  t.after(() => {
-    client.close();
+  t.after(async () => {
+    await client.close();
   });
 
   await client.connect();
@@ -144,8 +144,8 @@ test("CerelayClient loadConfig 抛错时 connect 仍完成，并回退默认配�
       return new FakeCacheTaskStateMachine();
     },
   });
-  t.after(() => {
-    client.close();
+  t.after(async () => {
+    await client.close();
   });
 
   await assert.doesNotReject(client.connect());
@@ -187,8 +187,8 @@ test("CerelayClient openScanCache 抛错时 connect 仍完成", async (t) => {
       return new FakeCacheTaskStateMachine();
     },
   });
-  t.after(() => {
-    client.close();
+  t.after(async () => {
+    await client.close();
   });
 
   await assert.doesNotReject(client.connect());
@@ -226,8 +226,8 @@ test("CerelayClient connect 装配成功时把 config 和 scanCache 传给 state
       return stateMachine;
     },
   });
-  t.after(() => {
-    client.close();
+  t.after(async () => {
+    await client.close();
   });
 
   await client.connect();
@@ -256,8 +256,8 @@ test("CerelayClient.isCacheSyncActive 委托给 state machine 的 isInitialSyncA
     openScanCache: async () => makeScanCacheStore(),
     cacheTaskStateMachineFactory: () => stateMachine,
   });
-  t.after(() => {
-    client.close();
+  t.after(async () => {
+    await client.close();
   });
 
   // 未连接：state machine 还没装配，应当返回 false

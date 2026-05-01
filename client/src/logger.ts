@@ -203,7 +203,10 @@ export function flushLogger(): Promise<void> {
   return endStream(stream);
 }
 
-function endStream(stream: WriteStream): Promise<void> {
+export function endStream(stream: WriteStream): Promise<void> {
+  if (stream.writableFinished || stream.destroyed) {
+    return Promise.resolve();
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
