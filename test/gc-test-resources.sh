@@ -112,6 +112,41 @@ test_gc_host_tmp() {
   done
 }
 
+# 测试结束 cleanup 时只 down 容器/网络，不带 --rmi（保留 image cache 加速下次 build）。
+# 因此已 down 的 project 不会再被 docker compose ls 看见，对应的 cerelay_test_<slug>-<service>:tag
+# 镜像会成为孤儿。本函数按 image repository name 前缀扫描，按 slug 比对清理。
+test_gc_compose_images() {
+  slugs_file=$1
+  all_flag=$2
+
+  command -v docker >/dev/null 2>&1 || return 0
+
+  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | while IFS= read -r image_ref; do
+    [ -n "$image_ref" ] || continue
+    repo=${image_ref%%:*}
+    repo_normalized=$(printf '%s\n' "$repo" | test_lower)
+
+    case "$repo_normalized" in
+      cerelay_test_*)
+        # repo 形如 cerelay_test_<slug>-<service>，剥离 prefix 再去掉最后一段 -<service>
+        tail=${repo_normalized#cerelay_test_}
+        # 服务名取自 docker-compose.test.yml：mock-socks/mock-dns/egress-probe/cerelay-socks-test/test
+        # compose build 时 image 名是 <project>-<service>:latest，service 名带 - 时 compose 不再转义
+        # 因此 slug 是 tail 中第一个 - 之前的部分（slug 本身只含 [a-z0-9_]）
+        image_slug=${tail%%-*}
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    if test_should_gc_slug "$image_slug" "$slugs_file" "$all_flag"; then
+      echo "[test-gc] removing stale image: $image_ref"
+      docker rmi -f "$image_ref" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 test_gc_resources() {
   all_flag=false
 
@@ -132,6 +167,7 @@ test_gc_resources() {
 
   test_active_slugs_file "$slugs_file"
   test_gc_compose_projects "$slugs_file" "$all_flag"
+  test_gc_compose_images "$slugs_file" "$all_flag"
   test_gc_host_tmp "$slugs_file" "$all_flag"
 
   rm -f "$slugs_file"
