@@ -88,6 +88,7 @@ interface BuildPlanArgs extends ScanOptions {
   scope: CacheScope;
   homedir: string;
   remote: CacheManifestData | undefined;
+  instruction?: ScopeWalkInstruction;
 }
 
 export interface ScanOptions {
@@ -109,6 +110,7 @@ export interface HashScopeArgs {
   scope: CacheScope;
   locals: LocalEntry[];
   remote?: CacheManifestData;
+  instruction?: ScopeWalkInstruction;
   scanCache?: ScanCacheStore;
   onHashProgress?: () => void;
   shouldAbort?: () => boolean;
@@ -471,6 +473,7 @@ export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
     scope: args.scope,
     locals,
     remote: args.remote,
+    instruction: args.instruction,
     scanCache: args.scanCache,
     onHashProgress: args.onHashProgress,
     shouldAbort: args.shouldAbort,
@@ -478,12 +481,17 @@ export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
 }
 
 export async function walkScope(args: WalkScopeArgs): Promise<LocalEntry[]> {
-  return scanLocalFiles(args.scope, args.homedir, args.exclude, args.shouldAbort);
+  const instruction = args.instruction ?? WHOLE_SCOPE_INSTRUCTION;
+  if (isWholeScopeInstruction(instruction)) {
+    return scanLocalFiles(args.scope, args.homedir, args.exclude, args.shouldAbort);
+  }
+  return scanInstructionFiles(args.scope, args.homedir, instruction, args.exclude, args.shouldAbort);
 }
 
 export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
   const remoteEntries = args.remote?.entries ?? {};
   const localPaths = new Set(args.locals.map((entry) => entry.relPath));
+  const instruction = args.instruction ?? WHOLE_SCOPE_INSTRUCTION;
   args.scanCache?.pruneToPresent(args.scope, localPaths);
 
   const adds: CacheTaskUpsertChange[] = [];
@@ -512,7 +520,7 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
 
   const deletes: CacheTaskChange[] = [];
   for (const remotePath of Object.keys(remoteEntries)) {
-    if (!localPaths.has(remotePath)) {
+    if (!localPaths.has(remotePath) && isPathCoveredByInstruction(remotePath, instruction)) {
       deletes.push({
         kind: "delete",
         scope: args.scope,
@@ -546,6 +554,12 @@ export async function hashScope(args: HashScopeArgs): Promise<ScopePlan> {
     cacheMisses,
   };
 }
+
+const WHOLE_SCOPE_INSTRUCTION: ScopeWalkInstruction = {
+  subtrees: [],
+  files: [],
+  knownMissing: [],
+};
 
 export async function scanLocalFiles(
   scope: CacheScope,
@@ -590,6 +604,9 @@ async function walkDir(
   out: LocalEntry[],
   exclude?: (relPath: string) => boolean,
   shouldAbort?: () => boolean,
+  knownMissing?: Set<string>,
+  maxDepth = -1,
+  currentDepth = 0,
 ): Promise<void> {
   if (shouldAbort?.()) {
     return;
@@ -612,13 +629,18 @@ async function walkDir(
       if (exclude?.(relPath)) {
         continue;
       }
-      await walkDir(root, abs, out, exclude, shouldAbort);
+      if (maxDepth < 0 || currentDepth < maxDepth) {
+        await walkDir(root, abs, out, exclude, shouldAbort, knownMissing, maxDepth, currentDepth + 1);
+      }
       continue;
     }
     if (!entry.isFile()) {
       continue;
     }
     if (exclude?.(relPath)) {
+      continue;
+    }
+    if (knownMissing?.has(relPath)) {
       continue;
     }
     try {
@@ -633,6 +655,115 @@ async function walkDir(
       // ignore
     }
   }
+}
+
+async function scanInstructionFiles(
+  scope: CacheScope,
+  homedir: string,
+  instruction: ScopeWalkInstruction,
+  exclude?: (relPath: string) => boolean,
+  shouldAbort?: () => boolean,
+): Promise<LocalEntry[]> {
+  const knownMissing = new Set(instruction.knownMissing.map(normalizeInstructionPath));
+  if (scope === "claude-json") {
+    if (knownMissing.has("")) {
+      return [];
+    }
+    return scanInstructionFile(path.join(homedir, ".claude.json"), "", exclude, shouldAbort);
+  }
+
+  const rootAbs = path.join(homedir, ".claude");
+  const results = new Map<string, LocalEntry>();
+  for (const subtree of instruction.subtrees) {
+    if (shouldAbort?.()) {
+      break;
+    }
+    const relPath = normalizeInstructionPath(subtree.relPath);
+    if (exclude?.(relPath)) {
+      continue;
+    }
+    const subtreeAbs = path.join(rootAbs, relPath);
+    const subtreeResults: LocalEntry[] = [];
+    await walkDir(rootAbs, subtreeAbs, subtreeResults, exclude, shouldAbort, knownMissing, subtree.maxDepth);
+    for (const entry of subtreeResults) {
+      results.set(entry.relPath, entry);
+    }
+  }
+  for (const relPath of instruction.files.map(normalizeInstructionPath)) {
+    if (shouldAbort?.()) {
+      break;
+    }
+    if (knownMissing.has(relPath)) {
+      continue;
+    }
+    for (const entry of await scanInstructionFile(path.join(rootAbs, relPath), relPath, exclude, shouldAbort)) {
+      results.set(entry.relPath, entry);
+    }
+  }
+  return Array.from(results.values());
+}
+
+async function scanInstructionFile(
+  absPath: string,
+  relPath: string,
+  exclude?: (relPath: string) => boolean,
+  shouldAbort?: () => boolean,
+): Promise<LocalEntry[]> {
+  if (shouldAbort?.() || exclude?.(relPath)) {
+    return [];
+  }
+  try {
+    const stats = await stat(absPath);
+    if (!stats.isFile()) {
+      return [];
+    }
+    return [{
+      relPath,
+      absPath,
+      size: stats.size,
+      mtime: Math.floor(stats.mtimeMs),
+    }];
+  } catch {
+    return [];
+  }
+}
+
+function isWholeScopeInstruction(instruction: ScopeWalkInstruction): boolean {
+  return instruction.subtrees.length === 0 && instruction.files.length === 0 && instruction.knownMissing.length === 0;
+}
+
+function isPathCoveredByInstruction(relPath: string, instruction: ScopeWalkInstruction): boolean {
+  if (isWholeScopeInstruction(instruction)) {
+    return true;
+  }
+  const normalized = normalizeInstructionPath(relPath);
+  if (instruction.files.map(normalizeInstructionPath).includes(normalized)) {
+    return true;
+  }
+  if (instruction.knownMissing.map(normalizeInstructionPath).includes(normalized)) {
+    return true;
+  }
+  return instruction.subtrees.some((subtree) => isPathWithinSubtree(
+    normalized,
+    normalizeInstructionPath(subtree.relPath),
+    subtree.maxDepth,
+  ));
+}
+
+function isPathWithinSubtree(relPath: string, subtree: string, maxDepth: number): boolean {
+  if (!(subtree === "" || relPath === subtree || relPath.startsWith(`${subtree}/`))) {
+    return false;
+  }
+  if (maxDepth < 0) {
+    return true;
+  }
+  const remaining = subtree === "" ? relPath : relPath.slice(subtree.length).replace(/^\/+/, "");
+  const depth = remaining === "" ? 0 : remaining.split("/").length;
+  return depth <= maxDepth + 1;
+}
+
+function normalizeInstructionPath(relPath: string): string {
+  return relPath.split(path.sep).join("/").replace(/^\/+|\/+$/g, "");
 }
 
 async function buildUpsertChange(

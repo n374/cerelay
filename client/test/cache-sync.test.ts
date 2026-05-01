@@ -304,6 +304,59 @@ test("walkScope 在 shouldAbort 触发后提前返回当前 partial 结果", asy
   assert.equal(abortChecks >= 2, true);
 });
 
+test("walkScope 按 instruction 限制 files 与 subtrees", async (t) => {
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  await mkdir(path.join(home, ".claude", "allowed"), { recursive: true });
+  await mkdir(path.join(home, ".claude", "ignored"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "root.json"), "root", "utf8");
+  await writeFile(path.join(home, ".claude", "allowed", "nested.json"), "nested", "utf8");
+  await writeFile(path.join(home, ".claude", "ignored", "other.json"), "other", "utf8");
+
+  const locals = await walkScope({
+    scope: "claude-home",
+    homedir: home,
+    instruction: {
+      subtrees: [{ relPath: "allowed", maxDepth: -1 }],
+      files: ["root.json"],
+      knownMissing: [],
+    },
+  });
+
+  assert.deepEqual(
+    locals.map((entry) => entry.relPath).sort(),
+    ["allowed/nested.json", "root.json"],
+  );
+});
+
+test("buildScopePlan 按 instruction 删除覆盖范围内缺失项，knownMissing 跳过 stat", async (t) => {
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  await mkdir(path.join(home, ".claude", "allowed"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "allowed", "present.json"), "present", "utf8");
+  await writeFile(path.join(home, ".claude", "known-missing.json"), "local but should not stat", "utf8");
+
+  const plan = await buildScopePlan({
+    scope: "claude-home",
+    homedir: home,
+    instruction: {
+      subtrees: [{ relPath: "allowed", maxDepth: -1 }],
+      files: ["known-missing.json"],
+      knownMissing: ["known-missing.json"],
+    },
+    remote: {
+      entries: {
+        "allowed/present.json": { size: 1, mtime: 1, sha256: "old" },
+        "known-missing.json": { size: 1, mtime: 1, sha256: "old" },
+        "outside.json": { size: 1, mtime: 1, sha256: "old" },
+      },
+    },
+  });
+
+  assert.deepEqual(plan.uploads.map((item) => item.change.path), ["allowed/present.json"]);
+  assert.deepEqual(plan.metaChanges, [{ kind: "delete", scope: "claude-home", path: "known-missing.json" }]);
+});
+
 test("pushInitialDeltaBatches 保留 file_pushed/file_acked 事件契约并预分配 baseRevision", async () => {
   const sent: CacheTaskDelta[] = [];
   const subscribers = new Set<(ack: CacheTaskDeltaAck) => void>();
