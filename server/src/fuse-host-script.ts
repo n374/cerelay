@@ -163,12 +163,9 @@ class Cache:
         # P0-1: snapshot 启动时预填的"已知 ENOENT path"（broken symlink 等）。
         # 永久有效（无 TTL）：snapshot 已经把 readdir 列出但 stat 失败的子项标好了。
         self._negative_perm = NegativeCache()
-        # P0-2: 运行时发现的 ENOENT，缓存 _negative_ttl 秒。
-        self._negative = {}   # path → expire_at (monotonic)
         self._stat_ttl = 10.0
         self._readdir_ttl = 10.0
         self._read_ttl = 10.0
-        self._negative_ttl = 30.0
         self._read_max_size = 256 * 1024  # 256KB
         # 诊断计数器：区分 "key 不在 cache" 和 "在但 TTL 过期"，让用户判断 snapshot
         # 是不完整还是只是被 TTL 限制。
@@ -199,19 +196,12 @@ class Cache:
             if self._negative_perm.contains(path):
                 self.negative_hit_perm += 1
                 return True
-            entry = self._negative.get(path)
-            if entry is not None:
-                if time.monotonic() < entry:
-                    self.negative_hit_runtime += 1
-                    return True
-                # 过期，懒清
-                self._negative.pop(path, None)
         return False
 
     def put_negative(self, path):
-        """运行时记录 ENOENT，缓存 _negative_ttl 秒。snapshot 注入的 perm 不走这里。"""
+        """运行时记录 ENOENT，使用前缀负缓存持久到显式失效。"""
         with self._lock:
-            self._negative[path] = time.monotonic() + self._negative_ttl
+            self._negative_perm.put(path)
             self.negative_recorded += 1
 
     def put_negative_perm(self, path):
@@ -223,7 +213,6 @@ class Cache:
         """文件被创建时调用，让之前的负缓存立即失效。"""
         with self._lock:
             self._negative_perm.invalidate_prefix(path)
-            self._negative.pop(path, None)
 
     def get_stat(self, path):
         with self._lock:
@@ -325,7 +314,6 @@ class Cache:
             self._readdir_perm.pop(path, None)
             # "不存在" 缓存同样要清——否则文件已经创建但 getattr 仍返 ENOENT。
             self._negative_perm.invalidate_prefix(path)
-            self._negative.pop(path, None)
 
 _cache = Cache()
 
@@ -557,14 +545,14 @@ class CerelayFuseOps(Operations):
         if not hand_path:
             raise FuseOSError(errno.ENOENT)
 
-        cached = _cache.get_stat(hand_path)
-        if cached:
-            return cached
-
         # 负缓存命中：snapshot 预填（broken symlink）或运行时学到（CC 反复探测的
         # 不存在文件）。直接抛 ENOENT，不发 RPC 给 server。
         if _cache.is_negative(hand_path):
             raise FuseOSError(errno.ENOENT)
+
+        cached = _cache.get_stat(hand_path)
+        if cached:
+            return cached
 
         try:
             resp = send_request({
@@ -598,6 +586,9 @@ class CerelayFuseOps(Operations):
         if not hand_path:
             raise FuseOSError(errno.ENOENT)
 
+        if _cache.is_negative(hand_path):
+            raise FuseOSError(errno.ENOENT)
+
         cached = _cache.get_readdir(hand_path)
         if cached is not None:
             entries = list(cached)
@@ -616,9 +607,8 @@ class CerelayFuseOps(Operations):
             entries = resp.get("entries", [])
         except FuseOSError as e:
             if e.errno == errno.ENOENT:
-                entries = []
-            else:
-                raise
+                _cache.put_negative(hand_path)
+            raise
 
         # 注入 shadow file 到目录列表（如 hook injection 的 settings.local.json）。
         # 如果 shadow file 的父目录不存在，也要虚拟出中间目录（例如 .claude）。
@@ -646,18 +636,25 @@ class CerelayFuseOps(Operations):
 
         hand_path = resolve_hand_path(root_name, rel_path)
         if hand_path:
+            if _cache.is_negative(hand_path):
+                raise FuseOSError(errno.ENOENT)
             cached = _cache.get_read(hand_path, offset, size)
             if cached is not None:
                 return cached
 
-        resp = send_request({
-            "reqId": next_req_id(),
-            "op": "read",
-            "root": root_name,
-            "relPath": rel_path,
-            "offset": offset,
-            "size": size,
-        })
+        try:
+            resp = send_request({
+                "reqId": next_req_id(),
+                "op": "read",
+                "root": root_name,
+                "relPath": rel_path,
+                "offset": offset,
+                "size": size,
+            })
+        except FuseOSError as e:
+            if e.errno == errno.ENOENT and hand_path:
+                _cache.put_negative(hand_path)
+            raise
         data = resp.get("data", "")
         decoded = base64.b64decode(data)
 
