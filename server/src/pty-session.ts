@@ -88,6 +88,14 @@ export class ClaudePtySession {
   private readonly model?: string;
   private readonly prompt?: string;
   private readonly runtime: ClaudeSessionRuntime;
+  /**
+   * INF-11: 暴露只读 runtime 给 server admin endpoint /admin/sessions/:id/exec。
+   * e2e fault injection 在 namespace 内 spawn 临时 sh 命令的入口。
+   * 生产路径 admin endpoint 受 CERELAY_ADMIN_EVENTS gate 保护,无新攻击面。
+   */
+  getRuntime(): ClaudeSessionRuntime {
+    return this.runtime;
+  }
   private readonly transport: PtySessionTransport;
   private readonly term?: string;
   private readonly colorTerm?: string;

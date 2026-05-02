@@ -551,6 +551,94 @@ export class CerelayServer {
       return;
     }
 
+    // INF-11: namespace 内 e2e probe exec endpoint。
+    //
+    // 在指定 sessionId 的 namespace 内 spawn 一条临时 sh 命令(原理同
+    // verifyPtyHookVisibleInRuntime),收 stdout/stderr/exit 后返回。
+    // 用途:B5/B6/D4/E2 case 在 namespace 内主动触发 FUSE read/write
+    // (mcp__cerelay__bash 是 client-routed 跑在 client 本机,不入 namespace,
+    // 这是 Plan D 后 e2e probe 的唯一 honest 触发点)。
+    //
+    // 安全:
+    //   - 跟 /admin/test-toggles + /admin/cache + /admin/dataDir 同 gate
+    //     (CERELAY_ADMIN_EVENTS=true), 生产 404
+    //   - command + args 直接传 spawnInRuntime, 不做 shell escape
+    //     (调用方负责;e2e gate 已限制非生产)
+    //   - 走 server 统一 admin Bearer token (handleAdminRequest 入口已校验)
+    //
+    // body: { command: string, args?: string[], timeoutMs?: number, env?: Record<string,string> }
+    // resp: { exitCode: number|null, stdout: string, stderr: string, durationMs: number }
+    const execMatch = url.match(/^\/admin\/sessions\/([^/]+)\/exec$/);
+    if (execMatch && req.method === "POST") {
+      if (!this.adminEvents.isEnabled()) {
+        this.sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const sessionId = decodeURIComponent(execMatch[1]);
+      const entry = this.ptySessions.get(sessionId);
+      if (!entry) {
+        this.sendJson(res, 404, { error: "session_not_found", sessionId });
+        return;
+      }
+      const runtime = entry.session.getRuntime();
+      const spawnInRuntime = runtime.spawnInRuntime;
+      if (!spawnInRuntime) {
+        this.sendJson(res, 503, { error: "runtime does not support spawnInRuntime" });
+        return;
+      }
+      let bodyStr = "";
+      req.on("data", (chunk: Buffer) => { bodyStr += chunk.toString(); });
+      req.on("end", () => {
+        void (async () => {
+          const startedAt = Date.now();
+          try {
+            const body = JSON.parse(bodyStr) as {
+              command?: string;
+              args?: string[];
+              timeoutMs?: number;
+              env?: Record<string, string>;
+            };
+            if (!body.command || typeof body.command !== "string") {
+              this.sendJson(res, 400, { error: "command (string) required" });
+              return;
+            }
+            const timeoutMs = typeof body.timeoutMs === "number" && body.timeoutMs > 0
+              ? body.timeoutMs : 30_000;
+            const abortController = new AbortController();
+            const child = spawnInRuntime({
+              command: body.command,
+              args: body.args ?? [],
+              cwd: runtime.cwd,
+              env: { ...runtime.env, ...(body.env ?? {}) },
+              signal: abortController.signal,
+            });
+            const stdoutChunks: Buffer[] = [];
+            const stderrChunks: Buffer[] = [];
+            child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(Buffer.from(c)));
+            child.stderr?.on("data", (c: Buffer) => stderrChunks.push(Buffer.from(c)));
+            const timer = setTimeout(() => {
+              abortController.abort();
+              try { child.kill?.("SIGKILL"); } catch { /* best-effort */ }
+            }, timeoutMs);
+            const [exitCode] = await new Promise<[number | null]>((resolve) => {
+              child.once("exit", (code: number | null) => resolve([code]));
+              child.once("error", () => resolve([null]));
+            });
+            clearTimeout(timer);
+            this.sendJson(res, 200, {
+              exitCode,
+              stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+              stderr: Buffer.concat(stderrChunks).toString("utf8"),
+              durationMs: Date.now() - startedAt,
+            });
+          } catch (err) {
+            this.sendJson(res, 500, { error: String(err), durationMs: Date.now() - startedAt });
+          }
+        })();
+      });
+      return;
+    }
+
     // INF-5: server data dir credentials 读写代理（GET / PUT / DELETE）。
     // 给 D4-credentials-shadow + E2-credentials-rw 用：orchestrator 在测前预置
     // server 侧 credentials 文件 / 测后验持久化 / 清理。

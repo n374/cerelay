@@ -445,6 +445,47 @@ export const toolTimeoutEvents = {
 };
 
 /**
+ * INF-11: 在指定 sessionId 的 namespace 内 spawn 一条临时 sh 命令。
+ *
+ * cerelay Plan D 后,namespace 内只剩 CC 自身 SDK 行为;mcp__cerelay__bash 等
+ * client-routed 工具跑在 client 本机,不入 namespace。要 honest 触发 namespace
+ * 内的 FUSE read/write (B5/B6/D4/E2 case),必须用 server 端 spawnInRuntime
+ * 在同一 namespace 起 e2e probe 进程。
+ *
+ * 用法:
+ *   const session = await ptyEvents.waitForSpawnReady({ expectedCwd, since });
+ *   const out = await serverExec.run(session.sessionId!, {
+ *     command: "/bin/sh", args: ["-c", "cat /home/clientuser/.claude/.credentials.json || true"]
+ *   });
+ *   assert.match(out.stdout, /marker/);
+ */
+export interface NamespaceExecResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+export const serverExec = {
+  async run(sessionId: string, opts: {
+    command: string;
+    args?: string[];
+    timeoutMs?: number;
+    env?: Record<string, string>;
+  }): Promise<NamespaceExecResult> {
+    const r = await fetch(new URL(`/admin/sessions/${encodeURIComponent(sessionId)}/exec`, BASE), {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!r.ok) {
+      throw new Error(`server /admin/sessions/${sessionId}/exec → ${r.status}: ${await r.text()}`);
+    }
+    return await r.json() as NamespaceExecResult;
+  },
+};
+
+/**
  * INF-5: server 容器内 ${CERELAY_DATA_DIR}/credentials/default/.credentials.json
  * 读写代理。给 D4-credentials-shadow + E2-credentials-rw 用：
  *   - D4: PUT 预置 server 侧 credentials → 验 namespace 内 read shadow 真触达
