@@ -91,9 +91,14 @@
 
 #### 2.3 P2：可后续补 / P2: Nice-to-Have (Phase 3)
 
-> P2 在 P1 切分时清空：原 P2 的 C4-large-skipped / C4-large-truncated 升入 P1（P1-A 与 P1-B 各承担一半），G3-mock-5xx 升入 P1-B。新增的 P2 case 由后续阶段冒出的盲点驱动。
+> P2 在 P1 切分时清空；新增的 P2 case 由后续阶段冒出的盲点驱动。下表为**需求池条目**——产品功能尚未实现，e2e case 同步搁置；功能落地时本表是开 case 的锚点。
 >
-> P2 was emptied during P1 split: original C4 was promoted to P1, G3 to P1-B. New P2 items will emerge from gaps surfaced in later phases.
+> P2 was emptied during P1 split. The table below is the **backlog**: feature not yet shipped on the product side, so the e2e case is parked. When the feature lands, this table is the anchor for opening the case.
+
+| 维度 | 案例 ID | 状态 | 触发条件 / 描述 |
+|---|---|---|---|
+| H. 韧性 / Resiliency | H1-ws-reconnect | 🅿️ 需求池 | client ↔ server WebSocket 断网后**自动重连并续 session**。当前 client 断网行为是 session 终止；功能尚未实现。落地后本 case 验断网 N 秒内重连后能继续既有 PTY session（包括 in-flight tool_call 的接续/取消语义）。Triggered when product implements WS auto-reconnect with session resumption |
+| H. 韧性 / Resiliency | H2-server-restart | 🅿️ 需求池 | server 进程重启后 client 端 session **状态恢复**（PTY、cache、credentials 全链路）。当前 server 重启 ≡ 全 session 清空；功能尚未实现。落地后本 case 验 server SIGTERM → 重启 → client 仍能续 session |
 
 ---
 
@@ -448,6 +453,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | P0-B 4 commits 落地，主套件 16/16 + meta 3/3 在容器内跑通；Codex 终审认定 4 Critical 阻断、5 Important、2 Nit，详见 §11，**P0-B 未闭环** |
 | 2026-05-02 | P0-B 闭环：11 项缺陷（4 Critical + 5 Important + 2 Nit）全部修复；新增 `file-proxy.read.served` admin event、`assertF3Isolation()` 公共断言、`/admin/cache` 单项查询 + gate、`pty.spawn.ready` 主断言；E1 拆 site=snapshot e2e + cache-hit/passthrough server 单测；mock 拆 `toolResultsAll`/`toolResultsCurrentTurn`；test-toggles 加 runtime assert。e2e 主 16/16 + meta 3/3 + server unit 425/425 全过；Codex 终审通过 |
 | 2026-05-02 | P1 阶段切分（Claude × Codex 方案对齐）：原 P1 10 case + 原 P2 2 case 重新切成 **P1-A**（A5 / C4-skipped，无基础设施改动）+ **P1-B**（其余 10 case + 8 项基础设施改动）。**P1-A 落地**：`phase-p1.test.ts` 加 2 case；npm test 入口扩到 `phase-p0.test.ts phase-p1.test.ts`，本地 `bash test/run-e2e-comprehensive.sh` 18/18 全绿；P1-B 范围登记在 §12 |
+| 2026-05-02 | §2.3 P2 需求池开张：补 H1-ws-reconnect / H2-server-restart 两条需求池条目（产品功能未实现，case 同步搁置；功能落地时本表是开 case 的锚点）。e2e coverage: N/A — 文档变更不引入新协议字段 / 工具 / 拓扑 / 隔离边界 / cache 维度 |
 
 ---
 
