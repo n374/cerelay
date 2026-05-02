@@ -1011,6 +1011,8 @@ ts 源码体积: < 50KB
 
 ### 11.2 cwd-ancestor `CLAUDE.md` / `CLAUDE.local.md` 加载（V2）
 
+> **Status: Implemented (2026-05-02 via plan `2026-05-02-file-agent-and-config-preloader.md`)**。Namespace 层暴露由 commits 853b5dd（path-utils）+ c04a43f（bootstrap bind mount）+ f203427（FUSE daemon 受限 root）完成；ConfigPreloader（`server/src/config-preloader.ts`）的 `getNamespaceMountPlan()` 和 `preheat()` 把"决定 mount 哪些 ancestor + 预热文件"的逻辑统一到配置预加载层。
+
 CC 启动期会沿 cwd 父链向上一路找到 homedir，加载每一级的 `CLAUDE.md` / `CLAUDE.local.md`（project memory）。当前 cerelay 架构下 CC **拿不到这些文件**——namespace bootstrap (`server/src/claude-session-runtime.ts:240-265`) 只 mount 三个 root，父链上的目录（如 `/Users/n374/Documents/`）根本不在 namespace 文件系统里，CC 直接 fs.readFile 也读 ENOENT。
 
 **v1 不解决，作为 V2 候选独立 spec**。实施前置：
@@ -1022,6 +1024,8 @@ CC 启动期会沿 cwd 父链向上一路找到 homedir，加载每一级的 `CL
 **为什么 V2 而不是 v1**：v1 已经能搞定 home + project-claude 的核心机制（修 Defect 1/2/3 的主要价值）；ancestor 加载是 CC 的 **功能 gap**（不是 cache 优化），需要 namespace 层独立设计，跟 ledger 机制正交。先把 v1 跑通再处理。
 
 ### 11.3 Manifest blob 跨 cwd 内容寻址去重（V2）
+
+> **Status: Implemented (2026-05-02 via plan `2026-05-02-file-agent-and-config-preloader.md`)**。Cache 维度从 `(deviceId, cwd)` 收敛到 `deviceId`：manifest 路径变 `<deviceId>/manifest.json`、blob 池变 `<deviceId>/blobs/<sha256>`，跨 cwd 的同一 sha256 内容只存一份；orphan blob 通过 `gcOrphanBlobs` mark-and-sweep 清理。同时解决 §11.2 与本节问题——架构上是同一个 device-only 化重构。
 
 当前 home scope 的 blob 在 `(deviceId, cwd)` 维度复制存储——同 device 下两个 cwd 的 ~/.claude 内容是两份。优化方向：让 blob 跨 cwd 共享（按 sha256 内容寻址 dedup）。
 

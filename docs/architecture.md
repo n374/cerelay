@@ -86,8 +86,9 @@ Client CLI ←→ WebSocket ←→ Server ←→ SDK query() ←→ Claude Code 
 | **Tool Relay** | `server/src/session.ts` | SDK Hook 拦截 + Client 执行的工具回传管理 |
 | **MCP Proxy** | `server/src/mcp-proxy.ts` | 代理 MCP Server 调用 |
 | **MCP Shadow Tools** | `server/src/mcp-routed/`, `server/src/mcp-ipc-host.ts` | Plan D：用 MCP 工具替代被 disallow 的内置工具，绕开 hook deny 协议硬约束 |
-| **Client Cache Store** | `server/src/client-cache-store.ts`, `client/src/cache-sync.ts` | Server 侧按 (deviceId, cwdHash) 缓存 Client `~/.claude/` 内容寻址；启动期增量同步 |
-| **File Proxy** | `server/src/file-proxy-manager.ts`, `client/src/file-proxy.ts` | FUSE 配置投影；运行期 Client 穿透读 + cache 命中优先 |
+| **FileAgent**（per-device 单例） | `server/src/file-agent/index.ts`（+ `store.ts` / `scope-adapter.ts` / `ttl-table.ts` / `inflight.ts` / `sync-coordinator.ts` / `client-protocol-v1.ts` / `prefetch.ts` / `gc.ts`） | Device 级单机文件代理底座；对外暴露 `read / stat / readdir / prefetch + ttlMs`，内部封装 manifest / blob / ledger / sync / TTL；双路写入（read miss 阻塞穿透 + watcher delta 推送）|
+| **ConfigPreloader** | `server/src/config-preloader.ts` | 启动期同步阻塞预热 home + cwd 父链 CLAUDE.md；调一次 `fileAgent.prefetch`；同时提供 `getNamespaceMountPlan()` 给 session-runtime |
+| **File Proxy** | `server/src/file-proxy-manager.ts`, `client/src/file-proxy.ts` | FUSE 配置投影；运行期 Client 穿透读 + cache 命中优先；与 FileAgent 共享 ClientCacheStore |
 
 ---
 
@@ -128,7 +129,7 @@ Client CLI ←→ WebSocket ←→ Server ←→ SDK query() ←→ Claude Code 
 | 包管理 | npm workspaces | 单仓库多 workspace（server / client / web） |
 | 测试运行器 | Node.js 原生 `node --test` | 零额外依赖、ESM 友好 |
 | FUSE | 自实现 file proxy daemon | 精确控制可见路径范围（不依赖系统 fuse mount） |
-| 缓存 | 内容寻址 blob + manifest | 天然去重；按 (deviceId, cwdHash) 分桶 |
+| 缓存 | 内容寻址 blob + manifest | 天然去重；按 deviceId 分桶（device-only，跨 cwd 共享） |
 
 ---
 
@@ -181,22 +182,69 @@ Client CLI ←→ WebSocket ←→ Server ←→ SDK query() ←→ Claude Code 
 - 支持交互式命令（如 `git`、`npm` 交互式提示）
 - 通过 host script 与 Client 交互
 
-### 6.5 Client 文件缓存
+### 6.5 FileAgent 底座 + ConfigPreloader / File Cache (FileAgent + ConfigPreloader)
 
-**文件**：`server/src/client-cache-store.ts`、`client/src/cache-sync.ts`、`client/src/device-id.ts`
+> **架构（2026-05-02 起 device-only）**：缓存维度从 `(deviceId, cwd)` 收敛到 `deviceId`。详见 plan `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md`。
 
-- 目标：降低 Client 每次连接的启动开销，避免把 `~/.claude/` 整棵目录完整重传
-- 存储：`${CERELAY_DATA_DIR}/client-cache/<deviceId>/<cwdHash>/`
-  - `manifest.json`：按 scope（`claude-home` / `claude-json`）记录 `path → {size, mtime, sha256, skipped}`
-  - `blobs/<sha256>`：实际内容，内容寻址、天然去重
-- `deviceId`：Client 首次启动生成 UUIDv4，持久化到 `~/.config/cerelay/device-id`
-- 大小限制：单文件 > 1MB（`MAX_FILE_BYTES`）→ skipped；单 scope > 100MB（`MAX_SCOPE_BYTES`）→ 按 mtime 倒序截断
-- 失败策略：缓存同步失败不阻塞 PTY session 启动——降级为"无 Server 缓存"，FUSE 读请求仍可穿透回 Client
-- 启动期 pipeline：每个有 content 的文件单独发一个 `cache_task_delta`，不等 ack 立刻发下一个；`MAX_INFLIGHT_BYTES = 16 MB` 流控水位
+```
+                  ┌──────────────────────┐
+                  │   ConfigPreloader     │  启动期同步阻塞预热
+                  └──────────┬───────────┘
+                             │ fileAgent.prefetch(items, ttlMs)
+                             ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │   FileAgent（per-device 单例，plan §2 P6）                │
+   │   ─────────────────────────────────────────────────       │
+   │   对外: read / stat / readdir / prefetch + ttlMs          │
+   │   内部: store + scope-adapter + ttl-table + inflight +    │
+   │         sync-coordinator + client-protocol-v1 + prefetch  │
+   │         + gc                                               │
+   │   双路写入 manifest（plan §3.6）：                         │
+   │     A. read miss → 阻塞穿透 client                         │
+   │     B. watcher delta → 主动 apply（运行时增量）            │
+   └──────────────────────────────────────────────────────────┘
+                             │ WebSocket（cache_task_*）
+                             ▼
+                       ┌────────────┐
+                       │  Client    │ 真实文件系统 + watcher
+                       └────────────┘
+```
+
+**核心模块**：
+
+| 模块 | 职责 |
+|---|---|
+| `file-agent/store.ts` | manifest（v3 schema，per-device）+ blob 池（device 全局，跨 cwd dedup）+ withManifestLock + gcOrphanBlobs |
+| `file-agent/scope-adapter.ts` | absPath ↔ scope+rel 双向转换（保 P8：协议字段不新增） |
+| `file-agent/ttl-table.ts` | 跟踪 `expiresAt = max(existing, now + ttlMs)`；ttlMs 必须有限正数 |
+| `file-agent/inflight.ts` | 同 path 多并发 op miss 时通过 InflightMap 共享单次穿透（plan §3.4）|
+| `file-agent/sync-coordinator.ts` | 双路写入中枢：fetchFile/fetchStat/fetchReaddir + applyWatcherDelta |
+| `file-agent/client-protocol-v1.ts` | 协议消息构造（buildSinglePathFetchPlan 等）；与业务逻辑分离便于未来抽协议层（plan §2 P7）|
+| `file-agent/prefetch.ts` | 批量预热：bounded concurrency 16 + dir-recursive maxDepth 8 + 失败收集 |
+| `file-agent/gc.ts` | 周期 60s 清过期 entry + orphan blob；in-flight 跳过给缓刑 |
+
+**ConfigPreloader**（`server/src/config-preloader.ts`）：
+
+- 同步阻塞 session 启动（异步预热毫无意义；超时仅异常 fallback）
+- 一次 `fileAgent.prefetch` 拉所有 PrefetchItem：
+  - `homeDir/.claude` (dir-recursive)
+  - `homeDir/.claude.json` (file)
+  - ancestor chain × {CLAUDE.md, CLAUDE.local.md} (file)
+- 同时提供 `getNamespaceMountPlan()` 给 `claude-session-runtime`，决定 bootstrap mount 哪些 ancestor
+
+**关键不变量**：
+
+- 缓存维度 = deviceId（不再含 cwd）；同 device 多 cwd 共享 manifest
+- 跨 cwd blob 内容寻址 dedup（同 sha256 只存一份）
+- TTL 必须有限正数；推荐 startupTtl=7d / runtimeTtl=10min
+- 协议字段不新增（保现有 `cache_task_*` v1 协议；scope 适配在 FileAgent 内部）
+- 双路写入 manifest（read miss 拉取 + watcher delta 推送）→ 最终一致性窗口 < 1s
+- `file-proxy-manager` 与 FileAgent 共享同一 `ClientCacheStore`，命中事实上等价
 
 **FUSE 读路径与 cache 协同**（`server/src/file-proxy-manager.ts`）：
 
-- `create_pty_session` 把 Client 的 `deviceId` 带给 Server；FileProxyManager 收到 cacheStore + deviceId 后启用 cache 读优先
+- `create_pty_session` 把 Client 的 `deviceId` 带给 Server；server 通过 `getOrCreateFileAgent(deviceId, homeDir)` 拿 per-device 单例传给 FileProxyManager
+- 启动期 ConfigPreloader 调 prefetch（同步阻塞），完成后 FUSE daemon 启动
 - 启动 snapshot：`home-claude` / `home-claude-json` **优先从 cache 构造**，不再向 Client 发全量 snapshot 请求
 - 运行时 read：先调 `tryServeReadFromCache` 命中 blob 直接写回 FUSE daemon；miss 或 skipped 文件 fallback 到原穿透路径
 
@@ -245,8 +293,18 @@ cerelay/
 │   │   ├── mcp-routed/              # Plan D: shadow MCP server
 │   │   ├── mcp-ipc-host.ts          # Plan D: per-session unix socket host
 │   │   ├── mcp-cc-injection.ts      # Plan D: CC CLI flag 注入
-│   │   ├── client-cache-store.ts    # Server 侧 (deviceId, cwd) 缓存
-│   │   ├── file-proxy-manager.ts    # FUSE 配置投影 daemon
+│   │   ├── file-agent/              # FileAgent 底座（per-device 单例）：
+│   │   │   ├── index.ts             #   主类（read/stat/readdir/prefetch + ttl）
+│   │   │   ├── store.ts             #   manifest v3 + blob 池（device-only）
+│   │   │   ├── scope-adapter.ts     #   absPath ↔ scope+rel 适配
+│   │   │   ├── ttl-table.ts         #   expiresAt 跟踪
+│   │   │   ├── inflight.ts          #   同 path 并发 op 去重
+│   │   │   ├── sync-coordinator.ts  #   双路写入中枢
+│   │   │   ├── client-protocol-v1.ts #  协议消息构造（与业务逻辑分离）
+│   │   │   ├── prefetch.ts          #   批量预热（bounded concurrency）
+│   │   │   └── gc.ts                #   TTL evict + orphan blob GC
+│   │   ├── config-preloader.ts      # 启动期同步预热模块
+│   │   ├── file-proxy-manager.ts    # FUSE 配置投影 daemon（与 FileAgent 共享 store）
 │   │   ├── protocol.ts              # 消息类型定义
 │   │   └── logger.ts
 │   └── test/

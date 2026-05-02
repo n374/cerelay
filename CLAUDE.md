@@ -356,14 +356,19 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
 
 ### 5. Client 文件缓存 / Client File Cache
 
-**文件**: `server/src/client-cache-store.ts`, `client/src/cache-sync.ts`, `client/src/device-id.ts`
+**文件**: `server/src/file-agent/`（FileAgent 底座 + ConfigPreloader 上层）, `client/src/cache-sync.ts`, `client/src/device-id.ts`
 
-- 目标：降低 Client 每次连接的启动开销，避免把 `~/.claude/` 整棵目录完整重传
-- 存储：`${CERELAY_DATA_DIR}/client-cache/<deviceId>/<cwdHash>/`
-  - `manifest.json`：按 scope（`claude-home` / `claude-json`）记录 `path → {size, mtime, sha256, skipped}`
-  - `blobs/<sha256>`：实际内容，内容寻址、天然去重
-- `deviceId`：Client 首次启动生成 UUIDv4，持久化到 `~/.config/cerelay/device-id`；Server 侧按 (deviceId, cwdHash) 隔离缓存，因此同一设备切换 cwd 不会互相污染
-- 协议（见 `server/src/protocol.ts` 的 CacheTask* 类型）：
+> **架构（2026-05-02 起 device-only）**：缓存维度从 `(deviceId, cwd)` 收敛到 `deviceId`。FileAgent（`server/src/file-agent/index.ts`）作为 per-device 单例底座，对外暴露 `read / stat / readdir / prefetch + ttlMs` 四个接口；ConfigPreloader（`server/src/config-preloader.ts`）作为启动期预热模块，FUSE Host（`server/src/file-proxy-manager.ts`）共享 store 命中。详见 plan `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md`。
+
+- 目标：降低 Client 每次连接的启动开销 + 让同一 device 跨 cwd 共享 manifest 与 blob 池
+- 存储：`${CERELAY_DATA_DIR}/client-cache/<deviceId>/`（device-only，**不再有 cwdHash 子目录**）
+  - `manifest.json`：v3 schema，按 scope（`claude-home` / `claude-json`）记录 `path → {size, mtime, sha256, skipped, expiresAt?}`
+  - `blobs/<sha256>`：device 全局 blob 池，跨 cwd 内容寻址 dedup
+- `deviceId`：Client 首次启动生成 UUIDv4，持久化到 `~/.config/cerelay/device-id`；Server 侧按 deviceId 隔离缓存（同设备多 cwd 共享 manifest，**跨 cwd 数据不重复**）
+- **隐私 call out**：device 全局 manifest 持久化所有访问过的 path（含 home 路径名），文件位置 `${CERELAY_DATA_DIR}/client-cache/<deviceId>/manifest.json`，不可逆；运维清理时整 device 目录删除即可
+- **TTL 与 GC**：每次 `read / stat / readdir / prefetch` 命中或写入更新 `expiresAt = max(existing, now + ttlMs)`；FileAgent 周期 GC（默认 60s）清过期 entry + orphan blob；in-flight 期间跳过 evict 给缓刑
+- **TTL 必须有限正数**：`ttlMs ≤ 0 / Infinity / NaN` → RangeError；推荐 startupTtl=7d (`ConfigPreloader`) / runtimeTtl=10min (`FUSE host`)
+- 协议（见 `server/src/protocol.ts` 的 CacheTask* 类型；保持 v1 协议字段不变，scope 适配在 `file-agent/scope-adapter.ts` 内部完成）：
   1. Client → Server：`client_hello` 上报 `deviceId/cwd/capabilities`
   2. Server → Client：`cache_task_assignment` 指派 active/inactive 角色并携带 manifest 快照
   3. Active Client：发送 `cache_task_delta`，initial 完成后发 `cache_task_sync_complete`
@@ -379,7 +384,7 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
 - **Pipeline 发送**：每个有 content 的文件单独发一个 `cache_task_delta` change，发完不等 ack 立刻发下一个 batch；ack 通过 `batchId + appliedRevision` 异步匹配 in-flight 队列
 - **流控水位**：`MAX_INFLIGHT_BYTES = 16 MB`。当 in-flight 字节累计超过该阈值时暂停 send，等任意 ack 释放配额后继续。本地/局域网下基本不触发，远程 RTT 200ms × 80MB/s ≈ 16MB 是流水线满载所需深度
 - **协议批次标识**：`CacheTaskDelta.batchId` 必填；server 用 `cache_task_delta_ack` 回传 `appliedRevision`，pipeline 模式下靠 `batchId` 区分 in-flight 批次
-- **Server 端 manifest 串行锁**（`client-cache-store.ts: withManifestLock`）：按 `(deviceId, cwd)` 维护 promise 链 mutex，串行化 `applyDelta` / `upsertEntry` / `removeEntry` 的 read-modify-write。**这是 pipeline 的硬性前提**：server 的 message handler 是并发的（`server.ts` 用 `void this.handleMessage()`），无锁状态下 manifest 写入会丢更新
+- **Server 端 manifest 串行锁**（`file-agent/store.ts: withManifestLock`）：按 `deviceId` 维护 promise 链 mutex（device-only 化后同 device 任意 cwd 写入均互相串行；不同 device 仍并发），串行化 `applyDelta` / `upsertEntry` / `removeEntry` 的 read-modify-write。**这是 pipeline 的硬性前提**：server 的 message handler 是并发的（`server.ts` 用 `void this.handleMessage()`），无锁状态下 manifest 写入会丢更新
 - **元数据批**（deletes + skipped）：每 scope 第一发，等 ack 后再开始 pipeline。这部分占用 in-flight 但 size 记 0，不消耗流控配额
 - **进度展示**（双行）：
   - line1 = 跨 scope 合并总进度（spinner + 进度条 + 百分比 + 已 ack 文件/字节），按 ack 字节**精确计算**
@@ -389,13 +394,15 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
 - 渲染节拍固定 100ms（10Hz）；事件只更新内部状态，不直接写 stdout
 - 仅 TTY 场景启用（`process.stdout.isTTY === true`）；非 TTY / CI 走纯 log，不输出 ANSI 控制序列
 
-**FUSE 读路径与 cache 协同**（`server/src/file-proxy-manager.ts`）：
+**FUSE 读路径与 cache 协同**（`server/src/file-proxy-manager.ts` + `server/src/file-agent/`）：
 
-- `create_pty_session` 会把 Client 的 `deviceId` 带给 Server；`FileProxyManager` 收到 `cacheStore + deviceId` 后启用 cache 读优先
+- `create_pty_session` 会把 Client 的 `deviceId` 带给 Server；server 通过 `getOrCreateFileAgent(deviceId, homeDir)` 拿到 per-device FileAgent 单例（plan §2 P6），传给 `FileProxyManager`；同时实例化 per-session `ConfigPreloader` 调 `preheat()`（同步阻塞，超时 10s）
+- 启动期 `ConfigPreloader.preheat`：拼装 PrefetchItem[]（home/.claude dir-recursive + .claude.json file + ancestor × {CLAUDE.md, CLAUDE.local.md} files）→ 一次 `fileAgent.prefetch`，命中已有 cache 的 alreadyHot，未命中且 fetcher 配置时穿透 client
 - 启动时 `collectAndWriteSnapshot` 对 `home-claude` / `home-claude-json` **优先从 cache 构造 snapshot**（`buildSnapshotFromManifest`），不再向 Client 发全量 snapshot 请求；`project-claude` 因为不在 cache 覆盖范围仍然穿透 Client
-- 运行时 `handleFuseLine` 的 `read` op 会先调用 `tryServeReadFromCache`：命中 blob 直接写回 FUSE daemon；miss 或 skipped 文件 fallback 到原穿透路径
+- 运行时 `handleFuseLine` 的 `read` op 先调用 `tryServeReadFromCache`：命中 blob 直接写回 FUSE daemon；miss 或 skipped 文件 fallback 到原穿透路径。**FileAgent 与 FileProxyManager 共享 store**——FileAgent.read 命中事实上等价于 FileProxyManager 命中
 - cache 未启用（Client 未上报 deviceId / 未提供 cacheStore）时退化为纯穿透模式，行为与未接入 cache 时完全一致
-- cache 新鲜度：短期内依赖"下次启动时的增量握手 push"来修正；未来若需要 session 运行期内双向同步（watcher + `cache_delta`）再扩展
+- **双路写入 manifest**（plan §3.6）：路径 A（`SyncCoordinator.fetchFile`，被 FileAgent miss 时调，通过 `ClientFetchDispatcher` 派发单 path SyncPlan + 等 client 推 delta）+ 路径 B（`SyncCoordinator.applyWatcherDelta`，client 主动 push 的运行时增量）。两路共用 manifest，最终一致性窗口典型 < 1s
+- cache 新鲜度：watcher delta 持续修正运行期内容；启动期 ConfigPreloader 预热 + ttl=7d 让长期留存的配置一直 warm
 
 ### 6. 启动期进度 UI / Startup Progress UI
 

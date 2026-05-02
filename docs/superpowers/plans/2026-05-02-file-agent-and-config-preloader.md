@@ -1,8 +1,29 @@
 # Plan: FileAgent 底座抽象 + ConfigPreloader 分层 + Device 维度迁移
 
-> **Status:** Draft（用户审中）。
-> **Executor:** Claude（自己落地，不再交 Codex）。
+> **Status: Implemented (2026-05-02, commits 045587a..315a281)**.
+> **Executor:** Claude（自己落地）。
 > **Discipline:** 严格 TDD（红 → 绿 → 重构 → commit），每个 task 一个 commit。
+> **Codex review:** 见提交日志末尾 review 链路（Task 12 触发）。
+
+实施 commit 链路（按 task 顺序）：
+
+| Task | Commit | 内容 |
+|---|---|---|
+| 0 清场 | 045587a + 98af9e4 | revert codex V2 6 commits + 删 stranded test + 加 plan md |
+| 1 接口骨架 | 0f6284c | FileAgent class + types |
+| 2 store device-only | 29e7a46 + d3a2d78 | manifest v3 + 全局 blob 池 + mv 至 file-agent/store + scope-adapter + FileAgent 接命中 |
+| 3 TTL 表 | 060e564 | TtlTable + bump max + 命中时续期 |
+| 4 in-flight 去重 | f1cf52f | InflightMap + 100 并发去重 |
+| 5 sync-coordinator | 3dda1b3 | client-protocol-v1 + 双路写入（B 完整 + A 桩） |
+| 6 prefetch | e4ca123 | bounded concurrency 16 + dir walk + 失败收集 |
+| 7 GC | 141448d | TTL evict + 60s 周期 + in-flight 安全 |
+| 8 ConfigPreloader | e2b2711 | 同步预热 + getNamespaceMountPlan |
+| 9 FuseHost wiring | ef3c9df | file-proxy-manager 接 fileAgent 字段 + 共享 store 契约 |
+| 10 session 接入 | 6729dfc | server.ts 维护 fileAgents Map + ConfigPreloader.preheat 集成 |
+| 11 import 清理 | 在 Task 2b 一并完成 | （d3a2d78 内 git mv 时同步更新 7 个 import） |
+| 12 E2E + 文档 | 315a281 + （本 commit）| 6 个 E2E 场景 + CLAUDE.md / architecture.md / spec § 11.2/11.3 status 更新 |
+
+回归验证：`server: 411 + client: 135 + web: 6 = 552 tests pass / 5 skipped / 0 fail`。Typecheck 全部干净。
 
 **Goal:** 把现有「ClientCacheStore + AccessLedger + SyncPlan + FileProxyManager 共同承担文件代理职责」的混合架构，重组为干净的两层：
 
