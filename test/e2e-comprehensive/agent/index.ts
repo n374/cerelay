@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -40,6 +40,127 @@ interface RunResponse {
 
 const CLIENT_BIN = process.env.CLIENT_BIN || "/app/client/dist/index.js";
 const SERVER_URL = process.env.SERVER_URL || "ws://server:8765/ws";
+
+// ============================================================
+// INF-3: async run 状态管理
+// ============================================================
+// runStates Map<runId, RunState> 用于追踪所有 async 起的 child process。
+// 同步 /run 不进 Map（向后兼容,P0/P1-A 18 case 完全不感知）。
+//
+// 治理策略（Codex PR2 review #2）:
+//   - completed (exited/killed) 状态保留 RUN_STATE_TTL_MS = 5 min 后 GC
+//   - Map 上限 RUN_STATE_MAX = 50 条,超出按 LRU 淘汰最早 completed 的
+//   - 单条 stdout/stderr buffer 上限 RUN_STATE_BUFFER_CAP = 4 MB,超出截断尾部
+//   - running 状态永远不淘汰（避免误杀活跃 session）
+// ============================================================
+const RUN_STATE_TTL_MS = 5 * 60 * 1000;
+const RUN_STATE_MAX = 50;
+const RUN_STATE_BUFFER_CAP = 4 * 1024 * 1024;
+
+interface RunStateBase {
+  runId: string;
+  child: ChildProcess;
+  startedAt: number;
+  deviceId: string;
+  stdoutChunks: Buffer[];
+  stderrChunks: Buffer[];
+  /** 累计 stdout 字节,达到 RUN_STATE_BUFFER_CAP 后停止追加。 */
+  stdoutBytes: number;
+  stderrBytes: number;
+  /** 已注册的 wait promise 列表（POST /admin/run/{id}/wait 用）。 */
+  waiters: Array<(s: RunState) => void>;
+  /** Cleanup（fixture 删除）promise,exit 后异步执行;status 查询不需要等它。 */
+  cleanup: Promise<void> | null;
+  /** 同步模式标记,true = /run（已 await 完成）;false = /run-async（runState 进 Map）。 */
+  isAsync: boolean;
+}
+
+interface RunStateRunning extends RunStateBase {
+  state: "running";
+  exitCode: null;
+  durationMs: null;
+  killedAt: null;
+}
+
+interface RunStateExited extends RunStateBase {
+  state: "exited";
+  exitCode: number;
+  durationMs: number;
+  killedAt: null;
+  /** completed 时间戳,用于 TTL GC */
+  completedAt: number;
+}
+
+interface RunStateKilled extends RunStateBase {
+  state: "killed";
+  exitCode: number | null;
+  durationMs: number;
+  killedAt: number;
+  completedAt: number;
+}
+
+type RunState = RunStateRunning | RunStateExited | RunStateKilled;
+
+const runStates = new Map<string, RunState>();
+
+function appendBuffer(state: RunStateBase, which: "stdout" | "stderr", chunk: Buffer): void {
+  const cap = RUN_STATE_BUFFER_CAP;
+  if (which === "stdout") {
+    if (state.stdoutBytes >= cap) return;
+    const remaining = cap - state.stdoutBytes;
+    const slice = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining);
+    state.stdoutChunks.push(slice);
+    state.stdoutBytes += slice.byteLength;
+  } else {
+    if (state.stderrBytes >= cap) return;
+    const remaining = cap - state.stderrBytes;
+    const slice = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining);
+    state.stderrChunks.push(slice);
+    state.stderrBytes += slice.byteLength;
+  }
+}
+
+function gcRunStates(): void {
+  const now = Date.now();
+  // TTL: 删 completed 且超过 TTL 的
+  for (const [id, s] of runStates) {
+    if ((s.state === "exited" || s.state === "killed") && s.completedAt + RUN_STATE_TTL_MS < now) {
+      runStates.delete(id);
+    }
+  }
+  // LRU: 超上限时按 completedAt 升序删最早 completed 的
+  if (runStates.size > RUN_STATE_MAX) {
+    const completed = [...runStates.values()]
+      .filter((s): s is RunStateExited | RunStateKilled => s.state !== "running")
+      .sort((a, b) => a.completedAt - b.completedAt);
+    const toRemove = runStates.size - RUN_STATE_MAX;
+    for (let i = 0; i < toRemove && i < completed.length; i++) {
+      runStates.delete(completed[i].runId);
+    }
+  }
+}
+
+function statusResponse(state: RunState): {
+  runId: string;
+  state: "running" | "exited" | "killed";
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  deviceId: string;
+  durationMs: number | null;
+  startedAt: number;
+} {
+  return {
+    runId: state.runId,
+    state: state.state,
+    exitCode: state.exitCode,
+    stdout: Buffer.concat(state.stdoutChunks).toString("utf8"),
+    stderr: Buffer.concat(state.stderrChunks).toString("utf8"),
+    deviceId: state.deviceId,
+    durationMs: state.durationMs,
+    startedAt: state.startedAt,
+  };
+}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -147,7 +268,17 @@ async function cleanupHomeFixture(absPaths: string[]): Promise<void> {
   }
 }
 
-async function runClient(req: RunRequest): Promise<RunResponse> {
+// ============================================================
+// 共享底层：spawn child + 装上 stdio/exit handlers
+// ============================================================
+// runClient (sync /run) 与 runClientAsync (async /run-async) 都通过此函数起 child;
+// 只是后续等不等 exit 不同。
+// ============================================================
+async function startClientRun(req: RunRequest): Promise<{
+  state: RunState;
+  homeFixtureWritten: string[];
+  homeFixtureBulkWritten: BulkWriteResult | null;
+}> {
   const traceId = randomUUID();
   const startedAt = Date.now();
   const args = [
@@ -182,71 +313,193 @@ async function runClient(req: RunRequest): Promise<RunResponse> {
     }
   }
 
+  const child = spawn("node", args, {
+    env: {
+      ...process.env,
+      CERELAY_E2E_TRACE_ID: traceId,
+      CERELAY_E2E_DEVICE_LABEL: req.deviceLabel || "",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const state: RunStateRunning = {
+    runId: traceId,
+    child,
+    startedAt,
+    deviceId,
+    stdoutChunks: [],
+    stderrChunks: [],
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    waiters: [],
+    cleanup: null,
+    isAsync: false,           // 调用方根据自身路径覆盖
+    state: "running",
+    exitCode: null,
+    durationMs: null,
+    killedAt: null,
+  };
+
+  child.stdout?.on("data", (c) => appendBuffer(state, "stdout", Buffer.from(c)));
+  child.stderr?.on("data", (c) => appendBuffer(state, "stderr", Buffer.from(c)));
+
+  return { state, homeFixtureWritten, homeFixtureBulkWritten };
+}
+
+/** child exit / error 后跑的清理 + 状态翻转,sync/async 共用。 */
+function finalizeRun(opts: {
+  state: RunState;
+  exitCode: number | null;
+  homeFixtureWritten: string[];
+  homeFixtureBulkWritten: BulkWriteResult | null;
+  keepAfter: boolean | undefined;
+  killed: boolean;
+}): void {
+  const now = Date.now();
+  const newState = opts.killed
+    ? Object.assign(opts.state as RunStateBase, {
+        state: "killed" as const,
+        exitCode: opts.exitCode,
+        durationMs: now - opts.state.startedAt,
+        killedAt: now,
+        completedAt: now,
+      })
+    : Object.assign(opts.state as RunStateBase, {
+        state: "exited" as const,
+        exitCode: opts.exitCode ?? -1,
+        durationMs: now - opts.state.startedAt,
+        killedAt: null,
+        completedAt: now,
+      });
+
+  // cleanup fixture (best-effort, 异步)
+  newState.cleanup = (async () => {
+    if (opts.keepAfter) return;
+    await cleanupHomeFixture(opts.homeFixtureWritten);
+    if (opts.homeFixtureBulkWritten) {
+      try {
+        await rm(opts.homeFixtureBulkWritten.rootAbs, { recursive: true, force: true });
+      } catch { /* best-effort */ }
+    }
+  })();
+
+  // 唤醒所有 waiter
+  const waiters = newState.waiters.splice(0);
+  for (const w of waiters) w(newState as RunState);
+
+  // async 模式触发 GC
+  if (newState.isAsync) gcRunStates();
+}
+
+async function runClient(req: RunRequest): Promise<RunResponse> {
+  const { state, homeFixtureWritten, homeFixtureBulkWritten } = await startClientRun(req);
+  state.isAsync = false;
+
+  const timeoutMs = req.timeoutMs ?? 60_000;
+
   return await new Promise<RunResponse>((resolve, reject) => {
-    const child = spawn("node", args, {
-      env: {
-        ...process.env,
-        CERELAY_E2E_TRACE_ID: traceId,
-        CERELAY_E2E_DEVICE_LABEL: req.deviceLabel || "",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    child.stdout?.on("data", (c) => stdoutChunks.push(Buffer.from(c)));
-    child.stderr?.on("data", (c) => stderrChunks.push(Buffer.from(c)));
-
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`client timeout after ${req.timeoutMs ?? 60_000}ms`));
-    }, req.timeoutMs ?? 60_000);
+      state.child.kill("SIGKILL");
+      reject(new Error(`client timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
 
-    child.once("exit", async (code) => {
+    state.child.once("exit", async (code) => {
       clearTimeout(timer);
-      if (!req.homeFixtureKeepAfter) {
-        await cleanupHomeFixture(homeFixtureWritten);
-        if (homeFixtureBulkWritten) {
-          try { await rm(homeFixtureBulkWritten.rootAbs, { recursive: true, force: true }); } catch { /* best-effort */ }
-        }
-      }
+      finalizeRun({
+        state,
+        exitCode: code,
+        homeFixtureWritten,
+        homeFixtureBulkWritten,
+        keepAfter: req.homeFixtureKeepAfter,
+        killed: false,
+      });
+      // sync 模式必须等 cleanup 完成再返回（与原行为一致）
+      await state.cleanup;
       resolve({
         exitCode: code ?? -1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        sessionId: traceId,
-        durationMs: Date.now() - startedAt,
-        deviceId,
+        stdout: Buffer.concat(state.stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(state.stderrChunks).toString("utf8"),
+        sessionId: state.runId,
+        durationMs: Date.now() - state.startedAt,
+        deviceId: state.deviceId,
       });
     });
 
-    child.once("error", async (err) => {
+    state.child.once("error", async (err) => {
       clearTimeout(timer);
-      if (!req.homeFixtureKeepAfter) {
-        await cleanupHomeFixture(homeFixtureWritten);
-        if (homeFixtureBulkWritten) {
-          try { await rm(homeFixtureBulkWritten.rootAbs, { recursive: true, force: true }); } catch { /* best-effort */ }
-        }
-      }
+      finalizeRun({
+        state,
+        exitCode: null,
+        homeFixtureWritten,
+        homeFixtureBulkWritten,
+        keepAfter: req.homeFixtureKeepAfter,
+        killed: false,
+      });
+      await state.cleanup;
       reject(err);
     });
   });
 }
 
+/** INF-3: 异步起 child,立即返回 runId,后续 GET /admin/run/{id}/* 查询。 */
+async function runClientAsync(req: RunRequest): Promise<{ runId: string }> {
+  const { state, homeFixtureWritten, homeFixtureBulkWritten } = await startClientRun(req);
+  state.isAsync = true;
+  runStates.set(state.runId, state);
+
+  // 安装 exit/error handler,exit 后翻状态 + 触发 cleanup + waiters
+  const handleExit = (code: number | null) => {
+    if (state.state !== "running") return; // 已被 kill 处理
+    finalizeRun({
+      state,
+      exitCode: code,
+      homeFixtureWritten,
+      homeFixtureBulkWritten,
+      keepAfter: req.homeFixtureKeepAfter,
+      killed: false,
+    });
+  };
+  state.child.once("exit", handleExit);
+  state.child.once("error", () => handleExit(null));
+
+  // 可选 timeout cleanup guard——不是同步 /run 那种"timeout = reject error"语义,
+  // 而是 agent 层的兜底:防 child 卡住永远 running 占着 runState。
+  // 触发时 finalizeRun({killed:true}) **先** 翻状态为 killed,再 child.kill,
+  // 这样后续 child.once("exit") handler 中的 if (state !== "running") return
+  // 守门会跳过 finalizeRun 的二次调用,状态保持 killed (Codex PR2 review important #1)。
+  if (req.timeoutMs && req.timeoutMs > 0) {
+    setTimeout(() => {
+      if (state.state === "running") {
+        finalizeRun({
+          state,
+          exitCode: null,
+          homeFixtureWritten,
+          homeFixtureBulkWritten,
+          keepAfter: req.homeFixtureKeepAfter,
+          killed: true,
+        });
+        try { state.child.kill("SIGKILL"); } catch { /* best-effort */ }
+      }
+    }, req.timeoutMs);
+  }
+
+  return { runId: state.runId };
+}
+
+// ============================================================
+// HTTP 路由
+// ============================================================
 const server = createServer(async (req, res) => {
   try {
     if (req.url === "/healthz" && req.method === "GET") {
       return sendJson(res, 200, { ok: true });
     }
     if (req.url === "/device" && req.method === "GET") {
-      // 持久化 deviceId（容器 entrypoint 首次启动写入 ~/.config/cerelay/device-id）。
-      // orchestrator 用它去查 server 端 cache manifest。
       const deviceId = await readDeviceId();
       return sendJson(res, 200, { deviceId });
     }
     if (req.url === "/admin/toggles" && req.method === "POST") {
       // meta-deviceid-collision 测试用：覆盖持久化 device-id 文件。
-      // body 形式：{ forceDeviceId: string } 设置；{ reset: true } 恢复原值。
       const body = JSON.parse(await readBody(req)) as { forceDeviceId?: string; reset?: boolean };
       if (body.reset) {
         await setForcedDeviceId(null);
@@ -268,6 +521,91 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 200, result);
       } catch (err) {
         return sendJson(res, 500, { error: String(err) });
+      }
+    }
+    // INF-3: async run 入口
+    if (req.url === "/run-async" && req.method === "POST") {
+      const body = JSON.parse(await readBody(req)) as RunRequest;
+      if (!body.prompt || !body.cwd) {
+        return sendJson(res, 400, { error: "prompt + cwd required" });
+      }
+      try {
+        const result = await runClientAsync(body);
+        return sendJson(res, 200, result);
+      } catch (err) {
+        return sendJson(res, 500, { error: String(err) });
+      }
+    }
+    // INF-3: status / kill / wait
+    if (req.url && req.method === "GET") {
+      const m = /^\/admin\/run\/([^/]+)\/status$/.exec(req.url);
+      if (m) {
+        const state = runStates.get(m[1]);
+        if (!state) return sendJson(res, 404, { error: "unknown runId" });
+        return sendJson(res, 200, statusResponse(state));
+      }
+    }
+    if (req.url && req.method === "POST") {
+      const killMatch = /^\/admin\/run\/([^/]+)\/kill$/.exec(req.url);
+      if (killMatch) {
+        const state = runStates.get(killMatch[1]);
+        if (!state) return sendJson(res, 404, { error: "unknown runId" });
+        if (state.state !== "running") {
+          return sendJson(res, 200, { ok: true, alreadyDone: true, state: state.state });
+        }
+        // 先翻状态再 kill,避免 exit handler 把 killed 当 exited
+        finalizeRun({
+          state,
+          exitCode: null,
+          homeFixtureWritten: [],
+          homeFixtureBulkWritten: null,
+          keepAfter: true,    // kill 路径不动 fixture（外部测试可能还要查）
+          killed: true,
+        });
+        try { state.child.kill("SIGKILL"); } catch { /* best-effort */ }
+        return sendJson(res, 200, { ok: true, state: "killed" });
+      }
+      const waitMatch = /^\/admin\/run\/([^/]+)\/wait$/.exec(req.url);
+      if (waitMatch) {
+        const state = runStates.get(waitMatch[1]);
+        if (!state) return sendJson(res, 404, { error: "unknown runId" });
+        const body = JSON.parse(await readBody(req)) as { timeoutMs?: number };
+        const timeoutMs = body.timeoutMs ?? 60_000;
+        if (state.state !== "running") {
+          return sendJson(res, 200, statusResponse(state));
+        }
+        const result = await new Promise<RunState | null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), timeoutMs);
+          state.waiters.push((s) => {
+            clearTimeout(timer);
+            resolve(s);
+          });
+        });
+        if (!result) return sendJson(res, 504, { error: "wait timeout", state: "running" });
+        return sendJson(res, 200, statusResponse(result));
+      }
+    }
+    // INF-4: mutate-home-fixture（C3-runtime-delta 用）。
+    //
+    // 注意（Codex PR2 review important #4）:
+    //   - 复用 applyHomeFixture,**没有 cleanup** —— 调用方负责后续清理或覆盖
+    //   - 当前**未禁止**写 .claude.json (cleanup 特例),但 mutate 不进 RunRequest
+    //     的 cleanupHomeFixture 路径,理论上不会触发"被 rm 后 CC 启动失败"。
+    //     调用方仍应避免直接 mutate .claude.json,如有需要走专用 helper。
+    //   - log "homeFixture wrote" 复用了原 fixture 写入的 prefix,是有意为之
+    //     (调用栈一致),诊断时按 endpoint 路由区分 pre-run vs runtime mutation
+    if (req.url === "/admin/mutate-home-fixture" && req.method === "POST") {
+      try {
+        const body = JSON.parse(await readBody(req)) as { files: Record<string, string> };
+        if (!body.files || typeof body.files !== "object") {
+          return sendJson(res, 400, { error: "files required" });
+        }
+        const written = await applyHomeFixture(body.files);
+        // eslint-disable-next-line no-console
+        console.log(`[client-agent] /admin/mutate-home-fixture wrote ${written.length} files`);
+        return sendJson(res, 200, { ok: true, written });
+      } catch (err) {
+        return sendJson(res, 400, { error: String(err) });
       }
     }
     sendJson(res, 404, { error: "not found", url: req.url });
