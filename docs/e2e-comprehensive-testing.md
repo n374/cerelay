@@ -395,8 +395,14 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 
 ### 9. 相关 Commit / Related Commits
 
-- 设计文档落地：（待提交）
+- 设计文档落地：`ef5b61a 📝 文档 / Docs: e2e 综合测试设计稿 + CLAUDE.md 收敛文档治理章节`
 - IFS bug 修复（驱动本次 e2e 设计）：`34b870a 🩹 修复 / Fix: bootstrap.sh ancestor 段在 set -u 下访问已 unset 的 IFS`
+- P0-A Foundation + canary：`bb8ab63 / f5ae97b / 2440f1a / f66522e / 5db5f7a / 13d8d11 / 694e5e1 / 34240d3 / fbae38d / a63fc2b / eb06489 / 1f782d2 / 13390e7 / c49d6ef`（mock-anthropic / agent / admin-events / orchestrator HTTP / Dockerfiles / compose / run script / canary cases）
+- P0-B 实施（**Codex 终审标 4 Critical 待修，详见 §11**）：
+  - `69c2c98 🌱 e2e / P0-B-1: 6 个 P0 case + agent homeFixture 协议`
+  - `0fc28c1 🌱 e2e / P0-B-2: C1/C2 cache pipeline 验证 + admin/cache endpoint`
+  - `f96675a 🌱 e2e / P0-B-3: D1/D2/D3 + E1 + F1/F3 namespace+redact+多拓扑`
+  - `a1a1499 🌱 e2e / P0-B-4: 3 个 meta-test 验证 P0 套件能拦住已知 regression`
 
 ---
 
@@ -405,3 +411,64 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 日期 | 变更 |
 |---|---|
 | 2026-05-02 | 初版：定义 P0/P1/P2 三阶段覆盖矩阵、多容器拓扑、orchestrator/agent/mock 协议、强制审计约束 |
+| 2026-05-02 | P0-A Foundation 落地（容器拓扑 / orchestrator / agent / mock-anthropic / admin-events / canary cases A1+B4） |
+| 2026-05-02 | P0-B 4 commits 落地，主套件 16/16 + meta 3/3 在容器内跑通；Codex 终审认定 4 Critical 阻断、5 Important、2 Nit，详见 §11，**P0-B 未闭环** |
+
+---
+
+### 11. Codex 终审遗留事项（P0-B 阻断） / Codex Review Outstanding Items
+
+> 状态（2026-05-02）：P0-B 4 commits 已落，但 Codex 独立终审认定主套件**case 名字对上 §2.1 matrix，主断言没真覆盖对应不变量**。下方清单未全部修完前，P0-B 不能视为闭环；P0-A 的 canary（A1/B4）不受影响。
+>
+> Status (2026-05-02): P0-B is **landed but not closed**. Independent Codex review found that several P0 cases assert against the wrong invariant. The list below MUST be addressed before P0-B can be considered done; P0-A canary cases (A1/B4) are unaffected.
+
+#### 11.1 Critical（必须修，未修不可 merge / Must-fix blockers）
+
+| # | 案例 / 文件 | 问题 | 修正方向 |
+|---|---|---|---|
+| C1 | B1/B2/B3/D1/D2 in `phase-p0.test.ts` | 用 `mcp__cerelay__read/bash` 走的是 client-routed（[pty-session.ts](../server/src/pty-session.ts) `executeToolViaClient` rewrite 到 client home/cwd 后转发 client 执行），**根本没碰 server FUSE / namespace 链路**。case 名字对得上 matrix，断言走在 client 端原文。 | 不能用 shadow MCP 工具作为主断言。新增 file-proxy 结构化 admin event（按 root + relPath），断言访问真的经过 `home-claude` / `home-claude-json` / `project-claude` FUSE root，而不是 client 本地直读。 |
+| C2 | E1 in `phase-p0.test.ts` | 只断言"至少一次 `file-proxy.settings.redacted` event"，没覆盖 matrix 要求的 snapshot / cache-hit / passthrough **三处出口都 redact**。当前 admin event 已经标 `site`，但断言没强制三类 site 都出现。 | 拆 E1 为可稳定触发三个 site 的子断言：分别强制走 snapshot / cache-hit / passthrough 路径，断言对应 site event 出现且没有 `redact.bypassed`。e2e 不可稳定触发的出口必须降级 matrix + 补 server 单测。 |
+| C3 | F3 in `phase-p0.test.ts` | 只验 deviceId 不同 + 两边 manifest 非空 + revision > 0，**没真验证内容隔离**。如果 server 错误地用全局 manifest 或串写，本断言仍能过。 | 给 `/admin/cache` 增加按 `deviceId + scope + relPath` 查单项摘要（size / sha256）。F3 双边写同 relPath（`.claude/CLAUDE.md`）但内容不同，断言 A/B 查到不同 hash 且互查不到对方。 |
+| C4 | meta-deviceid-collision in `phase-p0-meta.test.ts` | 只验"两侧指向同一 manifest"，没有镜像 F3 失败条件。即使 F3 把核心隔离断言删了，本 meta 仍能过。反向断言失效。 | 抽出 `assertF3Isolation()` 公共断言，主套件 F3 期望 pass，meta collision 下期望 throw。 |
+
+#### 11.2 Important（实现路径，需修但可对齐 / Should-fix）
+
+| # | 文件 | 问题 | 修正方向 |
+|---|---|---|---|
+| I1 | [`server/src/server.ts`](../server/src/server.ts) `/admin/cache` | 没 `CERELAY_ADMIN_EVENTS=true` gate；只要 admin token 在生产端口暴露即可枚举任意 deviceId 的 revision / scope 统计。**这是 P0-B 引入的真实 production safety bug**。 | 跟 `/admin/test-toggles` 一致 gate 到 `CERELAY_ADMIN_EVENTS=true`，或引入独立 `CERELAY_E2E_ADMIN=true`；生产默认 404/403。 |
+| I2 | 本文档 §4.2 | 文档声称 admin 路由仅在 `CERELAY_ADMIN_EVENTS=true` 挂载、独立 8766 端口；实际 `server/src/server.ts` 主端口直接挂 `/admin/*`，`/admin/events` 只是 disabled 时回空。 | 同步 §4.2 安全模型：哪些路由生产存在、哪些 disabled 回空、哪些 e2e-only endpoint 有 gate。 |
+| I3 | [`server/src/test-toggles.ts`](../server/src/test-toggles.ts) | 故意放水 toggle 被生产代码 import 到 `file-proxy-manager.ts` / `claude-session-runtime.ts`。当前远程开启路径被 gate 挡住，但生产代码路径**永久读取测试状态**。 | 改 DI：toggle 作为构造参数注入到 e2e server；或改名 `E2eFaultInjection` + 单测断言 `CERELAY_ADMIN_EVENTS !== "true"` 时 POST 无法改变行为。 |
+| I4 | [`test/e2e-comprehensive/mock-anthropic/index.ts`](../test/e2e-comprehensive/mock-anthropic/index.ts) `flattenToolResults` | 字段名表示"当前请求 toolResults"，实际累计所有历史 user 消息，导致测试靠 `.at(-1)` 绕语义。 | 拆两个字段：`toolResultsAll` + `toolResultsCurrentTurn`。测试用 current turn；保留旧字段需改名或文档化。 |
+| I5 | §2.1 A3 matrix | matrix 写 `Glob '**/*.md'`，实现 `phase-p0.test.ts` 改成 `*.md` 走 basename 匹配。 | 要么修 client glob 支持 `**/*.md` 并按 matrix 测，要么 matrix 显式写"basename glob 语义"。 |
+
+#### 11.3 Nit（细节 / Minor）
+
+| # | 文件 | 问题 |
+|---|---|---|
+| N1 | C2 测试名 + 注释 + §2.1 矩阵 | 仍写 `==`，实际是 `>= && drift <= 50`。同步描述。 |
+| N2 | `phase-p0.test.ts` F1 case | `expectMarker` 变量未使用，删除该行。 |
+
+#### 11.4 Codex 对 9 条自审妥协的逐条判定 / Codex Verdict on Self-Identified Compromises
+
+| # | 妥协 | Codex 判定 | 备注 |
+|---|---|---|---|
+| 1 | C2 drift ≤ 50 | 有条件接受 | `>=` 合理，阈值是经验值，需更新 matrix/test name 并记录实际 drift 分布 |
+| 2 | A4 deny 文案宽松 | 有条件接受 | 主不变量 `is_error=true` 保住；但 docs/Plan D §4.5 对 fallback 引导的描述需补注脚说明主流程由 CC `--disallowedTools` 先拒绝，否则文档误导下游 |
+| 3 | E1 admin event 替代真黑盒 | **拒绝当前实现** | admin event 可作 honest 观测，但只验"至少一次"既没覆盖三出口也没证明 leak 不可达，达不到 matrix 目标（详见 C2 修正方向） |
+| 4 | F3 SEED_WHITELIST 路径限制 | 接受 | fresh device 冷启动约束真实存在，`seed-whitelist.ts` 含 `CLAUDE.md`，选择合理 |
+| 5 | B3 `.claude.json` cleanup 改 `{}` | 接受 | CC 启动期依赖合法 JSON，workaround 放 agent 可接受 |
+| 6 | 多 tool 断言 `.at(-1)` | 有条件接受 | 临时能跑，但 mock 字段语义错误，应拆 `currentTurn` 和 `all`（详见 I4） |
+| 7 | mock predicate JSON.stringify | 接受 | 不应用于严格结构断言 |
+| 8 | meta `\|\|` 反向断言宽松 | 有条件接受 | IFS 失败出口多，`\|\|` 本身可接受；但 device collision meta 没镜像 F3 失败条件，需修（C4） |
+| 9 | P0-B 跳过 Claude × Codex 双审 | 有条件接受 | 用户授权推进不等于质量豁免；Critical 修完才算闭环 |
+
+#### 11.5 闭环路径 / Closing the Loop
+
+新 session 开工建议顺序：
+
+1. **修 4 个 Critical**（C1-C4，P0-B 才算真闭环）
+2. **修 5 个 Important**（特别是 I1 `/admin/cache` gate—生产 safety）
+3. **修 2 个 Nit**（N1-N2）
+4. **再走一次 Codex 终审**（用 §6 强制审计约束 + `rules/review-workflow.md` 阶段 5 流程）
+5. 终审通过 → 在本节追加"2026-XX-XX P0-B 闭环"行 + 把 §11 整节移到归档（或保留作为"P0 实施过程的 honest 留痕"）
+6. 全部完成 → 进入 §5 P1 阶段
