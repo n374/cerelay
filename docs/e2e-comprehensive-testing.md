@@ -143,7 +143,7 @@
     "events": [
       { "kind": "message_start", "model": "claude-sonnet-4-20250514" },
       { "kind": "content_block_start", "block": { "type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {} } },
-      { "kind": "input_json_delta", "partial_json": "{\"command\":\"ls\"}" },
+      { "kind": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": "{\"command\":\"ls\"}" } },
       { "kind": "content_block_stop" },
       { "kind": "message_delta", "stop_reason": "tool_use" },
       { "kind": "message_stop" }
@@ -156,6 +156,7 @@
 - 单 client 串行 case（绝大多数 P0/P1）：用 `turnIndex` 即可
 - 多 client 并发 case（F3）：用 `predicate` 匹配 prompt 中的 marker（orchestrator 给每个 client 生成唯一 marker 拼到 prompt 里）
 - `headerEquals` 是 fallback，要求 cerelay-server 把 deviceId 等字段透传到 upstream Anthropic 请求头——P0 阶段**不依赖**这条，避免引入新 server 改动；如未来确实需要再启用
+- **SSE event 命名**：剧本 `events[*].kind` 直接对应 SSE wire-format 的 `event:` 名（例如 `content_block_delta`）；data payload 内 `delta.type` 区分 `text_delta` / `input_json_delta`。`input_json_delta` 同时被允许作为 `kind` 的 alias 值（已知 spec 早期示例笔误，向后兼容保留）。
 
 `/admin/captured` 返回所有进入过 `/v1/messages` 的请求（含 headers / body / reset 后第几次），orchestrator 据此断言。
 
