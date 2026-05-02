@@ -193,7 +193,8 @@ export interface ConfigPreloaderPlanDetail {
  * 用于断言"每个 session 有独立的 runtimeRoot / mountPoint，彼此不共享"。
  */
 export interface SessionBootstrapPlanDetail {
-  sessionId: string;
+  // sessionId 由 AdminEvent 顶层携带，detail 不重复（避免与顶层冗余 + 类型契约冲突，
+  // 与 ConfigPreloaderPlanDetail 同策略——T6 follow-up commit 69f99c4 经验）
   deviceId: string;
   clientCwd: string;
   runtimeRoot: string;

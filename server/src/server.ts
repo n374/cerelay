@@ -1235,6 +1235,22 @@ export class CerelayServer {
       hasProjectSettingsLocal: Boolean(message.projectClaudeSettingsLocalContent),
     });
 
+    // F4 P2 不变量 (d) probe — session.bootstrap.plan
+    // 把 session bootstrap 关键字段(runtime root / mount point / project-claude
+    // bind target)暴露给 admin events，e2e 用此守 "project-claude bind mount
+    // 严格按 session 自己的 cwd"。
+    // 仅在 adminEvents 注入时 emit（跟 config-preloader.plan 同样的 guard pattern）。
+    // sessionId 由 record 第二参数携带于 event 顶层，detail 不放——
+    // T6 follow-up commit 69f99c4 学到的教训：detail.sessionId 与
+    // AdminEvent.sessionId 顶层冗余 + 类型契约冲突，T7 一上来就避免。
+    this.adminEvents?.record("session.bootstrap.plan", sessionId, {
+      deviceId: message.deviceId ?? "",
+      clientCwd: message.cwd || ".",
+      runtimeRoot: runtime.rootDir,
+      fileProxyMountPoint: fileProxy?.mountPoint ?? "",
+      projectClaudeBindTarget: `${message.cwd || "."}/.claude`,
+    });
+
     const session = new ClaudePtySession({
       id: sessionId,
       cwd: message.cwd || ".",

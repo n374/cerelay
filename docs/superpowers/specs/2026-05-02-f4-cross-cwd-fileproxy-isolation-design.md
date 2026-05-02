@@ -154,7 +154,7 @@ emit 位置:session 创建期间(`:1145/1204` 附近,`createClaudeSessionRuntime
 detail:
 ```typescript
 {
-  sessionId: string;
+  // sessionId 由 AdminEvent 顶层携带，detail 不重复（避免冗余 + 类型契约冲突）
   deviceId: string;
   clientCwd: string;
   runtimeRoot: string;
