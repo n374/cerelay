@@ -395,10 +395,14 @@ test("A1-bash-basic: model triggers Bash → server relays to client → tool_re
 
 #### 7.1 失败时容器残留 / Containers Left Behind on Failure
 
-`run-e2e-comprehensive.sh` 在 orchestrator 退码非 0 时**不调 `compose down`**。开发者可：
+**默认行为(2026-05-02 起)**:`run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 在任何退出路径(成功 / 失败 / Ctrl+C / SIGTERM)都会 trap-based teardown,不留 container。失败时会先 dump logs 到 `.claude/e2e-failure-<project>/`(`all.log` / `server.log` / `ps.txt`)再清。
+
+**显式保留 container 排错**(老行为):`KEEP_ON_FAILURE=1 bash test/run-e2e-comprehensive.sh`,失败时容器保留供 `docker exec / docker logs` 现场调试,清理走 `docker compose -p <project> -f docker-compose.e2e.yml down --volumes`。
+
+**实时排错(运行中)**:
 
 ```bash
-docker compose -f docker-compose.e2e.yml ps
+docker compose -p <project> -f docker-compose.e2e.yml ps
 docker logs <e2e-server-container>
 docker logs <e2e-client-A-container>
 docker exec -it <e2e-server-container> sh   # 容器内交互式排查
@@ -416,8 +420,18 @@ docker exec -it <e2e-server-container> sh   # 容器内交互式排查
 
 #### 7.3 清理 / Cleanup
 
-- 主动清理：`npm run test:gc`（沿用现有 GC 工具，新增 e2e 命名空间识别）
-- 全清：`npm run test:gc:all`
+**自动 GC**:每次 `bash test/run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 启动前,会调用 `test/cleanup-e2e-stale.sh` 扫描 `cerelay-e2e-*` / `cerelay-e2e-meta-*` compose project,把 timestamp 超过阈值(默认 30min,`CERELAY_E2E_STALE_THRESHOLD_SEC` 调)的整个 project `compose down`。这是"防 implementer 历史遗留累积"的保险——P1-B 阶段曾出现 7 套残留 33 容器同时存在的情况,3-4h 不清,根因是脚本 trap 不全导致中断/异常退出残留。
+
+**手动 GC**:`bash test/cleanup-e2e-stale.sh`(读 `CERELAY_E2E_STALE_THRESHOLD_SEC`,无参数)。
+
+**强制全清**(不看时间):
+
+```bash
+docker compose ls -a --format json | python3 -c "import json,sys;[print(p['Name']) for p in json.load(sys.stdin) if p['Name'].startswith('cerelay-e2e')]" | \
+  xargs -I {} docker compose -p {} -f docker-compose.e2e.yml down --volumes --remove-orphans
+```
+
+**对比老行为**(已废弃):2026-05-02 前 `npm run test:gc` 入口在 cerelay 项目里没实现,本节文档之前是占位。现在以 `cleanup-e2e-stale.sh` 为权威入口。
 
 ---
 
