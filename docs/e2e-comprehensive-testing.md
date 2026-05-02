@@ -65,12 +65,16 @@
 >
 > Phase 1 split (landed 2026-05-02): the original P1 10 + P2 2 cases were partitioned into **P1-A** (pure test code, no infra change) and **P1-B** (requires infra change to avoid bypassing the guarded invariant). See §12.
 
-**P1-A（已落地 / Landed）**：
+**P1-A + P1-B 测试 PR1（已落地 / Landed）**：
 
 | 维度 | 案例 ID | 状态 | 描述 |
 |---|---|---|---|
 | A | A5-fallback-guidance | ✅ `phase-p1.test.ts` | shadow MCP 启用 + 内置 Bash 被 disallowedTools/hook deny → 模型下一轮自动改用 `mcp__cerelay__bash`（Plan D §4.5 fallback 闭环可执行） |
 | C | C4-large-skipped (skipped 半段) | ✅ `phase-p1.test.ts` | > 1MB 文件被 manifest 标记 `skipped`，server 仅同步元数据；用 `cacheAdmin.lookupEntry` 验 `skipped=true` + summary `skippedCount >= 1`。**truncated 半段（scope > 100MB）需 P1-B 增加 `MAX_SCOPE_BYTES` env override**，因 100MB 在 e2e 启动期同步太慢 |
+| B | B5-negative-cache | ✅ `phase-p1.test.ts` | INF-3 + INF-11 模式：probe 内连续 cat 同一不存在 path 两次；第二次 0 client.requested 证明 daemon `_negative_perm` 命中拦在 server 之外 |
+| B | B6-settings-local-shadow | ✅ `phase-p1.test.ts` | INF-3 + INF-11 模式：probe 内 cat `$cwd/.claude/settings.local.json` 触发 daemon shadow read；主断言 `file-proxy.shadow.served` (root=project-claude) |
+| D | D4-credentials-shadow | ✅ `phase-p1.test.ts` | INF-3 + INF-5 + INF-11 模式：`serverDataDir.putCredentials(marker)` 预置 + probe cat → shadow.served (home-claude) + content 含 marker 验端到端贯通 |
+| E | E2-credentials-rw | ✅ `phase-p1.test.ts` | INF-3 + INF-5 + INF-6 + INF-11 模式：probe 内 printf > credentials → write.served (shadow=true) + `serverDataDir.getCredentials` 验持久化含 marker |
 
 **P1-B（待做 / Pending — 见 §12 基础设施清单）**：
 
@@ -530,6 +534,8 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | **P1-B PR3 (cache budget override) 闭环**：INF-7 落地 (commit `78e51e0`)。client/src/cache-sync.ts 加 `readPositiveBytesEnv` helper,MAX_FILE_BYTES / MAX_SCOPE_BYTES 在 process 启动时支持 env 覆盖;CERELAY_E2E_* 前缀,生产不设 → fallback;export const 签名不变零破坏。改动小不再单独 Codex 验收 (符合"小改动可不审"约定)。client unit 135/135 + e2e 18/18 全过 |
 | 2026-05-02 | **P1-B PR4 (mock error builder) 闭环**：INF-9 落地 (commit `e2323d4`)。mock-anthropic 端 `ScriptDef.respond` 改 union (stream\|error);streamScript 加 error 分支 writeHead status + body;orchestrator 端加 `scriptError(status, body?)` builder。改动小不再单独 Codex 验收。e2e 18/18 全过 |
 | 2026-05-02 | **P1-B 全部 4 个基础设施 PR 闭环** (PR1+PR2+PR3+PR4 共 9 项 INF):INF-1/2/3/4/5/6/7/8/9 全部就绪;仅剩 INF-10 (A5 meta 加固,属测试 PR 范围)。下一步进入 P1-B 测试 PR1 (B5/B6/D4/E2 共 4 case),依赖 INF-1/2/5/6 已就绪 |
+| 2026-05-02 | **测试 PR1 阶段加 INF-11 (用户洞察)**:加 `/admin/sessions/:id/exec` admin endpoint,在 CC namespace 内 spawn 临时 sh 命令作为 e2e probe。破解了 Plan D 后"namespace 内只剩 CC 自身行为,无法 honest 触发 FUSE op" 的死结。`spawnInRuntime` 已是 `ClaudeSessionRuntime` 现成能力,只需包装 admin endpoint。commit `861a468` |
+| 2026-05-02 | **P1-B 测试 PR1 闭环**:B5 / B6 / D4 / E2 共 4 case 用 INF-3 (async run) + INF-11 (namespace exec) 模式 honest 实现 (commit `2fe81d3`)。守的不变量: B5 = daemon NegativeCache 拦在 server 之外 (第二次 cat 0 client.requested);B6 = project-claude shadow read.served emit;D4 = home-claude shadow read.served emit + content marker 端到端贯通;E2 = home-claude write.served emit (shadow=true) + serverDataDir 验持久化 marker。**e2e 22/22 全过 (P0 16 + P1-A 2 + P1-B test PR1 4)**,server unit 425/425 全过,所有 case 都是 honest 实现无绕过 |
 | 2026-05-02 | Codex P1-A 终审通过（0 critical / 1 important / 3 nit）：important 是 A5 注释里"模型自动推理"措辞润色（已改为"脚本化下一轮 fallback 闭环"，并加注脚说明真模型推理由 `e2e-real-claude-bash.test.ts` 守护，不在本套件职责）；nit 中的 A5 meta-test 加固建议登记为 INF-10 进入 P1-B 待办 |
 | 2026-05-02 | **P1-B PR1 (observability bundle) 落地**：INF-1/2/6/8 全部完成 — file-proxy.client.requested + .client.miss（perforation 计数，daemon negative cache 入口可观测）+ file-proxy.shadow.served + .write.served（daemon sideband JSON 行通道，shadow file 端到端可达）+ tool.timeout.fired + injectToolTimeout toggle（ToolRelay 构造改造，fault injection 钩子）+ session.disconnected（ws close handler emit）。orchestrator 新增 6 项 typed event helpers + injectToolTimeout API。`bash test/run-e2e-comprehensive.sh` 18/18 + `bash test/run-e2e-comprehensive-meta.sh` 3/3 + `cd server && npm test` 425/425 全过 |
 | 2026-05-02 | Codex PR1 终审通过（0 critical / 2 important / 2 nit 全修）：important #1（settings.json passthrough 漏 emit `client.requested`）→ 在 `sendClientRequest` 前补 emit + reason="settings_json_passthrough"；important #5（emit_event 阻塞风险）→ daemon 端加 `ADMIN_EVENTS_ENABLED` env gate，生产路径零开销零阻塞；nit #9（session.disconnected 命名误读）→ 加注释明确"只覆盖 client_close 路径，未来 G2 扩展时下沉到 destroyPtySession 内按 reason 区分"；nit #13（ring buffer 覆盖）暂不动，待 P1-B 测试 PR 时关注 baseline since 切片 |
@@ -550,20 +556,21 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | **INF-8** ✅ | server 加 `injectToolTimeout` test-toggle + `tool.timeout.fired` / `session.disconnected` admin event | G1 / G2 | **PR1 已落地** (commit 0d4375a)。`ToolRelay` 构造改造接受 `{sessionId, adminEvents}` + `createPending` 接受 `{timeoutMsOverride?}`; `pty-session` 调 `getTestToggles().injectToolTimeout` 决定是否注入短超时;`session.disconnected` emit 在 ws close handler (注释明确"只覆盖 client_close 路径"语义边界); `injectClientDisconnect` toggle 砍掉 (G2 由 P1-B PR2 INF-3 agent kill ws 实现); helpers `toolTimeoutEvents.waitForFired` / `sessionEvents.waitForDisconnected` 备好 |
 | **INF-9** ✅ | mock-anthropic 加 `scriptError(status, body)` builder | G3 | **PR4 已落地** (commit e2323d4)。`ScriptDef.respond` 改为 union: `stream | error`;mock 端 `streamScript()` 加 error 分支 (writeHead status + body 后 end);orchestrator 端 `scriptError(status, body?)` builder。body 默认 `{error: {type:"api_error", message:"mock error <status>"}}`,可传 string 或 object。`mockAdmin.loadScript({..., respond: scriptError(503)})` |
 | **INF-10** | meta-test：故意破坏 A5 deny 文案（移除 `mcp__cerelay__bash instead` 引导段） | A5 加固 | P1-A Codex 验收建议项：A5 主断言依赖 deny 文案命中正则，若未来 deny 文案被改动 / 简化导致正则全失效，A5 仍会假绿。补 meta-test 故意 stub `buildShadowFallbackReason`，断言 A5 应失败。属 P1-B 加固项，不阻断 P1-A 闭环 |
+| **INF-11** ✅ | server 加 `/admin/sessions/:id/exec` endpoint：在指定 sessionId 的 namespace 内 spawn 一条临时 sh 命令(e2e probe 入口) | B5 / B6 / D4 / E2 | **测试 PR1 阶段加（用户洞察）**(commit 861a468)。**关键基础设施**——cerelay Plan D 后,namespace 内只剩 CC 自身 SDK 行为;mcp__cerelay__bash 等 client-routed 工具跑在 client 本机,不入 namespace。要 honest 触发 namespace 内 FUSE read/write,必须用 server 端 `spawnInRuntime` 在同一 namespace 起 e2e probe。`spawnInRuntime` 已是 `ClaudeSessionRuntime` 现成能力(server.ts:1488 `verifyPtyHookVisibleInRuntime` 同模式),只需包装 admin endpoint。`pty-session.ts` 加 `getRuntime()`;server.ts 加 endpoint(POST,gate `CERELAY_ADMIN_EVENTS=true`,timeout abort);orchestrator: `serverExec.run(sessionId, {command, args, timeoutMs})` |
 
 #### 12.3 P1-B case 与基础设施依赖对照 / Case ↔ Infra Mapping
 
 | Case | 依赖 INF | 备注 |
 |---|---|---|
-| B5-negative-cache | INF-1 | |
-| B6-settings-local-shadow | INF-2 | 同时也守 hook injection 端到端可达 |
-| C3-runtime-delta | INF-3 + INF-4 | |
+| B5-negative-cache ✅ | INF-1 + INF-3 + INF-11 | INF-11 提供 namespace 内连续 cat 触发能力(测试 PR1 落地) |
+| B6-settings-local-shadow ✅ | INF-2 + INF-3 + INF-11 | 测试 PR1 落地 |
+| C3-runtime-delta | INF-3 + INF-4 + (可选 INF-11 验 namespace 内读到新值) | |
 | C4-truncated 半段 | INF-7 | skipped 半段已在 P1-A 落地 |
-| D4-credentials-shadow | INF-2 + INF-5 | |
-| E2-credentials-rw | INF-5 + INF-6 | |
+| D4-credentials-shadow ✅ | INF-2 + INF-3 + INF-5 + INF-11 | 测试 PR1 落地 |
+| E2-credentials-rw ✅ | INF-3 + INF-5 + INF-6 + INF-11 | 测试 PR1 落地 |
 | F2-multi-session | INF-3 | |
 | F4-same-device-multi-cwd | INF-3 | |
-| G1-tool-timeout | INF-8 | |
+| G1-tool-timeout | INF-3 + INF-8 | |
 | G2-client-disconnect | INF-3 + INF-8 | |
 | G3-mock-5xx | INF-9 | |
 
