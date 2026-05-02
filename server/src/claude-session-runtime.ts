@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createLogger } from "./logger.js";
+import { computeAncestorChain } from "./path-utils.js";
 
 const log = createLogger("claude-runtime");
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
@@ -91,6 +92,15 @@ async function createMountNamespaceRuntime(
   const readyFile = path.join(runtimeRoot, "ready");
   const clientHomeDir = options.clientHomeDir?.trim() || process.env.HOME || "/home/node";
   const viewRoots = collectViewRoots(clientHomeDir, options.cwd);
+  const mountEnv = buildMountNamespaceEnv({
+    runtimeRoot,
+    readyFile,
+    cwd: options.cwd,
+    clientHomeDir,
+    viewRoots,
+    projectSettingsLocalShadowPath: options.projectSettingsLocalShadowPath,
+    fuseRootDir: options.fuseRootDir,
+  });
 
   await mkdir(runtimeRoot, { recursive: true });
   await writeFile(scriptPath, renderNamespaceBootstrapScript(), "utf8");
@@ -100,18 +110,7 @@ async function createMountNamespaceRuntime(
     "unshare",
     ["--mount", "--propagation", "private", "--", "/bin/sh", scriptPath],
     {
-      env: {
-        ...process.env,
-        CERELAY_RUNTIME_ROOT: runtimeRoot,
-        CERELAY_READY_FILE: readyFile,
-        CERELAY_HOME_DIR: clientHomeDir,
-        CERELAY_WORK_DIR: options.cwd,
-        CERELAY_VIEW_ROOTS: viewRoots.join(":"),
-        CERELAY_SHARED_CLAUDE_DIR: process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude",
-        CERELAY_SHARED_CLAUDE_JSON: process.env.CERELAY_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
-        CERELAY_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
-        CERELAY_FUSE_ROOT: options.fuseRootDir || "",
-      },
+      env: mountEnv,
       stdio: ["ignore", "ignore", "pipe"],
     }
   );
@@ -228,6 +227,41 @@ function collectViewRoots(...paths: string[]): string[] {
   ));
 }
 
+interface BuildMountNamespaceEnvOptions {
+  runtimeRoot: string;
+  readyFile: string;
+  cwd: string;
+  clientHomeDir: string;
+  viewRoots: string[];
+  projectSettingsLocalShadowPath?: string;
+  fuseRootDir?: string;
+}
+
+function buildMountNamespaceEnv(
+  options: BuildMountNamespaceEnvOptions
+): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    CERELAY_RUNTIME_ROOT: options.runtimeRoot,
+    CERELAY_READY_FILE: options.readyFile,
+    CERELAY_HOME_DIR: options.clientHomeDir,
+    CERELAY_WORK_DIR: options.cwd,
+    CERELAY_VIEW_ROOTS: options.viewRoots.join(":"),
+    CERELAY_ANCESTOR_DIRS: computeAncestorChain(options.cwd, options.clientHomeDir).join(":"),
+    CERELAY_SHARED_CLAUDE_DIR: process.env.CERELAY_SHARED_CLAUDE_DIR || "/home/node/.claude",
+    CERELAY_SHARED_CLAUDE_JSON: process.env.CERELAY_SHARED_CLAUDE_JSON || "/home/node/.claude.json",
+    CERELAY_PROJECT_SETTINGS_SOURCE: options.projectSettingsLocalShadowPath || "",
+    CERELAY_FUSE_ROOT: options.fuseRootDir || "",
+  };
+}
+
+/** @internal exported for testing */
+export function buildMountNamespaceEnvForTest(
+  options: BuildMountNamespaceEnvOptions
+): Record<string, string | undefined> {
+  return buildMountNamespaceEnv(options);
+}
+
 function topLevelName(filePath: string): string | null {
   if (!path.isAbsolute(filePath)) {
     return null;
@@ -285,6 +319,32 @@ if [ -n "\${CERELAY_FUSE_ROOT:-}" ] && [ -d "$CERELAY_FUSE_ROOT/home-claude" ]; 
   echo "[bootstrap] FUSE mode: binding project-claude" >&2
   mkdir -p "$CERELAY_WORK_DIR/.claude"
   mount --bind "$CERELAY_FUSE_ROOT/project-claude" "$CERELAY_WORK_DIR/.claude"
+
+  if [ -n "\${CERELAY_ANCESTOR_DIRS:-}" ]; then
+    echo "[bootstrap] binding ancestor CLAUDE.md files" >&2
+    _old_ifs="$IFS"
+    IFS=':'
+    _anc_level=0
+    for _anc_dir in $CERELAY_ANCESTOR_DIRS; do
+      [ -n "$_anc_dir" ] || continue
+      if [ "$_anc_dir" = "/" ]; then
+        echo "[bootstrap] WARN: ancestor dir is fs root, skip" >&2
+        _anc_level=$((_anc_level + 1))
+        continue
+      fi
+      mkdir -p "$_anc_dir"
+      for _anc_fname in CLAUDE.md CLAUDE.local.md; do
+        _anc_fuse="$CERELAY_FUSE_ROOT/cwd-ancestor-$_anc_level/$_anc_fname"
+        if [ -f "$_anc_fuse" ]; then
+          echo "[bootstrap] binding $_anc_dir/$_anc_fname" >&2
+          : > "$_anc_dir/$_anc_fname"
+          mount --bind "$_anc_fuse" "$_anc_dir/$_anc_fname"
+        fi
+      done
+      _anc_level=$((_anc_level + 1))
+    done
+    IFS="$_old_ifs"
+  fi
 else
   echo "[bootstrap] legacy mode" >&2
   # 传统模式：从容器内宿主机 bind mount 挂载
