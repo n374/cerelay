@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --import tsx --test --test-concurrency=1 phase-p0.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 phase-p0.test.ts phase-p1.test.ts",
+    "test:p0": "node --import tsx --test --test-concurrency=1 phase-p0.test.ts",
+    "test:p1": "node --import tsx --test --test-concurrency=1 phase-p1.test.ts",
     "test:meta": "node --import tsx --test --test-concurrency=1 --test-timeout=180000 phase-p0-meta.test.ts"
   },
   "devDependencies": {
