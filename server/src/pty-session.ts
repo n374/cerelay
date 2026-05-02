@@ -1,4 +1,5 @@
 import { type ChildProcess } from "node:child_process";
+import type { AdminEventBuffer } from "./admin-events.js";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -50,6 +51,11 @@ export interface ClaudePtySessionOptions {
    */
   getFileProxyStartupStats?: () => unknown;
   /**
+   * 结构化事件 ring buffer（测试用）。
+   * 仅在 CERELAY_ADMIN_EVENTS=true 时实际记录；关闭时 record 是 no-op。
+   */
+  adminEvents?: AdminEventBuffer;
+  /**
    * Plan D shadow MCP 注入开关。enabled=true 时 ClaudePtySession 会：
    * 1. 启动 per-session MCPIpcHost（unix socket）
    * 2. spawn CC 时追加 --mcp-config / --append-system-prompt / --disallowedTools
@@ -94,6 +100,7 @@ export class ClaudePtySession {
   private closed = false;
   private mcpIpcHost: MCPIpcHost | null = null;
   private readonly getFileProxyStartupStats?: () => unknown;
+  private readonly adminEvents?: AdminEventBuffer;
 
   constructor(options: ClaudePtySessionOptions) {
     this.id = options.id;
@@ -110,6 +117,7 @@ export class ClaudePtySession {
     this.shadowMcpEnabled = options.shadowMcp?.enabled ?? readShadowMcpEnvDefault();
     this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? resolveShadowMcpSocketDir();
     this.getFileProxyStartupStats = options.getFileProxyStartupStats;
+    this.adminEvents = options.adminEvents;
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -172,6 +180,12 @@ export class ClaudePtySession {
     this.log.info("PTY 子进程已 spawn", {
       pid: childPid,
       command: commandLine[0],
+    });
+    // emit: namespace runtime 已就绪（runtime 作为选项传入，此处 spawn 成功即可用）
+    this.adminEvents?.record("namespace.bootstrap.ready", this.id, {
+      cwd: this.cwd,
+      homeDir: this.clientHomeDir,
+      pid: childPid,
     });
 
     // 启动诊断：从 spawn 起每 5s 周期打印 "尚未首次 stdout"。让用户在长时间无输出
@@ -252,6 +266,11 @@ export class ClaudePtySession {
     this.child.on("error", (error) => {
       this.log.warn("Claude PTY 会话异常", {
         error: error.message,
+      });
+      // emit: spawn/bootstrap 失败
+      this.adminEvents?.record("namespace.bootstrap.failed", this.id, {
+        error: error.message,
+        cwd: this.cwd,
       });
       void this.transport.sendOutput(this.id, Buffer.from(`\r\n[cerelay] PTY error: ${error.message}\r\n`, "utf8")).catch(() => undefined);
     });
@@ -468,6 +487,7 @@ export class ClaudePtySession {
       inputSummary: summarizeUnknown(rewrittenInput),
     });
 
+    const startedAt = Date.now();
     try {
       await this.transport.sendToolCall(this.id, requestId, toolName, toolUseId, rewrittenInput);
       this.log.info("PTY tool 已发送到 Client", {
@@ -493,6 +513,12 @@ export class ClaudePtySession {
       outputSummary: summarizeUnknown(result.output),
     });
     await this.transport.sendToolCallComplete(this.id, requestId, toolName);
+    // emit: tool relay 完成（成功路径；relay 未抛异常即 ok）
+    this.adminEvents?.record("tool.relay.completed", this.id, {
+      tool: toolName,
+      durationMs: Date.now() - startedAt,
+      ok: true,
+    });
     return result;
   }
 }

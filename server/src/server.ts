@@ -46,6 +46,7 @@ import { CacheTaskManager } from "./cache-task-manager.js";
 import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
+import { createAdminEventBuffer, type AdminEventBuffer } from "./admin-events.js";
 import { createClaudeSessionRuntime, getClaudeSessionRuntimeRoot } from "./claude-session-runtime.js";
 import { ClaudePtySession } from "./pty-session.js";
 import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
@@ -100,6 +101,7 @@ export class CerelayServer {
   });
   private readonly cacheTaskManager: CacheTaskManager;
   private readonly cacheTaskSweepTimer: NodeJS.Timeout;
+  readonly adminEvents: AdminEventBuffer = createAdminEventBuffer();
 
   /**
    * Per-device FileAgent 单例池（plan §2 P6）。
@@ -422,6 +424,18 @@ export class CerelayServer {
       const ok = this.auth.revoke(tokenId);
       requestLog.debug("处理 Token 吊销请求", { tokenId, ok });
       this.sendJson(res, ok ? 200 : 404, { ok, tokenId });
+      return;
+    }
+
+    if (url.startsWith("/admin/events") && req.method === "GET") {
+      const u = new URL(url, "http://x");
+      const sessionId = u.searchParams.get("sessionId") ?? undefined;
+      const sinceStr = u.searchParams.get("since");
+      const since = sinceStr ? Number.parseInt(sinceStr, 10) : undefined;
+      const events = this.adminEvents.fetch({ sessionId, since });
+      requestLog.debug("返回 admin events", { sessionId, since, count: events.length });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ enabled: this.adminEvents.isEnabled(), events }));
       return;
     }
 
@@ -983,6 +997,7 @@ export class CerelayServer {
       clientHomeDir: message.homeDir,
       shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
       getFileProxyStartupStats: fileProxy ? () => fileProxy!.getStartupStats() : undefined,
+      adminEvents: this.adminEvents,
     });
 
     this.ptySessions.set(sessionId, {
