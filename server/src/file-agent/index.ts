@@ -2,13 +2,15 @@
 //
 // 当前实施进度（plan 2026-05-02-file-agent-and-config-preloader.md）：
 //   - Task 1: 接口骨架 ✓
-//   - Task 2: store + scope-adapter，read/stat/readdir 命中路径走 store ✓
-//   - Task 3: TTL 表（read/stat 命中时 bump expiresAt）✓
-//   - Task 4+ 后续: inflight / sync-coordinator / prefetch / gc
+//   - Task 2: store + scope-adapter，read/stat 命中路径走 store ✓
+//   - Task 3: TTL 表（命中时 bump expiresAt）✓
+//   - Task 4: in-flight 去重 + fetcher（miss 阻塞穿透）✓
+//   - Task 5+ 后续: sync-coordinator 实际接 client 协议 / prefetch / gc
 
 import type { ClientCacheStore } from "./store.js";
 import { ScopeAdapter } from "./scope-adapter.js";
 import { TtlTable } from "./ttl-table.js";
+import { InflightMap, inflightKey } from "./inflight.js";
 import type {
   FileAgentReadResult,
   FileAgentStatResult,
@@ -17,8 +19,21 @@ import type {
   PrefetchResult,
 } from "./types.js";
 
+/**
+ * FileAgent 内部用的 fetcher 接口。Task 4 阶段接受 stub，Task 5 sync-coordinator
+ * 实例满足该接口。
+ */
+export interface FileAgentFetcher {
+  /** miss 时穿透 client 拉取文件内容；返回 missing/skipped/file 三态。 */
+  fetchFile(absPath: string): Promise<FileAgentReadResult>;
+  /** miss 时穿透 client 拉取元数据。 */
+  fetchStat(absPath: string): Promise<FileAgentStatResult>;
+  /** miss 时穿透 client 拉取目录列表。 */
+  fetchReaddir(absPath: string): Promise<FileAgentReaddirResult>;
+}
+
 export interface FileAgentOptions {
-  /** Device 唯一标识；FileAgent 与 deviceId 一一绑定（plan §2 P6）。 */
+  /** Device 唯一标识（plan §2 P6）。 */
   deviceId: string;
   /** Client 侧 home 目录（用于 absPath ↔ scope+rel 适配）。 */
   homeDir: string;
@@ -26,12 +41,10 @@ export interface FileAgentOptions {
   store?: ClientCacheStore;
   /** 时间源，便于测试注入。 */
   now?: () => number;
+  /** miss 时穿透 client 的 fetcher。Task 5 时由 sync-coordinator 提供。 */
+  fetcher?: FileAgentFetcher;
 }
 
-/**
- * 校验 ttlMs 必须是有限正数（plan §3.5 拒绝条件 P4）。
- * 不论 op 命中还是 miss，入口都要校验——避免上层拿到 invalid ttl 后还能调到内部。
- */
 function assertValidTtl(ttlMs: number): void {
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
     throw new RangeError(
@@ -52,6 +65,8 @@ export class FileAgent {
   private readonly store: ClientCacheStore | null;
   private readonly ttl: TtlTable;
   private readonly now: () => number;
+  private readonly fetcher: FileAgentFetcher | null;
+  private readonly inflight = new InflightMap();
 
   constructor(options: FileAgentOptions) {
     this.deviceId = options.deviceId;
@@ -59,6 +74,7 @@ export class FileAgent {
     this.store = options.store ?? null;
     this.now = options.now ?? (() => Date.now());
     this.ttl = new TtlTable({ now: this.now });
+    this.fetcher = options.fetcher ?? null;
   }
 
   async read(absPath: string, ttlMs: number): Promise<FileAgentReadResult> {
@@ -69,7 +85,6 @@ export class FileAgent {
     if (this.store && sr) {
       const entry = await this.store.lookupEntry(this.deviceId, sr.scope, sr.relPath);
       if (entry) {
-        // 命中：bump TTL 后返回。
         this.ttl.bump(absPath, ttlMs);
         if (entry.skipped) {
           return { kind: "skipped", size: entry.size, mtime: entry.mtime };
@@ -88,10 +103,18 @@ export class FileAgent {
         }
       }
     }
-    // miss / store 不可用：Task 5 接 sync-coordinator 后再阻塞穿透。
-    throw new Error(
-      `FileAgent.read miss path not implemented yet (Task 5)`,
+    // miss：用 inflight 去重 + fetcher 穿透
+    if (!this.fetcher) {
+      throw new Error(
+        `FileAgent.read miss path not implemented yet (no fetcher; Task 5 接 sync-coordinator)`,
+      );
+    }
+    const result = await this.inflight.dedupe(inflightKey("read", absPath), () =>
+      this.fetcher!.fetchFile(absPath),
     );
+    // 命中（即便是 missing kind）也 bump TTL，避免短时间反复 miss 重复穿透
+    this.ttl.bump(absPath, ttlMs);
+    return result;
   }
 
   async stat(absPath: string, ttlMs: number): Promise<FileAgentStatResult> {
@@ -111,9 +134,16 @@ export class FileAgent {
         };
       }
     }
-    throw new Error(
-      `FileAgent.stat miss path not implemented yet (Task 5)`,
+    if (!this.fetcher) {
+      throw new Error(
+        `FileAgent.stat miss path not implemented yet (no fetcher; Task 5 接 sync-coordinator)`,
+      );
+    }
+    const result = await this.inflight.dedupe(inflightKey("stat", absPath), () =>
+      this.fetcher!.fetchStat(absPath),
     );
+    this.ttl.bump(absPath, ttlMs);
+    return result;
   }
 
   async readdir(
@@ -122,8 +152,17 @@ export class FileAgent {
   ): Promise<FileAgentReaddirResult> {
     assertValidTtl(ttlMs);
     assertAbsPath(absDir);
-    // readdir 命中需要从 manifest 全量遍历推断目录结构——Task 5+ 实现。
-    throw new Error("FileAgent.readdir not implemented yet (Task 5)");
+
+    if (!this.fetcher) {
+      throw new Error(
+        `FileAgent.readdir miss path not implemented yet (no fetcher; Task 5)`,
+      );
+    }
+    const result = await this.inflight.dedupe(inflightKey("readdir", absDir), () =>
+      this.fetcher!.fetchReaddir(absDir),
+    );
+    this.ttl.bump(absDir, ttlMs);
+    return result;
   }
 
   async prefetch(
@@ -138,9 +177,14 @@ export class FileAgent {
     // Task 7 GC 接入后会在这里关掉定时器。当前 noop。
   }
 
-  /** 测试 only：暴露 TTL 表中某 path 的 expiresAt，便于 bump 行为断言。 */
+  /** 测试 only：暴露 TTL 表中某 path 的 expiresAt。 */
   getTtlForTest(absPath: string): number | null {
     return this.ttl.getExpiresAt(absPath);
+  }
+
+  /** 测试 only：暴露 inflight 项数。 */
+  getInflightSizeForTest(): number {
+    return this.inflight.size();
   }
 }
 
@@ -154,3 +198,4 @@ export type {
 export { FileAgentUnavailableError } from "./types.js";
 export { ScopeAdapter } from "./scope-adapter.js";
 export { TtlTable } from "./ttl-table.js";
+export { InflightMap, inflightKey } from "./inflight.js";
