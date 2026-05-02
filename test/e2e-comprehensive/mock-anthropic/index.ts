@@ -29,10 +29,21 @@ interface ScriptStreamEvent {
   [key: string]: unknown;
 }
 
+/**
+ * INF-9: respond 支持两种模式。
+ * - stream: 正常 SSE 模型响应（P0/P1 大多数 case 用）
+ * - error: 直接返回 HTTP error（status + 可选 body 字符串/对象），不发 SSE
+ *   用于 G3-mock-5xx case：模拟 anthropic 上游 5xx 时 cerelay session 优雅终止
+ *   (server 拿到 5xx 应抛错并 cleanup,不应 partial stream 卡住)
+ */
+type ScriptResponse =
+  | { type: "stream"; events: ScriptStreamEvent[] }
+  | { type: "error"; status: number; body?: string | Record<string, unknown> };
+
 interface ScriptDef {
   name: string;
   match: ScriptMatch;
-  respond: { type: "stream"; events: ScriptStreamEvent[] };
+  respond: ScriptResponse;
 }
 
 interface ToolResultBlock {
@@ -178,6 +189,16 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
 }
 
 function streamScript(res: ServerResponse, script: ScriptDef, requestedModel?: string): void {
+  // INF-9: error 分支 — 直接返回 status + body,不发 SSE
+  if (script.respond.type === "error") {
+    const status = script.respond.status;
+    const body = script.respond.body ?? { error: { type: "api_error", message: `mock error ${status}` } };
+    const payload = typeof body === "string" ? body : JSON.stringify(body);
+    res.writeHead(status, { "content-type": typeof body === "string" ? "text/plain" : "application/json" });
+    res.end(payload);
+    return;
+  }
+
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache, no-transform",

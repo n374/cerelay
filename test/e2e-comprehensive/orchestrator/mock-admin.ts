@@ -1,5 +1,14 @@
 const BASE = process.env.MOCK_ANTHROPIC_URL || "http://mock-anthropic:8080";
 
+/**
+ * INF-9: respond 支持两种模式。
+ * - stream: 正常 SSE 模型响应
+ * - error: 直接返回 HTTP error (G3-mock-5xx case 用)
+ */
+export type ScriptResponse =
+  | { type: "stream"; events: Array<Record<string, unknown>> }
+  | { type: "error"; status: number; body?: string | Record<string, unknown> };
+
 export interface ScriptDef {
   name: string;
   match: {
@@ -7,7 +16,7 @@ export interface ScriptDef {
     predicate?: { path: string; op: "contains" | "equals"; value: string };
     headerEquals?: Record<string, string>;
   };
-  respond: { type: "stream"; events: Array<Record<string, unknown>> };
+  respond: ScriptResponse;
 }
 
 export interface ToolResultBlock {
@@ -103,6 +112,18 @@ export function scriptParallelToolUse(
     { type: "message_stop" },
   );
   return { type: "stream", events };
+}
+
+/**
+ * INF-9: 让 mock 直接返回 HTTP error,不走 SSE。
+ * - status: 5xx (G3 用 500/502/503),也可 4xx
+ * - body: string 或对象,默认 { error: { type: "api_error", message: ... } }
+ *
+ * 用于 G3-mock-5xx case:验 cerelay session 在 anthropic 上游 5xx 时
+ * 优雅终止 (server 应抛错 + cleanup,不应 partial stream 卡住或 OOM)
+ */
+export function scriptError(status: number, body?: string | Record<string, unknown>): ScriptDef["respond"] {
+  return body !== undefined ? { type: "error", status, body } : { type: "error", status };
 }
 
 export function scriptText(text: string): ScriptDef["respond"] {
