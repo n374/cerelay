@@ -16,10 +16,31 @@ import type {
 
 const log = createLogger("cache-sync");
 
-/** 单文件上限：超过则标记 skipped，仅同步元数据 */
-export const MAX_FILE_BYTES = 1 * 1024 * 1024;
-/** 单个 scope 总字节上限：超过则按 mtime 倒序截断 */
-export const MAX_SCOPE_BYTES = 100 * 1024 * 1024;
+/**
+ * INF-7: cache budget env override (仅 e2e 用)。
+ * - process 启动时读一次,运行期不变(简单 + 零热路径开销)
+ * - env 名字 CERELAY_E2E_* 前缀,生产 docker-compose.yml 不设 → fallback
+ * - 非法值 (NaN / <=0 / 非整数) → warn + fallback
+ *
+ * 用途:C4-truncated case 需要把 MAX_SCOPE_BYTES 从 100MB 降到 e2e 可控范围
+ * (如 256KB),让"scope > limit → 截断 + manifest.truncated=true" 路径在合理
+ * 时间内触发;100MB 在 e2e 启动期同步太慢,实际用例无法落地。
+ */
+function readPositiveBytesEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    log.warn("invalid cache budget env override; using fallback", { name, raw, fallback });
+    return fallback;
+  }
+  return n;
+}
+
+/** 单文件上限：超过则标记 skipped，仅同步元数据。e2e 可通过 CERELAY_E2E_MAX_FILE_BYTES 覆盖。 */
+export const MAX_FILE_BYTES = readPositiveBytesEnv("CERELAY_E2E_MAX_FILE_BYTES", 1 * 1024 * 1024);
+/** 单个 scope 总字节上限：超过则按 mtime 倒序截断。e2e 可通过 CERELAY_E2E_MAX_SCOPE_BYTES 覆盖。 */
+export const MAX_SCOPE_BYTES = readPositiveBytesEnv("CERELAY_E2E_MAX_SCOPE_BYTES", 100 * 1024 * 1024);
 /**
  * 保留给启动期 pipeline 的流控常量。
  * CacheTask v1 的 revision fencing 使 delta 实际上必须串行提交，但 UI 仍消费
