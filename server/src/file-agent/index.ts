@@ -269,6 +269,20 @@ export class FileAgent {
     return this.scopeAdapter.homeDir;
   }
 
+  /**
+   * Plan §9.1 #2 wiring：外部命中（如 FileProxyManager 通过共享 store 命中）通知
+   * FileAgent 续期 TTL。这让 FileAgent 的 GC 不会清掉正在被 FUSE 读的 path（即便
+   * 这些 path 没经 FileAgent.read 入口）。
+   *
+   * absPath 不在已知 scope 内 / ttlMs 非法时静默忽略（FUSE 路径调用频繁，不应抛错）。
+   */
+  bumpTtlForExternalHit(absPath: string, ttlMs: number): void {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
+    if (typeof absPath !== "string" || !absPath.startsWith("/")) return;
+    if (this.scopeAdapter.toScopeRel(absPath) === null) return;
+    this.ttl.bump(absPath, ttlMs);
+  }
+
   /** 测试 only：暴露 inflight 项数。 */
   getInflightSizeForTest(): number {
     return this.inflight.size();

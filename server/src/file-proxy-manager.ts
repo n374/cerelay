@@ -1504,6 +1504,9 @@ export class FileProxyManager {
           // Phase 5.2: server-side cache hit 刷 lastAccessedAt 防 aging 误清 (5s 防抖)
           const handPath = relPath ? path.join(clientRoot, relPath) : clientRoot;
           this.recordCacheHitAccess(handPath);
+          // Plan §9.1 #2 wiring：通知 FileAgent 续期 TTL（让 FileAgent 的 GC 不会清掉
+          // 正在被 FUSE 读的 path）。runtimeTtl=10min 与 plan §3.2 推荐值一致。
+          this.fileAgent?.bumpTtlForExternalHit(handPath, 10 * 60 * 1000);
           return;
         }
         readMissReason = result.reason;
