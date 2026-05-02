@@ -149,7 +149,7 @@ emit 仅在 `adminEvents` 与 `sessionId` 均注入时触发（guard: `if (admin
 
 新增 admin event:`session.bootstrap.plan`
 
-emit 位置:session 创建期间(`:1145/1204` 附近,`createClaudeSessionRuntime` 调用前后)
+emit 位置:session 创建期间,`createClaudeSessionRuntime` 调用后、`new ClaudePtySession` 之前(描述性锚点;具体行号会随后续 PR 漂移,T7 实际落在 `server.ts:1246`)
 
 detail:
 ```typescript
