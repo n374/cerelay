@@ -79,9 +79,10 @@ describe("FileAgent 接口契约（Task 1 骨架）", () => {
     assert.strictEqual(typeof agent.prefetch, "function");
     assert.strictEqual(agent.prefetch.length, 2);
     const items: PrefetchItem[] = [];
+    // Task 6 起 prefetch 已实现；不传 store 时拒绝（语义清晰）
     await assert.rejects(
       () => agent.prefetch(items, 1000),
-      /not implemented/i,
+      /需要 store 配置/i,
     );
   });
 

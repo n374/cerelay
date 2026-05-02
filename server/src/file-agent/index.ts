@@ -154,11 +154,26 @@ export class FileAgent {
   }
 
   async prefetch(
-    _items: PrefetchItem[],
+    items: PrefetchItem[],
     ttlMs: number,
   ): Promise<PrefetchResult> {
     assertValidTtl(ttlMs);
-    throw new Error("FileAgent.prefetch not implemented yet (Task 6)");
+    if (!this.store) {
+      // 没 store 退化为只调 fetcher 不落 cache（语义不对，所以拒绝）
+      throw new Error(
+        "FileAgent.prefetch 需要 store 配置（用于 hit 检查 + fetcher 落 cache）",
+      );
+    }
+    const { runPrefetch } = await import("./prefetch.js");
+    return runPrefetch(items, ttlMs, {
+      deviceId: this.deviceId,
+      store: this.store,
+      scopeAdapter: this.scopeAdapter,
+      ttl: this.ttl,
+      inflight: this.inflight,
+      fetcher: this.fetcher,
+      now: this.now,
+    });
   }
 
   async close(): Promise<void> {
