@@ -176,21 +176,28 @@ export class SyncCoordinator implements FileAgentFetcher {
   // 内部 helper
   // ============================================================
 
+  /**
+   * watcher delta 命中正在 in-flight 的 path 时的处理策略（明示契约，避免 P9 误读）：
+   *
+   * **不强制清除 inflight**——active 的 fetcher promise 让它按它发起时的 snapshot
+   * 正常 resolve；下一次 read 因 store 已被 watcher delta 更新，会从 store 直接命中
+   * 新内容（绕过 inflight）。
+   *
+   * 这种语义对最终一致性（plan §3.6 P10）安全：watcher delta apply 已经把新版本写入
+   * store；新到的 read 走"先查 store hit、再 fallback 到 inflight"路径，store hit
+   * 拿到的是新版本 → 不复用旧 fetcher 的 stale 结果。
+   *
+   * 此处仅做 telemetry，便于诊断"watcher 与 fetch 时序竞态"频率。
+   */
   private invalidateInflightForPath(absPath: string): void {
-    // 三个 op 的 inflight key 都尝试清除（不存在则 no-op）
     const keys = [
       inflightKey("read", absPath),
       inflightKey("stat", absPath),
       inflightKey("readdir", absPath),
     ];
-    // InflightMap 没有 delete 方法（dedupe 内部 finally 自动清）；此处用 has 判断
-    // 仅做 telemetry，不强制清除——active 的 fetcher promise 让它正常 resolve。
-    // 这种语义让"watcher 推送的内容比 fetcher 早到达"的场景更安全：fetcher 拿到的
-    // 仍是它发起 fetch 时的 client 状态；下一次 read 因 store 已被 watcher 更新
-    // 会命中新内容。
     for (const key of keys) {
       if (this.inflight.has(key)) {
-        log.debug("watcher delta 命中正在 in-flight 的 path", {
+        log.debug("watcher delta 命中正在 in-flight 的 path（fetcher 让它按 snapshot resolve）", {
           deviceId: this.deviceId,
           absPath,
           key,

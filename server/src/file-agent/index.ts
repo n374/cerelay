@@ -228,6 +228,11 @@ export class FileAgent {
     return this.ttl.getExpiresAt(absPath);
   }
 
+  /** 暴露 ScopeAdapter 内固化的 homeDir。供 server 层判断同 deviceId 是否需要重建实例。 */
+  getHomeDirForTest(): string {
+    return this.scopeAdapter.homeDir;
+  }
+
   /** 测试 only：暴露 inflight 项数。 */
   getInflightSizeForTest(): number {
     return this.inflight.size();

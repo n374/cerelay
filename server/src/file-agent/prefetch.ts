@@ -62,7 +62,7 @@ async function flattenItems(
       }
       return;
     }
-    // dir-recursive / dir-shallow：调 fetchReaddir 展开
+    // dir-recursive / dir-shallow：调 fetchReaddir 展开本层
     if (!fetcher) {
       failed.push({
         absPath,
@@ -81,37 +81,34 @@ async function flattenItems(
       return;
     }
     if (dir.kind === "missing") return;
+
+    // dir-recursive: 子项可能是 file 也可能是 dir。本期约定通过 stat 探测（与 readdir
+    // 比代价低；client 端的 fetchStat 已存在）。stat 失败则把 child 当 file 处理。
     for (const name of dir.entries) {
       const child = path.join(absPath, name);
-      // dir-shallow 的子项当作 file 处理（不下钻）；dir-recursive 把子项当 dir-recursive 继续展开
-      const childKind: PrefetchItem["kind"] = kind === "dir-recursive" ? "dir-recursive" : "file";
-      // 但 dir-recursive 子项可能是 file 或 dir，无法分辨——我们当作"试探性 dir-recursive"，
-      // fetchReaddir 失败时退化为 file（记 failed 但保留 file 处理）。
-      // 简化：dir-recursive 模式下都尝试 fetchReaddir；如果 fetchReaddir 返回 missing 就当 file
-      if (kind === "dir-recursive") {
-        // 先当 dir-recursive 试探性展开；若 fetchReaddir 返 missing 表示是文件
-        const subFailed: Array<{ absPath: string; reason: string }> = [];
-        let probed;
-        try {
-          probed = await fetcher.fetchReaddir(child);
-        } catch {
-          // 不知是文件还是错误——保守当文件处理
-          if (!seen.has(child)) {
-            seen.add(child);
-            filePaths.push(child);
-          }
-          continue;
+      if (kind === "dir-shallow") {
+        if (!seen.has(child)) {
+          seen.add(child);
+          filePaths.push(child);
         }
-        if (probed.kind === "dir") {
-          await walk(child, "dir-recursive", depth + 1);
-        } else {
-          if (!seen.has(child)) {
-            seen.add(child);
-            filePaths.push(child);
-          }
+        continue;
+      }
+      // dir-recursive：通过 stat 判断 child 是 dir 还是 file（不复用 readdir 探测，避免
+      // 大目录场景下重复 fetchReaddir）
+      let st;
+      try {
+        st = await fetcher.fetchStat(child);
+      } catch {
+        // stat 失败保守当文件
+        if (!seen.has(child)) {
+          seen.add(child);
+          filePaths.push(child);
         }
+        continue;
+      }
+      if (st.kind === "dir") {
+        await walk(child, "dir-recursive", depth + 1);
       } else {
-        // dir-shallow：所有子项当 file
         if (!seen.has(child)) {
           seen.add(child);
           filePaths.push(child);

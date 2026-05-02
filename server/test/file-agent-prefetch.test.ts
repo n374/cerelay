@@ -83,6 +83,10 @@ function makeMockFetcher(opts: {
       }
     },
     fetchStat: async (absPath) => {
+      // 如果在 dirs 表里 → dir
+      if (opts.dirs && absPath in opts.dirs) {
+        return { kind: "dir", mtime: 1 };
+      }
       const content = opts.files?.[absPath];
       if (content === undefined) return { kind: "missing" };
       return {

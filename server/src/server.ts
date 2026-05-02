@@ -548,19 +548,35 @@ export class CerelayServer {
   /**
    * 获取或创建 per-device FileAgent 单例（plan §2 P6 + Task 10）。
    * 同 deviceId 多 session 共享同一 FileAgent；shutdown() 时统一关闭。
+   *
+   * homeDir 一致性：FileAgent.ScopeAdapter 在构造时固化 homeDir；如果同 deviceId
+   * 后续 session 上报不同 homeDir，应警告且重建（避免 scope 映射错位）。
    */
   private getOrCreateFileAgent(deviceId: string, homeDir: string): FileAgent {
-    let agent = this.fileAgents.get(deviceId);
-    if (!agent) {
-      agent = new FileAgent({
-        deviceId,
-        homeDir,
-        store: this.cacheStore,
-        // 默认周期 GC 60s（DEFAULT_GC_INTERVAL_MS）
-      });
-      this.fileAgents.set(deviceId, agent);
-      log.debug("创建 FileAgent 单例", { deviceId, homeDir });
+    const existing = this.fileAgents.get(deviceId);
+    if (existing) {
+      // 校验 homeDir 一致：FileAgent 没暴露 scopeAdapter 内的 homeDir，但通过
+      // ScopeAdapter 的 toAbsPath('claude-json', '') 反推。如果不一致 → 关闭旧实例并重建。
+      const existingHome = existing.getHomeDirForTest();
+      if (existingHome !== homeDir) {
+        log.warn(
+          "同 deviceId 后续 session 上报了不同 homeDir，重建 FileAgent",
+          { deviceId, existingHome, newHome: homeDir } as Record<string, unknown>,
+        );
+        existing.close().catch(() => undefined);
+        this.fileAgents.delete(deviceId);
+      } else {
+        return existing;
+      }
     }
+    const agent = new FileAgent({
+      deviceId,
+      homeDir,
+      store: this.cacheStore,
+      // 默认周期 GC 60s（DEFAULT_GC_INTERVAL_MS）
+    });
+    this.fileAgents.set(deviceId, agent);
+    log.debug("创建 FileAgent 单例", { deviceId, homeDir } as Record<string, unknown>);
     return agent;
   }
 

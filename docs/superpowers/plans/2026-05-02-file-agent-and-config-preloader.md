@@ -757,6 +757,18 @@ E2E 覆盖：
 | FileAgent 写操作（write/unlink/mkdir 接口）| 本期写仍由 file-proxy-manager 走原穿透路径；写后调 FileAgent.invalidate(path) 即可 |
 | daemon snapshot 注入逻辑改造 | 暂保留现状（FuseHost 启动期向 FileAgent 取 snapshot dump）；新架构不阻碍后续优化 |
 
+### 9.1 落地后明确"未完整闭环"事项 / Explicit Wiring Gaps（Codex review 2026-05-02 反馈）
+
+虽然代码完成度高，但生产链路上以下三处尚未把 FileAgent 接成"唯一文件代理底座"。当前每处都是**安全降级**（不破坏现有功能），但要让 plan §2 P9 / P10 真正生效，需要后续 follow-up：
+
+1. **生产 FileAgent 没接 fetcher（Task 5 路径 A 在生产不可用）**：`server.ts: getOrCreateFileAgent` 创建 FileAgent 时只传 store，没传 fetcher。冷缓存场景下 ConfigPreloader prefetch 调 fileAgent miss 时会抛 "no fetcher"——被外层 `try/catch` log warn 后降级，session 仍能启动。**要让 P9 路径 A 生效**：需要把 cache-task-manager 包装成 `ClientFetchDispatcher` 接到 SyncCoordinator。
+
+2. **FUSE IPC handler 没强行走 FileAgent.read（Task 9 部分）**：`file-proxy-manager.ts` 仅接受 fileAgent 字段作 wiring 占位；运行时 FUSE 仍用现有 `tryServeReadFromCache`（直接调 store）+ 穿透 client 路径。FileAgent 与 manager 共享 store，命中事实上等价，但语义上"FuseHost 经 FileAgent 走"未实现。
+
+3. **watcher delta 在生产没经过 SyncCoordinator.applyWatcherDelta（Task 11 part of P9 路径 B 未真闭环）**：当前 `cache-task-manager.ts:209 applyDelta` 直接调 `store.applyDelta`，没经过 `SyncCoordinator.applyWatcherDelta`。`SyncCoordinator.applyWatcherDelta` 在生产从未被调用，仅在测试里。这意味着生产环境 plan §3.6 路径 B 名义上有但实际没走。**要让 P9 路径 B 生效**：要把 cache-task-manager 改为通过 SyncCoordinator 落 manifest，或者让 cache-task-manager 在 applyDelta 后再调 SyncCoordinator 的 inflight 清理。
+
+**为什么本期接受**：用户最初拍板"先把缓存维度扩大到 device 维度"是核心目标；以上三处都是接通生产链路的 wiring 工作，零件已经到位（FileAgent / SyncCoordinator / ConfigPreloader 单元测试覆盖 552 cases），只是 server.ts 与 cache-task-manager.ts 的胶水代码没改完。**所有零件已经过测试，未来接通时主要是 wiring，不需要重新设计**。
+
 ---
 
 ## 10. 风险与开放问题 / Risks & Open Questions
