@@ -1613,14 +1613,18 @@ export class FileProxyManager {
         detail?: Record<string, unknown>;
       };
       if (typeof evt.kind === "string" && evt.kind.length > 0) {
+        // clientCwd 由 server 注入(daemon 无此上下文)。
+        // clientPath 优先用 daemon 提供的 fusePath(T5 后会携带);
+        //           fallback 用 root + relPath 拼;都无则 undefined。
+        //           ⚠️ 当前 daemon 尚未发 fusePath(T5 前),三元第一分支
+        //              永远 false,fallback 是唯一生效路径。T5 落地后才走第一分支。
+        // ⚠️ ...evt.detail 展开后追加 clientCwd / clientPath 会覆盖 daemon 同名字段。
+        //    daemon 不知道 server 侧 clientCwd,理论上不会发——但若 future
+        //    daemon 误发(比如字段拼错),server 端会硬覆盖,日志/告警会丢。
+        //    这是有意的 prefer-server 设计:daemon 的 cwd/path 无参考价值。
         this.adminEvents?.record(evt.kind, this.sessionId, {
           ...evt.detail,
           clientCwd: this.clientCwd,
-          // 优先用 daemon 提供的 fusePath（T5 后会携带）；
-          // fallback 用 root + relPath 拼；都没有则 undefined。
-          // server 侧是 source of truth——daemon 不知道 clientCwd，
-          // 理论上 daemon 不会主动发 clientCwd / clientPath，
-          // 但即使 daemon 带了，server 侧也以 prefer-server 语义覆盖。
           clientPath: typeof evt.detail?.fusePath === "string"
             ? evt.detail.fusePath
             : (typeof evt.detail?.root === "string" && typeof evt.detail?.relPath === "string"
@@ -1752,6 +1756,8 @@ export class FileProxyManager {
     // 与 perforatedPaths 不同：perforatedPaths 只记首次出现，admin event 每次穿透都 emit
     // ——B5-negative-cache 需要按"两次同 path 是否都穿透"做精确计数判断，必须每次都记录。
     // perforationCount 是同 (op, root, relPath) 已累计的穿透次数（含本次）。
+    // 注:此处 root / relPath 是 L1655 从 req 析构而来,等价于 req.root / req.relPath
+    // (后两处 settings.json passthrough emit 在析构作用域外,直接用 req.root / req.relPath)。
     this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
       op: req.op,
       root,
@@ -1904,6 +1910,8 @@ export class FileProxyManager {
         // 必须 emit `file-proxy.client.requested` 才能让 B5/E1 类断言看到完整穿透流。
         // 与主路径不同的是 settings.json 走 silent sendClientRequest，绕过
         // perforatedPaths 段的 emit；本处显式补 emit + reason 标识区分。
+        // 注:getattr emit 仅在 cache miss(fullSize === null)时出现;下面 read emit
+        // 在 fullSize > 0 时必然出现。两者不是严格 pair——不要因看似 redundant 而合并。
         this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
           op: "getattr",
           root: req.root,
