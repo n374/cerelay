@@ -25,11 +25,20 @@ interface TestToggles {
    * `_old_ifs="$IFS"`（meta-ifs-bug 用，触发 set -u + IFS unset 退出）。
    */
   injectIfsBug: boolean;
+  /**
+   * INF-8：tool relay 超时注入。null = 不注入(沿用 DEFAULT_TOOL_TIMEOUT_MS=120s);
+   * { ms: 50, toolName: "mcp__cerelay__bash" } = 强制下次 toolName 匹配的工具
+   * relay 等待 50ms 后超时(给 G1-tool-timeout 用)。
+   * - toolName 缺省 = 任意工具都匹配(慎用)
+   * - toolName 提供 = 精确匹配，全等比较
+   */
+  injectToolTimeout: { ms: number; toolName?: string } | null;
 }
 
 const state: TestToggles = {
   disableRedact: false,
   injectIfsBug: false,
+  injectToolTimeout: null,
 };
 
 /**
@@ -62,6 +71,7 @@ export function setTestToggles(patch: Partial<TestToggles>): TestToggles {
   assertWritable();
   if (patch.disableRedact !== undefined) state.disableRedact = patch.disableRedact;
   if (patch.injectIfsBug !== undefined) state.injectIfsBug = patch.injectIfsBug;
+  if (patch.injectToolTimeout !== undefined) state.injectToolTimeout = patch.injectToolTimeout;
   return { ...state };
 }
 
@@ -69,4 +79,5 @@ export function resetTestToggles(): void {
   assertWritable();
   state.disableRedact = false;
   state.injectIfsBug = false;
+  state.injectToolTimeout = null;
 }

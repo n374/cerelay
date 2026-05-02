@@ -6,7 +6,8 @@ import path from "node:path";
 import process from "node:process";
 import type { ClaudeSessionRuntime, SpawnOptions, SpawnedProcess } from "./claude-session-runtime.js";
 import { createLogger, type Logger } from "./logger.js";
-import { ToolRelay, type RemoteToolResult } from "./relay.js";
+import { ToolRelay, type RemoteToolResult, type CreatePendingOptions } from "./relay.js";
+import { getTestToggles } from "./test-toggles.js";
 import { randomUUID } from "node:crypto";
 import { PYTHON_PTY_HOST_SCRIPT } from "./pty-host-script.js";
 import {
@@ -96,7 +97,10 @@ export class ClaudePtySession {
   private readonly shouldRouteToolToClient: (toolName: string) => boolean;
   private readonly shadowMcpEnabled: boolean;
   private readonly shadowMcpSocketDir: string;
-  private readonly relay = new ToolRelay();
+  // INF-8: relay 在 constructor 内初始化（field initializer 早于 this.adminEvents
+  // 赋值，会拿到 undefined）。带 sessionId + adminEvents 后，timeout fired 时
+  // 自动 emit `tool.timeout.fired` admin event。
+  private readonly relay: ToolRelay;
   private readonly log: Logger;
   private child: ChildProcess | null = null;
   private helperDir: string | null = null;
@@ -125,6 +129,10 @@ export class ClaudePtySession {
     this.shadowMcpSocketDir = options.shadowMcp?.socketDir ?? resolveShadowMcpSocketDir();
     this.getFileProxyStartupStats = options.getFileProxyStartupStats;
     this.adminEvents = options.adminEvents;
+    this.relay = new ToolRelay({
+      sessionId: this.id,
+      adminEvents: this.adminEvents,
+    });
     this.log = log.child({
       sessionId: this.id,
       cwd: this.cwd,
@@ -489,7 +497,18 @@ export class ClaudePtySession {
       clientCwd: this.cwd,
     });
     const requestId = `${origin}-${this.id}-${randomUUID()}`;
-    const pending = this.relay.createPending(requestId, toolName);
+
+    // INF-8: e2e fault injection 钩子。如果 testToggles.injectToolTimeout 在生效
+    // 且 toolName 匹配（缺省 = 任意工具），用注入的短超时覆盖 DEFAULT_TOOL_TIMEOUT_MS
+    // = 120s，让 G1-tool-timeout case 能在合理时间内触发 timeout 路径。
+    // 生产路径 testToggles.injectToolTimeout 永远是 null（test-toggles.ts I3 加固），
+    // 此处永远走默认超时。
+    const toggle = getTestToggles().injectToolTimeout;
+    const createOpts: CreatePendingOptions = {};
+    if (toggle && (toggle.toolName === undefined || toggle.toolName === toolName)) {
+      createOpts.timeoutMsOverride = toggle.ms;
+    }
+    const pending = this.relay.createPending(requestId, toolName, createOpts);
     void pending.catch(() => undefined);
 
     this.log.info("PTY tool 准备转发到 Client", {

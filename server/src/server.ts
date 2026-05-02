@@ -457,6 +457,8 @@ export class CerelayServer {
           const body = (bodyStr ? JSON.parse(bodyStr) : {}) as Partial<{
             disableRedact: boolean;
             injectIfsBug: boolean;
+            /** INF-8: { ms, toolName? } | null */
+            injectToolTimeout: { ms: number; toolName?: string } | null;
             reset: boolean;
           }>;
           if (body.reset) {
@@ -799,6 +801,24 @@ export class CerelayServer {
             const ptyEntry = this.ptySessions.get(sessionId);
             if (ptyEntry) {
               clientLog.debug("Client 断开时销毁 PTY session", { sessionId });
+              // INF-8：emit `session.disconnected` admin event。
+              // 在 destroyPtySession 之前 emit 而非之后——destroy 同步触发 cleanup
+              // (rejectAllPending / FUSE shutdown / namespace runtime dispose),
+              // 此时 sessionId 仍能查到上下文。
+              //
+              // **作用域**（Codex PR1 终审 nit #9）：当前实现**只覆盖
+              // `client_close` 路径**，即 ws socket 在 server 端 `close` 事件触发
+              // (client 主动断 ws / 网络断)。其它 destroy 路径目前不 emit：
+              //   - server shutdown (server.ts:272 destroyPtySession w/ "服务器关闭")
+              //   - PTY 进程退出 (server.ts:1089 destroyPtySession w/ "PTY 进程退出")
+              //   - client 主动 close message (server.ts:1204 destroyPtySession w/ "客户端主动关闭")
+              // G2-client-disconnect case 走 client_close 路径，本实现已够。
+              // 若未来 G2 扩展或新增 case 需要其他 reason，可把 emit 下沉到
+              // destroyPtySession 内并按 reason 字段区分。
+              this.adminEvents?.record("session.disconnected", sessionId, {
+                clientId,
+                reason: "client_close",
+              });
               this.destroyPtySession(sessionId, ptyEntry, "Client 断开");
             }
           }
