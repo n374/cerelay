@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { mockAdmin, scriptToolUse, scriptText } from "./mock-admin.js";
 import { clients } from "./clients.js";
 import { serverEvents, cacheAdmin, testToggles } from "./server-events.js";
+import { assertF3Isolation } from "./assert-f3-isolation.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
 
 function clientCwd(caseId: string): string {
@@ -182,19 +183,30 @@ test("meta-deviceid-collision: client-a / client-b 共用 deviceId → cache 串
   assert.equal(resA.deviceId, collidedDeviceId);
   assert.equal(resB.deviceId, collidedDeviceId);
 
-  // 在 server 端两侧实际指向同一个 manifest
+  // 反向断言（C4 mirror）：同 deviceId 共享 manifest 时，assertF3Isolation 应该 throw。
+  // 主套件 F3 用同一个 helper 期望 pass；本 meta 期望 throw——这样两边共享一份不变量
+  // 定义，meta 能反向证明主断言真的捕获 collision（而不只是巧合通过）。
+  let isolationError: Error | null = null;
+  try {
+    await assertF3Isolation({
+      deviceIdA: resA.deviceId,
+      deviceIdB: resB.deviceId,
+      contentA: "marker-a-meta-coll",
+      contentB: "marker-b-meta-coll",
+    });
+  } catch (err) {
+    isolationError = err as Error;
+  }
+  assert.ok(
+    isolationError !== null,
+    "meta-deviceid-collision 套件失效：deviceId 强制 collision 后 assertF3Isolation 仍 pass，反向断言失效",
+  );
+
+  // 旁证：summary 也应该指向同一 manifest（revision 必然相同）
   const sumA = await cacheAdmin.summary(resA.deviceId);
   const sumB = await cacheAdmin.summary(resB.deviceId);
-  assert.equal(
-    sumA.deviceId,
-    sumB.deviceId,
-    "deviceId collision: 两侧应该指向同一 manifest",
-  );
-  assert.equal(
-    sumA.revision,
-    sumB.revision,
-    "deviceId collision: 同 manifest 必须 revision 一致",
-  );
+  assert.equal(sumA.deviceId, sumB.deviceId, "两侧 deviceId 等于强制值");
+  assert.equal(sumA.revision, sumB.revision, "同 manifest revision 必然相等");
 
   await cleanupFixture(caseIdA);
   await cleanupFixture(caseIdB);
