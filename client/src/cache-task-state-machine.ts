@@ -465,6 +465,9 @@ export class CacheTaskStateMachine {
       type: "cache_task_sync_complete",
       assignmentId: message.assignmentId,
       baseRevision: this.revision,
+      scopeTruncated: Object.fromEntries(
+        initialResult.summaries.map((summary) => [summary.scope, summary.truncated]),
+      ),
       scannedAt: scanStartedAt,
     };
     await this.sendMessage(syncComplete);

@@ -379,6 +379,7 @@ export interface CacheTaskSyncComplete {
    * Server 接受 baseRevision <= task.revision，只在 baseRevision 反常地超过当前 task.revision 时要求 resync。
    */
   baseRevision: number;
+  scopeTruncated?: Partial<Record<CacheScope, boolean>>;
   scannedAt: number;
 }
 

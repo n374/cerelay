@@ -305,6 +305,9 @@ export class CacheTaskManager {
       if (task.revision < message.baseRevision) {
         return this.reassignActiveClient(task, clientId, "resync");
       }
+      if (message.scopeTruncated) {
+        await this.store.updateScopeTruncated(task.deviceId, message.scopeTruncated);
+      }
       task.phase = "ready";
       log.info("cache task 进入 ready 状态", {
         deviceId: task.deviceId,

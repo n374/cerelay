@@ -132,6 +132,31 @@ export class ClientCacheStore {
     });
   }
 
+  async updateScopeTruncated(
+    deviceId: string,
+    scopeTruncated: Partial<Record<CacheScope, boolean>>,
+  ): Promise<void> {
+    return this.withManifestLock(deviceId, async () => {
+      const manifest = await this.loadManifest(deviceId);
+      let changed = false;
+      for (const [scope, truncated] of Object.entries(scopeTruncated) as Array<
+        [CacheScope, boolean]
+      >) {
+        const scopeData = manifest.scopes[scope];
+        if (!scopeData || typeof truncated !== "boolean") {
+          continue;
+        }
+        if (scopeData.truncated !== truncated) {
+          scopeData.truncated = truncated;
+          changed = true;
+        }
+      }
+      if (changed) {
+        await writeManifestAtomic(this.manifestPath(deviceId), manifest);
+      }
+    });
+  }
+
   /** 根据 (deviceId, sha256) 定位 blob 文件路径。 */
   blobPath(deviceId: string, sha256: string): string {
     return path.join(this.deviceDir(deviceId), "blobs", sha256);
