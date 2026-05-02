@@ -133,3 +133,414 @@ test("B4-ancestor-claudemd: ancestor 段 bootstrap 不在 set -u 下崩 + ancest
 
   await cleanupFixture(caseId);
 });
+
+// ============================================================
+// A2-fs-rwe：mcp__cerelay__write → read → edit 三件套对临时 cwd 内文件
+// 守护 fs 工具协议、Edit old_string 唯一性、跨工具内容流转
+// ============================================================
+test("A2-fs-rwe: write → read → edit 三件套对临时文件", async () => {
+  const caseId = "case-a2";
+  await writeFixture(caseId, {
+    ".keep": "",
+  });
+
+  const cwd = clientCwd(caseId);
+  const targetAbs = `${cwd}/note.txt`;
+  const initial = "hello-from-a2-write";
+  const edited = "edited-by-a2";
+
+  // turn 1: write
+  await mockAdmin.loadScript({
+    name: "p0-a2-turn1-write",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__write",
+      toolUseId: "toolu_a2_01",
+      input: { file_path: targetAbs, content: initial },
+    }),
+  });
+  // turn 2: read
+  await mockAdmin.loadScript({
+    name: "p0-a2-turn2-read",
+    match: { turnIndex: 2 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__read",
+      toolUseId: "toolu_a2_02",
+      input: { file_path: targetAbs },
+    }),
+  });
+  // turn 3: edit
+  await mockAdmin.loadScript({
+    name: "p0-a2-turn3-edit",
+    match: { turnIndex: 3 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__edit",
+      toolUseId: "toolu_a2_03",
+      input: { file_path: targetAbs, old_string: initial, new_string: edited },
+    }),
+  });
+  // turn 4: text final
+  await mockAdmin.loadScript({
+    name: "p0-a2-turn4-final",
+    match: { turnIndex: 4 },
+    respond: scriptText("rwe done"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "write/read/edit a note [A2-MARKER]",
+    cwd,
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 4, `expected 4 turns, got ${cap.length}`);
+
+  // 注意：mock 的 flattenToolResults 累加所有历史 tool_result，因此 cap[N].toolResults[0]
+  // 永远是最早一条；要拿当前 turn 对应的最新结果用 .at(-1)。
+  // turn 2 携带 turn 1 的 write 结果
+  const writeResult = cap[1].toolResults.at(-1);
+  assert.ok(writeResult, "expected write tool_result on turn 2");
+  assert.equal(writeResult.is_error, false, "write should succeed");
+  assert.equal(writeResult.tool_use_id, "toolu_a2_01");
+
+  // turn 3 携带 turn 2 的 read 结果，content 必须含写入的字串
+  const readResult = cap[2].toolResults.at(-1);
+  assert.ok(readResult, "expected read tool_result on turn 3");
+  assert.equal(readResult.is_error, false, "read should succeed");
+  assert.equal(readResult.tool_use_id, "toolu_a2_02");
+  assert.match(readResult.content, new RegExp(initial), "read should reflect what was written");
+
+  // turn 4 携带 turn 3 的 edit 结果
+  const editResult = cap[3].toolResults.at(-1);
+  assert.ok(editResult, "expected edit tool_result on turn 4");
+  assert.equal(editResult.is_error, false, "edit should succeed");
+  assert.equal(editResult.tool_use_id, "toolu_a2_03");
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// A3-search：mcp__cerelay__glob + mcp__cerelay__grep 在 fixture 项目里
+// 守护 search 工具的 path normalize、glob 语义
+// ============================================================
+test("A3-search: glob + grep 在多文件 fixture 内", async () => {
+  const caseId = "case-a3";
+  await writeFixture(caseId, {
+    "README.md": "# Project\nTODO: top-level\n",
+    "docs/guide.md": "# Guide\nNo todos here.\n",
+    "src/main.ts": "// TODO: implement main\nconsole.log('main')\n",
+    "src/util.ts": "// utility\nexport const x = 1\n",
+  });
+
+  const cwd = clientCwd(caseId);
+
+  // turn 1: glob '*.md'
+  // 注意：client 的 glob 实现（client/src/tools/search.ts）不支持 ** 跨目录，
+  // 但走 basename 匹配，所以 pattern '*.md' 就能命中任意深度的 .md 文件。
+  await mockAdmin.loadScript({
+    name: "p0-a3-turn1-glob",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__glob",
+      toolUseId: "toolu_a3_01",
+      input: { pattern: "*.md", path: cwd },
+    }),
+  });
+  // turn 2: grep 'TODO'
+  await mockAdmin.loadScript({
+    name: "p0-a3-turn2-grep",
+    match: { turnIndex: 2 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__grep",
+      toolUseId: "toolu_a3_02",
+      input: { pattern: "TODO", path: cwd },
+    }),
+  });
+  // turn 3: text final
+  await mockAdmin.loadScript({
+    name: "p0-a3-turn3-final",
+    match: { turnIndex: 3 },
+    respond: scriptText("search done"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "find markdown and TODOs [A3-MARKER]",
+    cwd,
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 3, `expected 3 turns, got ${cap.length}`);
+
+  // turn 2 携带 turn1 的 glob 结果：必须列出 README.md 和 docs/guide.md
+  const globResult = cap[1].toolResults.at(-1);
+  assert.ok(globResult, "expected glob tool_result on turn 2");
+  assert.equal(globResult.is_error, false, "glob should succeed");
+  assert.equal(globResult.tool_use_id, "toolu_a3_01");
+  assert.match(globResult.content, /README\.md/, "glob should match README.md");
+  assert.match(globResult.content, /guide\.md/, "glob should match docs/guide.md");
+
+  // turn 3 携带 turn2 的 grep 结果：必须命中 README.md 和 src/main.ts 里的 TODO
+  const grepResult = cap[2].toolResults.at(-1);
+  assert.ok(grepResult, "expected grep tool_result on turn 3");
+  assert.equal(grepResult.is_error, false, "grep should succeed");
+  assert.equal(grepResult.tool_use_id, "toolu_a3_02");
+  assert.match(grepResult.content, /README\.md/, "grep should hit README.md");
+  assert.match(grepResult.content, /main\.ts/, "grep should hit src/main.ts");
+  // util.ts 不应在结果里（无 TODO）
+  assert.doesNotMatch(grepResult.content, /util\.ts/, "grep should NOT match util.ts");
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// A4-shadow-mcp：双路径不变量
+// - mcp__cerelay__bash → is_error === false（Plan D 正路径）
+// - 内置 Bash → 被 disallowedTools/Hook deny → is_error === true，
+//   content 含引导文案 "Use mcp__cerelay__bash instead"
+// ============================================================
+test("A4-shadow-mcp: dual-path 不变量（mcp 路径 false / 内置 Bash deny true）", async () => {
+  const caseId = "case-a4";
+  await writeFixture(caseId, {
+    "marker.txt": "a4-marker",
+  });
+  const cwd = clientCwd(caseId);
+
+  // turn 1: 走 shadow MCP（应当 is_error=false）
+  await mockAdmin.loadScript({
+    name: "p0-a4-turn1-shadow",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__bash",
+      toolUseId: "toolu_a4_01",
+      input: { command: "ls" },
+    }),
+  });
+  // turn 2: 故意走内置 Bash（应当被 deny → is_error=true + 引导文案）
+  await mockAdmin.loadScript({
+    name: "p0-a4-turn2-builtin",
+    match: { turnIndex: 2 },
+    respond: scriptToolUse({
+      toolName: "Bash",
+      toolUseId: "toolu_a4_02",
+      input: { command: "echo legacy" },
+    }),
+  });
+  // turn 3: text final
+  await mockAdmin.loadScript({
+    name: "p0-a4-turn3-final",
+    match: { turnIndex: 3 },
+    respond: scriptText("dual-path done"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "exercise shadow vs legacy bash [A4-MARKER]",
+    cwd,
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 3, `expected 3 turns, got ${cap.length}`);
+
+  // turn 2 携带 turn 1 的 mcp__cerelay__bash 结果
+  const shadowResult = cap[1].toolResults.at(-1);
+  assert.ok(shadowResult, "expected shadow MCP tool_result on turn 2");
+  assert.equal(shadowResult.tool_use_id, "toolu_a4_01");
+  assert.equal(shadowResult.is_error, false, "Plan D invariant: mcp__cerelay__bash must NOT be is_error");
+  assert.match(shadowResult.content, /marker\.txt/, "shadow ls should list fixture marker");
+
+  // turn 3 携带 turn 2 的内置 Bash deny 结果
+  // Plan D dual-path 硬不变量：legacy Bash builtin 必须拿到 is_error=true。
+  // 文案有两种来源（取决于哪条防线先拦住）：
+  //   (1) CC --disallowedTools 自带：'No such tool available: Bash...not enabled'
+  //   (2) cerelay shadow fallback hook：'Use mcp__cerelay__bash instead'
+  // 实测 CC 在 disallowedTools 层就直接拒，hook fallback 是兜底防线。
+  // 断言里把两条文案都接受，避免锁死 CC 内部实现。
+  const denyResult = cap[2].toolResults.at(-1);
+  assert.ok(denyResult, "expected legacy Bash deny tool_result on turn 3");
+  assert.equal(denyResult.tool_use_id, "toolu_a4_02");
+  assert.equal(denyResult.is_error, true, "legacy Bash builtin should be denied (is_error=true)");
+  assert.match(
+    denyResult.content,
+    /(mcp__cerelay__bash|not (?:available|enabled))/i,
+    "deny content should indicate tool unavailable or guide to shadow alt"
+  );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// B1-home-claude-snapshot：server 启动期 ~/.claude/ snapshot 走 cache/FUSE，
+// 命中已上传的 fixture 内容。在 client 容器 ~/.claude/case-b1-marker.md 写入
+// 标记串，session 内通过 mcp__cerelay__read 读到 → 证明 home-claude 链路通。
+// ============================================================
+test("B1-home-claude-snapshot: ~/.claude/<file> 经 home-claude 链路可读", async () => {
+  const caseId = "case-b1";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const marker = "B1-HOME-CLAUDE-MARKER-7c4d3f";
+  // 在 namespace 内 ~ → server 侧重定向到 client 同步过来的 home-claude FUSE root，
+  // 文件路径走绝对值方便 model 读。
+  const homeRel = ".claude/case-b1-marker.md";
+  const targetAbs = `/home/clientuser/${homeRel}`;
+
+  await mockAdmin.loadScript({
+    name: "p0-b1-turn1-read",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__read",
+      toolUseId: "toolu_b1_01",
+      input: { file_path: targetAbs },
+    }),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-b1-turn2-final",
+    match: { turnIndex: 2 },
+    respond: scriptText("home-claude read ok"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "read ~/.claude marker [B1-MARKER]",
+    cwd,
+    homeFixture: {
+      [homeRel]: `# B1 fixture\n${marker}\n`,
+    },
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 2, `expected 2 turns, got ${cap.length}`);
+  const readResult = cap[1].toolResults[0];
+  assert.ok(readResult, "expected read tool_result on turn 2");
+  assert.equal(readResult.is_error, false, "read should succeed");
+  assert.match(
+    readResult.content,
+    new RegExp(marker),
+    "tool_result should reflect ~/.claude/<file> content via home-claude link"
+  );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// B2-claude-json-read：server 读 ~/.claude.json 经 FUSE 文件级映射。
+// CC 启动时也会读 .claude.json，所以必须保留合法 JSON；写入带 marker 的合法对象。
+// ============================================================
+test("B2-claude-json-read: ~/.claude.json 经 FUSE 文件级映射可读", async () => {
+  const caseId = "case-b2";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const marker = "B2-CLAUDE-JSON-MARKER-8a1e2b";
+  // ~/.claude.json 必须是合法 JSON（CC 启动期会 parse），用一个含 marker 的对象。
+  const jsonContent = JSON.stringify({ e2e_marker: marker, projects: {} }, null, 2);
+  const targetAbs = "/home/clientuser/.claude.json";
+
+  await mockAdmin.loadScript({
+    name: "p0-b2-turn1-read",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__read",
+      toolUseId: "toolu_b2_01",
+      input: { file_path: targetAbs },
+    }),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-b2-turn2-final",
+    match: { turnIndex: 2 },
+    respond: scriptText("claude json read ok"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "read ~/.claude.json [B2-MARKER]",
+    cwd,
+    homeFixture: {
+      ".claude.json": jsonContent,
+    },
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 2, `expected 2 turns, got ${cap.length}`);
+  const readResult = cap[1].toolResults[0];
+  assert.ok(readResult, "expected read tool_result on turn 2");
+  assert.equal(readResult.is_error, false, "read should succeed");
+  assert.match(readResult.content, new RegExp(marker), "tool_result should include marker from ~/.claude.json");
+});
+
+// ============================================================
+// B3-project-claude：server 读 {cwd}/.claude/<file> 经 project-claude bind mount。
+// fixture 在 cwd/.claude/marker-b3.txt 放 marker，避开 hook 注入的 settings.local.json。
+// ============================================================
+test("B3-project-claude: {cwd}/.claude/<file> 经 project-claude bind mount 可读", async () => {
+  const caseId = "case-b3";
+  const marker = "B3-PROJECT-CLAUDE-MARKER-3f9b1c";
+  await writeFixture(caseId, {
+    ".claude/marker-b3.txt": `${marker}\n`,
+  });
+  const cwd = clientCwd(caseId);
+  const targetAbs = `${cwd}/.claude/marker-b3.txt`;
+
+  await mockAdmin.loadScript({
+    name: "p0-b3-turn1-read",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__read",
+      toolUseId: "toolu_b3_01",
+      input: { file_path: targetAbs },
+    }),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-b3-turn2-final",
+    match: { turnIndex: 2 },
+    respond: scriptText("project-claude read ok"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "read project .claude marker [B3-MARKER]",
+    cwd,
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 2, `expected 2 turns, got ${cap.length}`);
+  const readResult = cap[1].toolResults[0];
+  assert.ok(readResult, "expected read tool_result on turn 2");
+  assert.equal(readResult.is_error, false, "read should succeed");
+  assert.match(
+    readResult.content,
+    new RegExp(marker),
+    "tool_result should reflect {cwd}/.claude/<file> via project-claude bind mount"
+  );
+
+  await cleanupFixture(caseId);
+});

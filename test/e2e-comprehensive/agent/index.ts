@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile, rm } from "node:fs/promises";
+import path from "node:path";
 
 interface RunRequest {
   prompt: string;
@@ -8,6 +10,11 @@ interface RunRequest {
   deviceLabel?: string;     // 仅日志用
   extraArgs?: string[];
   timeoutMs?: number;
+  // 在 spawn client 前往 $HOME/<rel> 写入 fixture，run 结束后默认 best-effort 清理。
+  // 用于 B1（~/.claude/<file>）/ B2（~/.claude.json）/ E1（settings.json 含 secret）。
+  homeFixture?: Record<string, string>;
+  // 默认 false：run 结束后删除 homeFixture 中列出的文件（不动目录）。设为 true 则保留。
+  homeFixtureKeepAfter?: boolean;
 }
 
 interface RunResponse {
@@ -32,6 +39,39 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+const HOME_DIR = process.env.HOME || "/home/clientuser";
+
+async function applyHomeFixture(files: Record<string, string>): Promise<string[]> {
+  const written: string[] = [];
+  for (const [rel, content] of Object.entries(files)) {
+    // 拒绝绝对路径或上跳：fixture 必须落在 $HOME 内
+    if (rel.startsWith("/") || rel.split("/").some((seg) => seg === "..")) {
+      throw new Error(`homeFixture rel must be inside $HOME: ${rel}`);
+    }
+    const abs = path.join(HOME_DIR, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, content, "utf8");
+    written.push(abs);
+  }
+  return written;
+}
+
+async function cleanupHomeFixture(absPaths: string[]): Promise<void> {
+  // 特例：~/.claude.json 不删除——CC 启动期会 parse 它，缺文件直接退出 1。
+  // 容器 entrypoint 只在启动时写 "{}"，运行时再 rm 会让下个 case 的 CC 启动失败。
+  // 因此 cleanup 时把 .claude.json 重置为空对象保持下一 case 可启动。
+  const claudeJsonAbs = path.join(HOME_DIR, ".claude.json");
+  for (const p of absPaths) {
+    try {
+      if (p === claudeJsonAbs) {
+        await writeFile(p, "{}", "utf8");
+      } else {
+        await rm(p, { force: true });
+      }
+    } catch { /* best-effort */ }
+  }
+}
+
 async function runClient(req: RunRequest): Promise<RunResponse> {
   const traceId = randomUUID();
   const startedAt = Date.now();
@@ -42,6 +82,10 @@ async function runClient(req: RunRequest): Promise<RunResponse> {
     "--prompt", req.prompt,
     ...(req.extraArgs ?? []),
   ];
+
+  const homeFixtureWritten = req.homeFixture
+    ? await applyHomeFixture(req.homeFixture)
+    : [];
 
   return await new Promise<RunResponse>((resolve, reject) => {
     const child = spawn("node", args, {
@@ -63,8 +107,11 @@ async function runClient(req: RunRequest): Promise<RunResponse> {
       reject(new Error(`client timeout after ${req.timeoutMs ?? 60_000}ms`));
     }, req.timeoutMs ?? 60_000);
 
-    child.once("exit", (code) => {
+    child.once("exit", async (code) => {
       clearTimeout(timer);
+      if (!req.homeFixtureKeepAfter) {
+        await cleanupHomeFixture(homeFixtureWritten);
+      }
       resolve({
         exitCode: code ?? -1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -74,8 +121,11 @@ async function runClient(req: RunRequest): Promise<RunResponse> {
       });
     });
 
-    child.once("error", (err) => {
+    child.once("error", async (err) => {
       clearTimeout(timer);
+      if (!req.homeFixtureKeepAfter) {
+        await cleanupHomeFixture(homeFixtureWritten);
+      }
       reject(err);
     });
   });

@@ -4,6 +4,10 @@ export interface RunRequest {
   deviceLabel?: string;
   extraArgs?: string[];
   timeoutMs?: number;
+  // 在 spawn client 前往 $HOME/<rel> 写入 fixture（agent 端落地）；
+  // run 结束后默认 best-effort 删除（不动目录）。详见 agent/index.ts。
+  homeFixture?: Record<string, string>;
+  homeFixtureKeepAfter?: boolean;
 }
 
 export interface RunResponse {
