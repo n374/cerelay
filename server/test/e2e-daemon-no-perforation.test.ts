@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { AccessLedgerRuntime, AccessLedgerStore } from "../src/access-ledger.js";
-import { ClientCacheStore } from "../src/client-cache-store.js";
+import { ClientCacheStore } from "../src/file-agent/store.js";
 import { FileProxyManager } from "../src/file-proxy-manager.js";
 import { PYTHON_FUSE_HOST_SCRIPT } from "../src/fuse-host-script.js";
 import type { FileProxyRequest, CacheTaskChange } from "../src/protocol.js";

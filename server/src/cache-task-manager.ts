@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { AccessLedgerRuntime, type AccessLedgerStore } from "./access-ledger.js";
-import { ClientCacheStore } from "./client-cache-store.js";
+import { ClientCacheStore } from "./file-agent/store.js";
 import type { ClientRegistry } from "./client-registry.js";
 import { createLogger } from "./logger.js";
 import { computeSyncPlan } from "./sync-plan.js";

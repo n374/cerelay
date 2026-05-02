@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { AccessLedgerStore } from "../src/access-ledger.js";
-import { ClientCacheStore } from "../src/client-cache-store.js";
+import { ClientCacheStore } from "../src/file-agent/store.js";
 import { FileProxyManager } from "../src/file-proxy-manager.js";
 import { SEED_WHITELIST } from "../src/seed-whitelist.js";
 import type { FileProxyRequest } from "../src/protocol.js";

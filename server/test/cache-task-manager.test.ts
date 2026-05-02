@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { CacheTaskManager } from "../src/cache-task-manager.js";
-import { ClientCacheStore } from "../src/client-cache-store.js";
+import { ClientCacheStore } from "../src/file-agent/store.js";
 import { ClientRegistry } from "../src/client-registry.js";
 import type {
   CacheTaskAssignment,

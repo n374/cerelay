@@ -23,7 +23,7 @@ import type {
   CacheManifestData,
   CacheTaskChange,
   CacheScope,
-} from "./protocol.js";
+} from "../protocol.js";
 
 export const CACHE_SCOPES: CacheScope[] = ["claude-home", "claude-json"];
 

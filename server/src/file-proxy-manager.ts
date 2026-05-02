@@ -18,7 +18,7 @@ import type {
   FileProxySnapshotEntry,
   FileProxyStat,
 } from "./protocol.js";
-import type { ClientCacheStore, PersistedManifest } from "./client-cache-store.js";
+import type { ClientCacheStore, PersistedManifest } from "./file-agent/store.js";
 import type { CacheTaskManager } from "./cache-task-manager.js";
 import type { AccessLedgerRuntime } from "./access-ledger.js";
 import { SessionAccessBuffer, type AccessEvent } from "./access-event-buffer.js";

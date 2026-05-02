@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { ClientCacheStore, sanitizeDeviceId } from "../src/client-cache-store.js";
+import { ClientCacheStore, sanitizeDeviceId } from "../src/file-agent/store.js";
 import type { CacheTaskChange } from "../src/protocol.js";
 
 const DEVICE_ID = "device-abc";

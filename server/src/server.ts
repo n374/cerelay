@@ -34,7 +34,7 @@ import type {
   ServerToHandMessage,
   ToolResult,
 } from "./protocol.js";
-import { ClientCacheStore } from "./client-cache-store.js";
+import { ClientCacheStore } from "./file-agent/store.js";
 import { AccessLedgerStore } from "./access-ledger.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";

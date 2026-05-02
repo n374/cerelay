@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import WebSocket from "ws";
 import { AccessLedgerRuntime, AccessLedgerStore } from "../src/access-ledger.js";
 import { CacheTaskManager } from "../src/cache-task-manager.js";
-import { ClientCacheStore } from "../src/client-cache-store.js";
+import { ClientCacheStore } from "../src/file-agent/store.js";
 import { ClientRegistry } from "../src/client-registry.js";
 import type { CacheTaskAssignment, ClientHello, ServerToHandMessage } from "../src/protocol.js";
 
