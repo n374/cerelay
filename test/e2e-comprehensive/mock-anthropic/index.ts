@@ -14,12 +14,15 @@ interface ScriptMatch {
   headerEquals?: Record<string, string>;
 }
 
+// Anthropic SSE 协议要求每个 event 的 data payload 顶层必须有 type 字段，
+// 该值同时被用作 SSE event 头（`event: <type>`）。也即 `event:` 行的字符串
+// 必须出现在 data payload 里。我们的 ScriptStreamEvent 与 Anthropic 的
+// data payload 形状一一对应：mock 直接把整个 event 序列化为 SSE data。
 interface ScriptStreamEvent {
-  kind:
+  type:
     | "message_start"
     | "content_block_start"
-    | "content_block_delta"      // 规范 Anthropic SSE event 名（涵盖 text_delta 和 input_json_delta payload）
-    | "input_json_delta"         // 保留为 content_block_delta 的 alias（spec 早期示例笔误，向后兼容保留）
+    | "content_block_delta"
     | "content_block_stop"
     | "message_delta"
     | "message_stop";
@@ -127,35 +130,36 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
 function streamScript(res: ServerResponse, script: ScriptDef, requestedModel?: string): void {
   res.writeHead(200, {
     "content-type": "text/event-stream",
-    "cache-control": "no-cache",
+    "cache-control": "no-cache, no-transform",
     "connection": "keep-alive",
   });
-  // 简化：每个 event 输出 `event: <type>\ndata: <json>\n\n`
-  // 如果请求了特定模型，将 message_start 中的 model 字段替换为请求的模型名，
+  // 每个 event 直接输出 `event: <type>\ndata: <整个 event JSON>\n\n`。
+  // 整个 ev 对象就是 Anthropic 的 data payload（顶层含 type，与 SSE event 头一致）。
+  // 如果请求了特定模型，将 message_start.message.model 替换为请求的模型名，
   // 否则 CC 会校验模型名不匹配而退出 1。
   for (const ev of script.respond.events) {
     let out: Record<string, unknown> = { ...ev };
-    if (ev.kind === "message_start" && requestedModel && ev.message) {
+    if (ev.type === "message_start" && requestedModel && ev.message) {
       const msg = ev.message as Record<string, unknown>;
       out = { ...ev, message: { ...msg, model: requestedModel } };
     }
-    res.write(`event: ${ev.kind}\n`);
+    res.write(`event: ${ev.type}\n`);
     res.write(`data: ${JSON.stringify(out)}\n\n`);
   }
   res.end();
 }
 
 function streamFallbackText(res: ServerResponse, text: string, requestedModel?: string): void {
-  // 没匹配到剧本时的兜底：返回一段普通文本
+  // 没匹配到剧本时的兜底：返回一段普通文本（符合 Anthropic SSE 完整 shape）
   const id = `msg_${randomUUID()}`;
   const model = requestedModel ?? "claude-mock";
   const events: ScriptStreamEvent[] = [
-    { kind: "message_start", message: { id, role: "assistant", model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } },
-    { kind: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    { kind: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { kind: "content_block_stop", index: 0 },
-    { kind: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
-    { kind: "message_stop" },
+    { type: "message_start", message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
   ];
   streamScript(res, { name: "<fallback>", match: {}, respond: { type: "stream", events } }, requestedModel);
 }

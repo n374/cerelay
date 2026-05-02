@@ -29,7 +29,7 @@ test("A1-bash-basic: model 触发 Bash → server 中转 client 执行 → tool_
     name: "p0-a1-turn1",
     match: { turnIndex: 1 },
     respond: scriptToolUse({
-      toolName: "Bash",
+      toolName: "mcp__cerelay__bash",
       toolUseId: "toolu_a1_01",
       input: { command: "ls -la" },
     }),
@@ -46,11 +46,15 @@ test("A1-bash-basic: model 触发 Bash → server 中转 client 执行 → tool_
     cwd: clientCwd(caseId),
   });
 
-  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
 
   // 断言 mock 收到了两轮请求
   const cap = await mockAdmin.captured();
-  assert.equal(cap.length, 2, `expected 2 messages, got ${cap.length}`);
+  assert.equal(cap.length, 2, `expected 2 messages, got ${cap.length}\ncaptured: ${JSON.stringify(cap.map((c) => ({ idx: c.index, matched: c.matchedScript })), null, 2)}`);
 
   // 断言第二轮的 tool_result 含 marker 文件名
   const toolResult = cap[1].toolResults[0];
@@ -78,7 +82,7 @@ test("B4-ancestor-claudemd: ancestor 段 bootstrap 不在 set -u 下崩 + ancest
     name: "p0-b4-turn1",
     match: { turnIndex: 1 },
     respond: scriptToolUse({
-      toolName: "Bash",
+      toolName: "mcp__cerelay__bash",
       toolUseId: "toolu_b4_01",
       input: { command: "cat ../../CLAUDE.md" },
     }),
@@ -95,9 +99,14 @@ test("B4-ancestor-claudemd: ancestor 段 bootstrap 不在 set -u 下崩 + ancest
   });
 
   // 关键断言：client 不能 0 + stderr 含 "IFS: parameter not set" 这种 bootstrap 失败信号
-  assert.equal(result.exitCode, 0, `client failed; stderr: ${result.stderr}`);
-  assert.doesNotMatch(result.stderr, /IFS: parameter not set/, "regression: bootstrap.sh IFS bug surfaced again");
-  assert.doesNotMatch(result.stderr, /初始化 Claude mount namespace 失败/, "namespace 初始化失败 = 框架捞到 regression");
+  assert.equal(
+    result.exitCode,
+    0,
+    `client failed (exit ${result.exitCode})\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`
+  );
+  const allOutput = `${result.stdout}\n${result.stderr}`;
+  assert.doesNotMatch(allOutput, /IFS: parameter not set/, "regression: bootstrap.sh IFS bug surfaced again");
+  assert.doesNotMatch(allOutput, /初始化 Claude mount namespace 失败/, "namespace 初始化失败 = 框架捞到 regression");
 
   // server 端事件：必须有 namespace.bootstrap.ready，且没有 namespace.bootstrap.failed
   const events = await serverEvents.fetch({});

@@ -92,15 +92,15 @@ test("buildShadowFallbackReason: 不在 shadow 范围的工具返回 null", () =
   assert.equal(buildShadowFallbackReason("UnknownTool"), null);
 });
 
-test("buildShadowMcpInjectionArgs 输出 --mcp-config / --append-system-prompt / --disallowedTools", () => {
+test("buildShadowMcpInjectionArgs 输出 --mcp-config / --append-system-prompt / --disallowedTools / --allowedTools", () => {
   const args = buildShadowMcpInjectionArgs({
     sessionId: "pty-x",
     socketPath: "/tmp/x.sock",
     token: "tok",
     launchSpec: { command: "/usr/bin/node", args: ["/x.js"] },
   });
-  // 结构：[--mcp-config, <json>, --append-system-prompt, <text>, --disallowedTools, <list>]
-  assert.equal(args.length, 6);
+  // 结构：[--mcp-config, <json>, --append-system-prompt, <text>, --disallowedTools, <list>, --allowedTools, <list>]
+  assert.equal(args.length, 8);
   assert.equal(args[0], "--mcp-config");
   const config = JSON.parse(args[1]!);
   assert.equal(config.mcpServers.cerelay.env.CERELAY_MCP_SESSION_ID, "pty-x");
@@ -112,4 +112,11 @@ test("buildShadowMcpInjectionArgs 输出 --mcp-config / --append-system-prompt /
     "Bash,Read,Write,Edit,MultiEdit,Glob,Grep",
     "硬保险列表必须覆盖 SHADOWED_BUILTIN_TOOLS",
   );
+  assert.equal(args[6], "--allowedTools");
+  // auto-permit 所有 mcp__cerelay__* shadow tools，避免 -p 模式下 CC 因
+  // 无 UI 询问而 deny → tool_result "haven't granted it yet"
+  assert.match(args[7]!, /^mcp__cerelay__/);
+  for (const tool of ["bash", "read", "write", "edit", "multi_edit", "glob", "grep"]) {
+    assert.match(args[7]!, new RegExp(`mcp__cerelay__${tool}\\b`), `--allowedTools 必须包含 mcp__cerelay__${tool}`);
+  }
 });

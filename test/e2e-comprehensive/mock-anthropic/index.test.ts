@@ -65,7 +65,7 @@ test("mock-anthropic: turnIndex 匹配 + captured 返回 + reset 清空", async 
     body: JSON.stringify({
       name: "test-1",
       match: { turnIndex: 1 },
-      respond: { type: "stream", events: [{ kind: "message_stop" }] },
+      respond: { type: "stream", events: [{ type: "message_stop" }] },
     }),
   });
 
@@ -95,7 +95,7 @@ test("mock-anthropic: predicate 路径匹配（messages[0].content contains mark
     body: JSON.stringify({
       name: "marker-A",
       match: { predicate: { path: "messages[0].content", op: "contains", value: "MARKER-A" } },
-      respond: { type: "stream", events: [{ kind: "message_stop" }] },
+      respond: { type: "stream", events: [{ type: "message_stop" }] },
     }),
   });
   await fetch(`${baseUrl}/v1/messages`, {
