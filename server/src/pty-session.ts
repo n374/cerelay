@@ -188,8 +188,11 @@ export class ClaudePtySession {
       pid: childPid,
       command: commandLine[0],
     });
-    // emit: namespace runtime 已就绪（runtime 作为选项传入，此处 spawn 成功即可用）
-    this.adminEvents?.record("namespace.bootstrap.ready", this.id, {
+    // emit: PTY helper 子进程 spawn 成功（namespace runtime 已就绪）。
+    // 注意语义：这只代表 Python helper 启动成功，bootstrap.sh 是否真跑完
+    // 不在这里能判断——如 IFS bug 这种 bootstrap.sh 内的失败会以 helper
+    // stderr 出现，最终通过 PTY exit !=0 报出。canary 需断言两层都干净。
+    this.adminEvents?.record("pty.spawn.ready", this.id, {
       cwd: this.cwd,
       homeDir: this.clientHomeDir,
       pid: childPid,
@@ -275,7 +278,7 @@ export class ClaudePtySession {
         error: error.message,
       });
       // emit: spawn/bootstrap 失败
-      this.adminEvents?.record("namespace.bootstrap.failed", this.id, {
+      this.adminEvents?.record("pty.spawn.failed", this.id, {
         error: error.message,
         cwd: this.cwd,
       });
@@ -436,11 +439,13 @@ export class ClaudePtySession {
       return [];
     }
     this.mcpIpcHost = host;
-    return buildShadowMcpInjectionArgs({
-      sessionId: this.id,
-      socketPath,
-      token,
-    });
+    // oneShot=true 时（即 prompt 透传到 claude -p）才注入 --allowedTools，
+    // 因为非交互模式 CC 没有 UI 询问 mcp tool 权限会直接 deny。
+    // 交互 PTY 模式保持 CC 原生权限询问体验，不被 e2e 需求污染。
+    return buildShadowMcpInjectionArgs(
+      { sessionId: this.id, socketPath, token },
+      { oneShot: Boolean(this.prompt) }
+    );
   }
 
   private async ensureHelperScript(): Promise<string> {

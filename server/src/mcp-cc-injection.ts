@@ -119,30 +119,37 @@ export function buildSteeringPrompt(): string {
 }
 
 /**
- * 一次性把 Plan D §4.3 的四组 CLI flag 拼出来，pty-session 调用。
+ * 一次性把 Plan D §4.3 的 CLI flag 拼出来，pty-session 调用。
  *
- * 注意 --allowedTools 是显式 auto-permit 所有 mcp__cerelay__* 工具：
- *   - 交互模式（PTY）：跳过"Claude requested permission"提示，无脑放行
- *   - 一次性模式（-p）：必须有这一行，否则 CC 没有 UI 询问会直接 deny
- *     反馈到 tool_result 是 "haven't granted it yet"，session 中断
+ * `oneShot=true`（即 server 把 prompt 透传到 `claude -p <prompt>`）时额外
+ * 注入 `--allowedTools mcp__cerelay__*`：
+ *   - 一次性模式（-p）下 CC 没有 UI 给用户授权 mcp tool，默认 deny → tool_result
+ *     "haven't granted it yet"，session 中断。auto-permit 全部 shadow tool 才能跑通
+ *   - 交互模式（默认 oneShot=false）保持 CC 的原生权限询问体验，让用户首次使用
+ *     mcp__cerelay__bash 时弹出"Claude requested permission"，授权后 CC 自己持久化
  *
- * 安全 reason：用户启用 shadow MCP（默认 ON）即代表显式信任 cerelay 路由层；
- * shadow tool 实际执行还在 client 本地，cerelay 只做转发，没有权限放大。
+ * 安全：仅 one-shot 路径放权。即便如此，shadow tool 实际执行也还在 client 本地，
+ * cerelay 只做转发，没有权限放大。
  */
-export function buildShadowMcpInjectionArgs(input: ShadowMcpConfigInput): string[] {
-  const allowedShadowTools = SHADOW_TOOLS
-    .map((tool) => fullyQualifiedShadowToolName(tool.shortName))
-    .join(",");
-  return [
+export function buildShadowMcpInjectionArgs(
+  input: ShadowMcpConfigInput,
+  options?: { oneShot?: boolean }
+): string[] {
+  const args: string[] = [
     "--mcp-config",
     buildMcpConfigJson(input),
     "--append-system-prompt",
     buildSteeringPrompt(),
     "--disallowedTools",
     SHADOWED_BUILTIN_TOOLS.join(","),
-    "--allowedTools",
-    allowedShadowTools,
   ];
+  if (options?.oneShot) {
+    const allowedShadowTools = SHADOW_TOOLS
+      .map((tool) => fullyQualifiedShadowToolName(tool.shortName))
+      .join(",");
+    args.push("--allowedTools", allowedShadowTools);
+  }
+  return args;
 }
 
 /**

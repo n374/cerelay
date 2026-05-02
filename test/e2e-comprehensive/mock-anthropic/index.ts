@@ -179,6 +179,13 @@ const server = createServer(async (req, res) => {
     if (url === "/admin/captured" && req.method === "GET") {
       return sendJson(res, 200, captured);
     }
+    // CC 偶尔会调 /v1/messages/count_tokens 做 token 估算（与现有
+    // server/test/fixtures/mock-anthropic-api.ts §144 行为对齐）。
+    // 不影响业务流程，回 200 + 固定 stub 即可。
+    if ((url === "/v1/messages/count_tokens" || url.startsWith("/v1/messages/count_tokens?")) && req.method === "POST") {
+      await readBody(req);
+      return sendJson(res, 200, { input_tokens: 1 });
+    }
     if (url.startsWith("/v1/messages") && (url === "/v1/messages" || url.startsWith("/v1/messages?")) && req.method === "POST") {
       counter += 1;
       const raw = await readBody(req);

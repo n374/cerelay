@@ -428,14 +428,16 @@ export class CerelayServer {
     }
 
     if (url.startsWith("/admin/events") && req.method === "GET") {
-      const u = new URL(url, "http://x");
+      // 注意：handleAdminRequest 的 url 形参实际是 pathname（已被
+      // handleHttpRequest 的 getPathname 剥离 query），不能从这里解析查询参数。
+      // 必须用 req.url（含 query）才能拿到 sessionId / since。
+      const u = new URL(req.url ?? "/admin/events", "http://x");
       const sessionId = u.searchParams.get("sessionId") ?? undefined;
       const sinceStr = u.searchParams.get("since");
       const since = sinceStr ? Number.parseInt(sinceStr, 10) : undefined;
       const events = this.adminEvents.fetch({ sessionId, since });
       requestLog.debug("返回 admin events", { sessionId, since, count: events.length });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ enabled: this.adminEvents.isEnabled(), events }));
+      this.sendJson(res, 200, { enabled: this.adminEvents.isEnabled(), events });
       return;
     }
 

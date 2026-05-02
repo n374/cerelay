@@ -93,12 +93,18 @@ test("B4-ancestor-claudemd: ancestor 段 bootstrap 不在 set -u 下崩 + ancest
     respond: scriptText("ok"),
   });
 
+  // 记录基线：本 case 之前已有的最大 event id；后续只看本 case 之后新增的事件，
+  // 避免被前序 case（如 A1）残留的事件污染。
+  const allBefore = await serverEvents.fetch({});
+  const baselineEventId = allBefore.at(-1)?.id ?? 0;
+
   const result = await clients.run("client-a", {
     prompt: "read ancestor CLAUDE.md [B4-MARKER]",
     cwd,
   });
 
-  // 关键断言：client 不能 0 + stderr 含 "IFS: parameter not set" 这种 bootstrap 失败信号
+  // 关键断言：client 不能 0 + stderr 含 "IFS: parameter not set" 这种 bootstrap 失败信号。
+  // 这是 IFS regression 的真主断言——bootstrap.sh 内部失败的最直接信号。
   assert.equal(
     result.exitCode,
     0,
@@ -108,12 +114,16 @@ test("B4-ancestor-claudemd: ancestor 段 bootstrap 不在 set -u 下崩 + ancest
   assert.doesNotMatch(allOutput, /IFS: parameter not set/, "regression: bootstrap.sh IFS bug surfaced again");
   assert.doesNotMatch(allOutput, /初始化 Claude mount namespace 失败/, "namespace 初始化失败 = 框架捞到 regression");
 
-  // server 端事件：必须有 namespace.bootstrap.ready，且没有 namespace.bootstrap.failed
-  const events = await serverEvents.fetch({});
-  const ready = events.find((e) => e.kind === "namespace.bootstrap.ready");
-  const failed = events.find((e) => e.kind === "namespace.bootstrap.failed");
-  assert.ok(ready, "expected namespace.bootstrap.ready event");
-  assert.equal(failed, undefined, `unexpected bootstrap.failed: ${JSON.stringify(failed?.detail)}`);
+  // server 端事件次断言：必须有 pty.spawn.ready，且没有 pty.spawn.failed。
+  // 注意：pty.spawn.* 事件只覆盖"helper 子进程是否 spawn 成功"，bootstrap.sh
+  // 内部失败由 stdout/stderr 主断言负责，这里仅做次保险。
+  // 用 sessionId 精确隔离当前 case session（agent 返回 trace id 不是 server 端
+  // sessionId，这里靠 baselineEventId 切片本 case 之后新增的事件）。
+  const newEvents = await serverEvents.fetch({ since: baselineEventId });
+  const ready = newEvents.find((e) => e.kind === "pty.spawn.ready");
+  const failed = newEvents.find((e) => e.kind === "pty.spawn.failed");
+  assert.ok(ready, `expected pty.spawn.ready event; new events: ${JSON.stringify(newEvents.map((e) => e.kind))}`);
+  assert.equal(failed, undefined, `unexpected pty.spawn.failed: ${JSON.stringify(failed?.detail)}`);
 
   // 断言第二轮 tool_result 含 ancestor CLAUDE.md 内容
   const cap = await mockAdmin.captured();
