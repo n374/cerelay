@@ -1,0 +1,118 @@
+# ============================================================
+# Cerelay — E2E 综合测试编排
+# 拓扑：orchestrator + mock-anthropic + server + client-a + client-b
+# 详见 docs/e2e-comprehensive-testing.md §3
+# ============================================================
+
+services:
+  mock-anthropic:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-mock-anthropic
+    networks:
+      - cerelay-e2e-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/admin/captured', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    cap_add: [SYS_ADMIN]
+    devices: ["/dev/fuse:/dev/fuse"]
+    security_opt: ["seccomp:unconfined", "apparmor:unconfined"]
+    environment:
+      - ANTHROPIC_BASE_URL=http://mock-anthropic:8080
+      - ANTHROPIC_API_KEY=e2e-fake-key
+      - PORT=8765
+      - CERELAY_ENABLE_MOUNT_NAMESPACE=true
+      - CERELAY_ADMIN_EVENTS=true
+      - CERELAY_ADMIN_TOKEN=cerelay_e2e-admin-token
+      - CERELAY_DATA_DIR=/var/lib/cerelay
+      - LOG_LEVEL=debug
+    tmpfs:
+      - /var/lib/cerelay:exec,size=512M
+      - /opt/cerelay-runtime:exec,size=512M
+    depends_on:
+      mock-anthropic:
+        condition: service_healthy
+    networks:
+      - cerelay-e2e-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'localhost',port:8765,path:'/admin/sessions',headers:{authorization:'Bearer cerelay_e2e-admin-token'}}, (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+
+  client-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-client-agent
+    environment:
+      - SERVER_URL=ws://server:8765/ws
+    volumes:
+      - e2e-fixtures:/workspace/fixtures
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - cerelay-e2e-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9100/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  client-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-client-agent
+    environment:
+      - SERVER_URL=ws://server:8765/ws
+    volumes:
+      - e2e-fixtures:/workspace/fixtures
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - cerelay-e2e-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9100/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-orchestrator
+    environment:
+      - MOCK_ANTHROPIC_URL=http://mock-anthropic:8080
+      - SERVER_ADMIN_URL=http://server:8765
+      - SERVER_ADMIN_TOKEN=cerelay_e2e-admin-token
+      - CLIENT_A_URL=http://client-a:9100
+      - CLIENT_B_URL=http://client-b:9100
+      - FIXTURE_ROOT=/workspace/fixtures
+    volumes:
+      - e2e-fixtures:/workspace/fixtures
+    depends_on:
+      mock-anthropic:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+      client-a:
+        condition: service_healthy
+      client-b:
+        condition: service_healthy
+    networks:
+      - cerelay-e2e-net
+
+volumes:
+  e2e-fixtures:
+
+networks:
+  cerelay-e2e-net:
+    driver: bridge
