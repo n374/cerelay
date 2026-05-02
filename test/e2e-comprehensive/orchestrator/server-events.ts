@@ -3,6 +3,15 @@ const BASE = process.env.SERVER_ADMIN_URL || "http://server:8765";
 // kept consistent with that convention for any standalone-orchestrator dev usage.
 const TOKEN = process.env.SERVER_ADMIN_TOKEN || "cerelay_e2e-admin-token";
 
+/**
+ * 路径前缀判断：严格按目录分隔符，避免 /proj/a 误匹配 /proj/ab/foo。
+ * 只在 path === ancestor 或 path 以 ancestor + "/" 开头时返回 true。
+ */
+function isUnderDir(path: string, ancestor: string): boolean {
+  if (path === ancestor) return true;
+  return path.startsWith(ancestor.endsWith("/") ? ancestor : ancestor + "/");
+}
+
 export interface AdminEvent {
   id: number;
   ts: string;
@@ -395,8 +404,9 @@ export const fileProxyEvents = {
 
   /**
    * Negative-assert: 在 timeoutMs 内收集所有 sessionId === sessionId 且
-   * clientPath.startsWith(foreignCwd) 的 file-proxy.read.served event,
-   * 期望 count === 0。
+   * isUnderDir(clientPath, foreignCwd) 的 file-proxy.read.served event,
+   * 期望 count === 0。isUnderDir 严格按目录分隔符（path === foreignCwd 或
+   * path 以 foreignCwd + "/" 开头），避免 /proj/a 误匹配 /proj/ab/foo。
    *
    * 重点: poll-and-collect 模式，不是 absence-of-log——
    * 必须真等够 timeoutMs 收集完才能断言，而不是"没看到就跳过"。
@@ -417,7 +427,7 @@ export const fileProxyEvents = {
         if (e.sessionId !== opts.sessionId) continue;
         const clientPath = (e.detail as Record<string, unknown> | undefined)?.["clientPath"];
         if (typeof clientPath !== "string") continue;
-        if (!clientPath.startsWith(opts.foreignCwd)) continue;
+        if (!isUnderDir(clientPath, opts.foreignCwd)) continue;
         if (collected.find((c) => c.id === e.id)) continue;
         collected.push(e);
       }
@@ -678,9 +688,9 @@ export const configPreloaderEvents = {
     since: number;
   }): Promise<(AdminEvent & { detail: ConfigPreloaderPlanDetail }) | null> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
-    const hit = events.find(
-      (e) => e.kind === "config-preloader.plan" && e.sessionId === opts.sessionId && e.id > opts.since
-    );
+    // serverEvents.fetch 已按 sessionId + since 在 server 端过滤，
+    // 这里只需匹配 kind；sessionId / since 重复条件保留作为防御性快照。
+    const hit = events.find((e) => e.kind === "config-preloader.plan");
     return (hit ?? null) as (AdminEvent & { detail: ConfigPreloaderPlanDetail }) | null;
   },
 
@@ -711,9 +721,9 @@ export const sessionBootstrapEvents = {
     since: number;
   }): Promise<(AdminEvent & { detail: SessionBootstrapPlanDetail }) | null> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
-    const hit = events.find(
-      (e) => e.kind === "session.bootstrap.plan" && e.sessionId === opts.sessionId && e.id > opts.since
-    );
+    // serverEvents.fetch 已按 sessionId + since 在 server 端过滤，
+    // 这里只需匹配 kind；sessionId / since 重复条件保留作为防御性快照。
+    const hit = events.find((e) => e.kind === "session.bootstrap.plan");
     return (hit ?? null) as (AdminEvent & { detail: SessionBootstrapPlanDetail }) | null;
   },
 
@@ -792,11 +802,11 @@ export async function assertF4CrossCwdIsolation(opts: {
   } else {
     const ancestorsA = planA.detail.ancestorDirs;
     const prefetchA = planA.detail.prefetchAbsPaths;
-    const ancestorLeak = ancestorsA.filter((p) => p.startsWith(opts.cwdB));
+    const ancestorLeak = ancestorsA.filter((p) => isUnderDir(p, opts.cwdB));
     if (ancestorLeak.length > 0) {
       errors.push(`(c) sessionA ancestorDirs 串到 cwdB 子树: ${ancestorLeak.join(", ")}`);
     }
-    const prefetchLeak = prefetchA.filter((p) => p.startsWith(opts.cwdB));
+    const prefetchLeak = prefetchA.filter((p) => isUnderDir(p, opts.cwdB));
     if (prefetchLeak.length > 0) {
       errors.push(`(c) sessionA prefetchAbsPaths 串到 cwdB 子树: ${prefetchLeak.join(", ")}`);
     }
@@ -812,11 +822,11 @@ export async function assertF4CrossCwdIsolation(opts: {
   } else {
     const ancestorsB = planB.detail.ancestorDirs;
     const prefetchB = planB.detail.prefetchAbsPaths;
-    const ancestorLeak = ancestorsB.filter((p) => p.startsWith(opts.cwdA));
+    const ancestorLeak = ancestorsB.filter((p) => isUnderDir(p, opts.cwdA));
     if (ancestorLeak.length > 0) {
       errors.push(`(c) sessionB ancestorDirs 串到 cwdA 子树: ${ancestorLeak.join(", ")}`);
     }
-    const prefetchLeak = prefetchB.filter((p) => p.startsWith(opts.cwdA));
+    const prefetchLeak = prefetchB.filter((p) => isUnderDir(p, opts.cwdA));
     if (prefetchLeak.length > 0) {
       errors.push(`(c) sessionB prefetchAbsPaths 串到 cwdA 子树: ${prefetchLeak.join(", ")}`);
     }

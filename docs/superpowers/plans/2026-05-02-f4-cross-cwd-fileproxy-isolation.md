@@ -224,8 +224,11 @@ findReadServed(opts: {
 ```typescript
 /**
  * Negative-assert: 在 timeoutMs 内收集所有 sessionId === sessionId 且
- * clientPath.startsWith(foreignCwd) 的 file-proxy.read.served event,
+ * isUnderDir(clientPath, foreignCwd) 的 file-proxy.read.served event,
  * 期望 count === 0。
+ *
+ * isUnderDir 严格按目录分隔符：path === foreignCwd 或 path 以 foreignCwd + "/" 开头，
+ * 避免 /proj/a 误匹配 /proj/ab/foo 的 false positive。
  *
  * 重点:**poll-and-collect 模式,不是 absence-of-log**——
  * 必须真等够 timeoutMs 收集完才能断言,而不是"没看到就跳过"。
@@ -246,7 +249,7 @@ async assertNoReadServedForCwd(opts: {
       if (e.sessionId !== opts.sessionId) continue;
       const clientPath = e.detail.clientPath;
       if (typeof clientPath !== "string") continue;
-      if (!clientPath.startsWith(opts.foreignCwd)) continue;
+      if (!isUnderDir(clientPath, opts.foreignCwd)) continue;
       if (collected.find((c) => c.id === e.id)) continue;
       collected.push(e);
     }
@@ -349,11 +352,11 @@ export async function assertF4CrossCwdIsolation(opts: {
   else {
     const ancestorsA = planA.detail.ancestorDirs as string[];
     const prefetchA = planA.detail.prefetchAbsPaths as string[];
-    if (ancestorsA.some((p) => p.startsWith(opts.cwdB))) {
-      errors.push(`(c) sessionA ancestorDirs 串到 cwdB 子树: ${ancestorsA.filter(p => p.startsWith(opts.cwdB)).join(", ")}`);
+    if (ancestorsA.some((p) => isUnderDir(p, opts.cwdB))) {
+      errors.push(`(c) sessionA ancestorDirs 串到 cwdB 子树: ${ancestorsA.filter(p => isUnderDir(p, opts.cwdB)).join(", ")}`);
     }
-    if (prefetchA.some((p) => p.startsWith(opts.cwdB))) {
-      errors.push(`(c) sessionA prefetchAbsPaths 串到 cwdB 子树: ${prefetchA.filter(p => p.startsWith(opts.cwdB)).join(", ")}`);
+    if (prefetchA.some((p) => isUnderDir(p, opts.cwdB))) {
+      errors.push(`(c) sessionA prefetchAbsPaths 串到 cwdB 子树: ${prefetchA.filter(p => isUnderDir(p, opts.cwdB)).join(", ")}`);
     }
   }
 
@@ -363,10 +366,10 @@ export async function assertF4CrossCwdIsolation(opts: {
   else {
     const ancestorsB = planB.detail.ancestorDirs as string[];
     const prefetchB = planB.detail.prefetchAbsPaths as string[];
-    if (ancestorsB.some((p) => p.startsWith(opts.cwdA))) {
+    if (ancestorsB.some((p) => isUnderDir(p, opts.cwdA))) {
       errors.push(`(c) sessionB ancestorDirs 串到 cwdA 子树`);
     }
-    if (prefetchB.some((p) => p.startsWith(opts.cwdA))) {
+    if (prefetchB.some((p) => isUnderDir(p, opts.cwdA))) {
       errors.push(`(c) sessionB prefetchAbsPaths 串到 cwdA 子树`);
     }
   }
