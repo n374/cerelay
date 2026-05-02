@@ -159,6 +159,13 @@ export function buildShadowMcpInjectionArgs(
  *
  * 返回 null 表示该 builtinName 不在 shadow 范围（无对应 mcp__cerelay__ 工具，
  * 应该走原来的 client-routed 转发链）。
+ *
+ * NOTE：此函数在 mock e2e（`test/e2e-comprehensive/`）中是 dead code——CC SDK
+ * `--disallowedTools` 在 PreToolUse hook 之前 short-circuit，模型看到的 deny
+ * 文案是 SDK 兜底 `<tool_use_error>...is not enabled in this context...</tool_use_error>`，
+ * 而不是这里返回的字符串。本函数只在真模型场景下被命中，由
+ * `server/test/e2e-real-claude-bash.test.ts` 守护。详见
+ * `docs/e2e-comprehensive-testing.md` §12.2 INF-10 行的 ❌ Won't fix 探索结论。
  */
 export function buildShadowFallbackReason(builtinName: string): string | null {
   const shadow = SHADOW_TOOLS.find((tool) => tool.builtinName === builtinName);

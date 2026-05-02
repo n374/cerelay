@@ -99,6 +99,7 @@
 |---|---|---|---|
 | H. 韧性 / Resiliency | H1-ws-reconnect | 🅿️ 需求池 | client ↔ server WebSocket 断网后**自动重连并续 session**。当前 client 断网行为是 session 终止；功能尚未实现。落地后本 case 验断网 N 秒内重连后能继续既有 PTY session（包括 in-flight tool_call 的接续/取消语义）。Triggered when product implements WS auto-reconnect with session resumption |
 | H. 韧性 / Resiliency | H2-server-restart | 🅿️ 需求池 | server 进程重启后 client 端 session **状态恢复**（PTY、cache、credentials 全链路）。当前 server 重启 ≡ 全 session 清空；功能尚未实现。落地后本 case 验 server SIGTERM → 重启 → client 仍能续 session |
+| F. 隔离 / Isolation | F4-cross-cwd-fileproxy-isolation | 🅿️ 加固待补 | F4-same-device-multi-cwd 当前(P1-B 落地版)只守 sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**未守的 cross-cwd 隔离边界**：(a) fileProxy 路径(`home-claude` / `home-claude-json` / `project-claude` 三个 root)在两个并发 session 之间内容不串；(b) FileAgent per-device 单例的 manifest / blob 命中不被另一 cwd 的访问污染；(c) cwd-ancestor walk(`{cwd}/CLAUDE.md` / `{cwd}/.claude/settings.local.json` 等向上回溯)不读到对方 cwd 子树；(d) `project-claude` bind mount 严格按 session 自己的 cwd 挂载。**前置 INF**：需新增带 `sessionId + cwd + root + relPath` 维度的 admin event probe(扩展 INF-1 `file-proxy.client.requested` schema 或新增独立 event)；落地后 case 内并发跑两个不同 cwd 的 session,断言上面 4 个不变量两两不交叉。Out of scope for P1-B because the probe surface doesn't yet exist—lifted from §12.3 F4 row & 2026-05-02 change log to keep the gap discoverable from the P2 backlog. / Hardening backlog for cross-cwd fileProxy / FileAgent / ancestor-walk / bind-mount isolation; awaits a per-session admin event probe |
 
 ---
 
@@ -462,6 +463,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | **P1-B backlog 收尾 测试 PR 6 (INF-10 A5 meta 加固) 探索结论 ❌ Won't fix**：尝试加 `stubShadowFallbackReason` toggle + 对照断言时 baseline 即失败——实测 A5 turn 2 deny content 是 `<tool_use_error>...Bash exists but is not enabled in this context...</tool_use_error>` (CC SDK 自带文案),完全不含 `mcp__cerelay__bash` 子串。**结论**:CC SDK `--disallowedTools` 在 PreToolUse hook 之前 short-circuit,cerelay `buildShadowFallbackReason` 在 mock e2e 中不可达;A5 主断言 OR 正则的第一分支是死代码,主套件实际命中第二分支。INF-10 反向加固设计的前提不成立,相关代码改动 (test-toggles / pty-session / server-events / phase-p0-meta) 已撤销,只保留文档结论。生产中 cerelay 引导路径可能仍在真模型场景触发,由 `server/test/e2e-real-claude-bash.test.ts` 守护 |
 | 2026-05-02 | **P1-B backlog 收尾 测试 PR 4 (F2 + F4 多 session 隔离)**：方案 A (Codex + Claude 共识) — 不改 Hand 架构，case 内 `Promise.all` 两次 `clients.runAsync` 同 client 并发起两个 Hand child（共享 deviceId 文件 + 独立 ws）。F2 同 cwd 守 sessionId 唯一性 (ptySessions Map);F4 不同 cwd 守 sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**收窄说明（Codex 终审 important）**: F4 不再声称守 fileProxy / FileAgent 单例 cross-cwd 污染 / cwd-ancestor walk / project-claude bind mount——这些路径需独立 admin event probe，留 P2 加固。守护意图从"同一 ws 多 session"降级为"同 device 多 session 并发"。Hand 单进程 multi-session 上线时必须新增 same-ws case。加 `killAndVerifyExited` cleanup 助手防 child 残留污染下一 case。e2e: 27→29/29 全过 |
 | 2026-05-02 | **P1-B backlog 收尾完成 ✅**：A 选项 (P1-B 4 项 backlog) 全部闭环 — 测试 PR 5 (C4-truncated) + 测试 PR 4 (F2/F4) + INF-10 ❌ Won't fix 探索结论 + PR 6 client-c 拓扑 + PR 7 truncated 协议补完。**最终交付**: e2e **29/29** (P0 16 + P1-A 2 + P1-B 11) + meta 3/3 + server unit 425/425 + client unit 135/135 全过。§2.3 P2 需求池开张 (H1-ws-reconnect / H2-server-restart 占位)。原 P1-B 11 个 case 维度全部落地或显式标 Won't fix(只剩 INF-10 探索后假设不成立 ❌)。**P1-B 阶段完整闭环**，下一步进入 §2.3 P2 阶段（断网重连 / Server 重启 session 恢复等需求池条目，等产品功能上线后开 case） |
+| 2026-05-02 | **P1-B 收尾尾巴**：把 F4 cross-cwd 隔离 gap 从"散落在 §12.3 F4 行 + change log 内"提升为 §2.3 P2 backlog 独立条目 `F4-cross-cwd-fileproxy-isolation`，并在 `server/src/mcp-cc-injection.ts:buildShadowFallbackReason` 上加 dead-code 注脚指向 §12.2 INF-10 的 ❌ Won't fix 结论，避免后续读代码者误以为该路径每次都跑。e2e coverage: N/A — 文档变更 + 单处 JSDoc 注释，不引入新协议字段 / 工具 / 拓扑 / 隔离边界 / cache 维度 |
 
 ### 11. Codex 终审遗留事项（已闭环 / Closed） / Codex Review Outstanding Items (Closed)
 
@@ -581,7 +583,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | D4-credentials-shadow ✅ | INF-2 + INF-3 + INF-5 + INF-11 | 测试 PR1 落地 |
 | E2-credentials-rw ✅ | INF-3 + INF-5 + INF-6 + INF-11 | 测试 PR1 落地 |
 | F2-multi-session ✅ | INF-3 | P1-B 收尾测试 PR 4 落地（方案 A：case 内并发 runAsync，不改 Hand）。**TODO**: 如果未来 Hand 上线"单进程内 multi-session"产品能力（`--prompts <file>` 或 batch 模式），必须新增真正的 same-ws case 守 client.ts 路由逻辑——本 case 物理 ws 是独立的 |
-| F4-same-device-multi-cwd ✅ | INF-3 | P1-B 收尾测试 PR 4 落地（方案 A）。**实际断言范围**（收窄）：sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**未守**：fileProxy / FileAgent 单例 cross-cwd 污染 / cwd-ancestor walk / project-claude bind mount，留作 P2 加固 |
+| F4-same-device-multi-cwd ✅ | INF-3 | P1-B 收尾测试 PR 4 落地（方案 A）。**实际断言范围**（收窄）：sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**未守**：fileProxy / FileAgent 单例 cross-cwd 污染 / cwd-ancestor walk / project-claude bind mount，留作 P2 加固——已在 §2.3 P2 backlog 登记为 `F4-cross-cwd-fileproxy-isolation` 条目 |
 | G1-tool-timeout | INF-3 + INF-8 | |
 | G2-client-disconnect | INF-3 + INF-8 | |
 | G3-mock-5xx | INF-9 | |
