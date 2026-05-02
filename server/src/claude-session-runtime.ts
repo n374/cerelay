@@ -322,7 +322,10 @@ if [ -n "\${CERELAY_FUSE_ROOT:-}" ] && [ -d "$CERELAY_FUSE_ROOT/home-claude" ]; 
 
   if [ -n "\${CERELAY_ANCESTOR_DIRS:-}" ]; then
     echo "[bootstrap] binding ancestor CLAUDE.md files" >&2
-    _old_ifs="$IFS"
+    # 注意：上方 view-roots 段已 \`unset IFS\`；在 \`set -u\` 下这里不能再用
+    # 旧式 save-IFS 写法（_old_ifs=\$IFS）保存 IFS——会触发 "IFS: parameter
+    # not set" 退出。沿用 view-roots 段的模式：临时设置 IFS=':' 用完后
+    # \`unset IFS\` 还原默认（unset 等价于默认 IFS=空格/Tab/换行）。
     IFS=':'
     _anc_level=0
     for _anc_dir in $CERELAY_ANCESTOR_DIRS; do
@@ -343,7 +346,7 @@ if [ -n "\${CERELAY_FUSE_ROOT:-}" ] && [ -d "$CERELAY_FUSE_ROOT/home-claude" ]; 
       done
       _anc_level=$((_anc_level + 1))
     done
-    IFS="$_old_ifs"
+    unset IFS
   fi
 else
   echo "[bootstrap] legacy mode" >&2

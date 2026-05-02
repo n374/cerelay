@@ -16,6 +16,31 @@ test("bootstrap script binds ancestor CLAUDE files from cwd-ancestor roots", () 
   assert.match(script, /ancestor dir is fs root, skip/);
 });
 
+// 回归守护：bootstrap 顶层 \`set -eu\` 下，view-roots 段会在用完后 \`unset IFS\`。
+// 之后 ancestor 段如果再用 \`_old_ifs="$IFS"\` 保存 IFS，nounset 会触发
+// "IFS: parameter not set" 直接退出 → 整个 PTY session 启动失败。
+// 该测试确保以后没人重新引入这个反模式。
+test("bootstrap script never reads $IFS after the view-roots unset", () => {
+  const script = renderNamespaceBootstrapScript();
+
+  assert.ok(
+    script.includes("set -eu"),
+    "bootstrap 必须保留 set -eu（这是 IFS 反模式触发的前提）"
+  );
+  assert.ok(
+    !/_old_ifs="\$IFS"/.test(script),
+    "禁止再用 _old_ifs=\"$IFS\" 保存 IFS（unset 后访问会触发 IFS: parameter not set）"
+  );
+  // 顶层只有 view-roots 段在用 IFS，且必须以 unset 结束；ancestor 段同理。
+  const ifsAssignments = script.match(/^\s*IFS=/gm) ?? [];
+  const ifsUnsets = script.match(/^\s*unset IFS\b/gm) ?? [];
+  assert.equal(
+    ifsAssignments.length,
+    ifsUnsets.length,
+    `每次设置 IFS 后必须有配对的 unset IFS 还原默认（设置 ${ifsAssignments.length} 次，unset ${ifsUnsets.length} 次）`
+  );
+});
+
 test("mount namespace env includes colon-joined ancestor dirs", () => {
   const env = buildMountNamespaceEnvForTest({
     runtimeRoot: "/runtime/session",
