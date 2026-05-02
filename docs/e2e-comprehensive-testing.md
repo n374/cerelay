@@ -61,25 +61,38 @@
 
 #### 2.2 P1：尽量覆盖（第二阶段） / P1: Should-Cover (Phase 2)
 
-| 维度 | 案例 ID | 描述 |
-|---|---|---|
-| A | A5-fallback-guidance | shadow MCP 启用但模型调 `Bash` builtin → hook deny + 引导文案 |
-| B | B5-negative-cache | 第一次 read 不存在文件 miss；第二次同路径不再穿透 |
-|  | B6-settings-local-shadow | 项目 `.claude/settings.local.json` 通过 shadow file 注入并被 hook 读到 |
-| C | C3-runtime-delta | session 进行中改 `~/.claude/CLAUDE.md`，server 端能读到新内容（watcher delta + ttl 续期） |
-| D | D4-credentials-shadow | server 侧 `credentials/default/.credentials.json` 通过 shadow file 暴露给 namespace |
-| E | E2-credentials-rw | namespace 内对 `~/.claude/.credentials.json` 写入 → 落到 server 侧持久化文件 |
-| F | F2-multi-session | 同一 client 一次连接 → 起两个 PTY session 并发 |
-|  | F4-same-device-multi-cwd | 同 client 连两次（不同 cwd）；device-only manifest 共享 |
-| G | G1-tool-timeout | tool 执行 timeout → server 返回 error，session 不挂 |
-|  | G2-client-disconnect | session 中途 client 断 ws → server cleanup namespace + FUSE，无 EBUSY 残留 |
+> **P1 切分（2026-05-02 落地）**：原 P1 10 个 case + 原 P2 2 个 case 经 Claude × Codex 方案对齐后被切分为 **P1-A**（无基础设施改动、纯测试代码即可 honest 落地）与 **P1-B**（必须先做基础设施改动才能不绕过守护意图）。详情见 §12。
+>
+> Phase 1 split (landed 2026-05-02): the original P1 10 + P2 2 cases were partitioned into **P1-A** (pure test code, no infra change) and **P1-B** (requires infra change to avoid bypassing the guarded invariant). See §12.
+
+**P1-A（已落地 / Landed）**：
+
+| 维度 | 案例 ID | 状态 | 描述 |
+|---|---|---|---|
+| A | A5-fallback-guidance | ✅ `phase-p1.test.ts` | shadow MCP 启用 + 内置 Bash 被 disallowedTools/hook deny → 模型下一轮自动改用 `mcp__cerelay__bash`（Plan D §4.5 fallback 闭环可执行） |
+| C | C4-large-skipped (skipped 半段) | ✅ `phase-p1.test.ts` | > 1MB 文件被 manifest 标记 `skipped`，server 仅同步元数据；用 `cacheAdmin.lookupEntry` 验 `skipped=true` + summary `skippedCount >= 1`。**truncated 半段（scope > 100MB）需 P1-B 增加 `MAX_SCOPE_BYTES` env override**，因 100MB 在 e2e 启动期同步太慢 |
+
+**P1-B（待做 / Pending — 见 §12 基础设施清单）**：
+
+| 维度 | 案例 ID | 必需基础设施 | 描述 |
+|---|---|---|---|
+| B | B5-negative-cache | server 加 `file-proxy.client.requested` / `.miss` admin event | 第一次 read 不存在文件 miss 后被记住；第二次同路径不再穿透 client。server 端 negative cache 已实现，但**无可观测计数**，无法 honest 断言"第二次未穿透" |
+|  | B6-settings-local-shadow | server 加 `file-proxy.shadow.served` admin event 或扩展 `read.served` 覆盖 shadow file 出口 | 项目 `.claude/settings.local.json` 由 server hook injection 自动写到 runtimeRoot，FUSE shadow 注入到 namespace；当前 4 个 `read.served` 出口（snapshot-cache / snapshot-client / cache / passthrough-settings）都不覆盖 shadow file 读路径，无法 honest 断言 |
+| C | C3-runtime-delta | agent 加 `/run-async` + `/admin/mutate-home-fixture` endpoint | session 进行中改 `~/.claude/CLAUDE.md`，server 能读到新内容（watcher delta + ttl 续期）。当前 agent `/run` 阻塞同步，无法 session 内修改 fixture |
+|  | C4-large-truncated 半段 | server/client 加 `MAX_SCOPE_BYTES` env override | scope > 100MB → 截断 + manifest `truncated=true`。协议链路已通（client/cache-sync.ts:551 → server/server.ts:541），但 100MB 在 e2e 启动期同步太慢需可调阈值 |
+| D | D4-credentials-shadow | 同 B6（shadow file read.served event）+ agent 加 server data dir credentials 写入能力 | server 侧 `${CERELAY_DATA_DIR}/credentials/default/.credentials.json` 通过 shadow file 暴露给 namespace，**always 注入即使源不存在**。需要观测 namespace 内读 credentials shadow 真触发 server FUSE |
+| E | E2-credentials-rw | server 加 `file-proxy.write.served` admin event + agent 暴露 server data dir 读取能力 | namespace 内对 `~/.claude/.credentials.json` 写入 → 落到 server 侧持久化文件。需要写路径可观测 + 写后能验真持久化 |
+| F | F2-multi-session | agent 加 `/run-async` + 多 session 状态 API | 同 client 一次连接 → 起两个 PTY session 并发。`/run` 阻塞模式无法并发起多 session |
+|  | F4-same-device-multi-cwd | 同 F2 | 同 client 连两次（不同 cwd），device-only manifest 共享 |
+| G | G1-tool-timeout | server 加 `injectToolTimeout` toggle 或 mock 加 SSE 延迟 builder | tool 执行 timeout → server 返回 error，session 不挂 |
+|  | G2-client-disconnect | agent 加 `/run-async` + `/admin/kill-session` endpoint + server 加 `session.disconnected` event | session 中途 client 断 ws → server cleanup namespace + FUSE，无 EBUSY 残留 |
+|  | G3-mock-5xx | mock-anthropic 加 `scriptError(status, body)` builder | mock anthropic 返回 5xx，session 优雅终止、日志含上游错误 |
 
 #### 2.3 P2：可后续补 / P2: Nice-to-Have (Phase 3)
 
-| 维度 | 案例 ID | 描述 |
-|---|---|---|
-| C | C4-large-skipped | 上传 > 1MB 文件被 `skipped`、scope > 100MB `truncated` |
-| G | G3-mock-5xx | mock anthropic 返回 5xx，session 优雅终止、日志含上游错误 |
+> P2 在 P1 切分时清空：原 P2 的 C4-large-skipped / C4-large-truncated 升入 P1（P1-A 与 P1-B 各承担一半），G3-mock-5xx 升入 P1-B。新增的 P2 case 由后续阶段冒出的盲点驱动。
+>
+> P2 was emptied during P1 split: original C4 was promoted to P1, G3 to P1-B. New P2 items will emerge from gaps surfaced in later phases.
 
 ---
 
@@ -343,11 +356,12 @@ test("A1-bash-basic: model triggers Bash → server relays to client → tool_re
 
 | 阶段 | 交付物 | 验收标准 |
 |---|---|---|
-| **P0** | 上方 §2.1 全部 case + 容器拓扑 + orchestrator 框架 + admin endpoints + fixtures + npm test 接入 | 本地 `npm test` 全绿；故意把 §1.1 IFS bug 重新引入应被 D3 / B4 case 拦住 |
-| **P1** | §2.2 全部 case + G 类 fault injection 工具集 | 全绿；G2 case 验证 namespace runtime 在 client 中途断时无 EBUSY |
-| **P2** | §2.3 全部 case + 任何前两阶段冒出的盲点 | 全绿 |
+| **P0** | §2.1 全部 case + 容器拓扑 + orchestrator 框架 + admin endpoints + fixtures + npm test 接入 | 本地 `npm test` 全绿；故意把 §1.1 IFS bug 重新引入应被 D3 / B4 case 拦住 |
+| **P1-A** | §2.2 P1-A 段全部 case（A5 / C4-skipped）；纯测试代码，无基础设施改动 | 本地 `npm test` 18/18 全绿（P0 16 + P1-A 2） |
+| **P1-B** | §12 全部基础设施改动 + §2.2 P1-B 段全部 case（B5 / B6 / C3 / C4-truncated / D4 / E2 / F2 / F4 / G1 / G2 / G3）+ 必要的 meta-test | 全绿；G2 case 验证 namespace runtime 在 client 中途断时无 EBUSY |
+| **P2** | §2.3（当前为空）+ 任何前述阶段冒出的盲点 | 全绿 |
 
-每阶段独立 PR；P0 PR 必须包含本文档的更新（实现走偏需同步修文档）。
+每阶段独立 PR；P0 / P1-A 已完成（实现走偏需同步修文档），P1-B 必须先以"基础设施 PR"落 §12 改动再开测试 PR。
 
 ---
 
@@ -432,6 +446,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | P0-A Foundation 落地（容器拓扑 / orchestrator / agent / mock-anthropic / admin-events / canary cases A1+B4） |
 | 2026-05-02 | P0-B 4 commits 落地，主套件 16/16 + meta 3/3 在容器内跑通；Codex 终审认定 4 Critical 阻断、5 Important、2 Nit，详见 §11，**P0-B 未闭环** |
 | 2026-05-02 | P0-B 闭环：11 项缺陷（4 Critical + 5 Important + 2 Nit）全部修复；新增 `file-proxy.read.served` admin event、`assertF3Isolation()` 公共断言、`/admin/cache` 单项查询 + gate、`pty.spawn.ready` 主断言；E1 拆 site=snapshot e2e + cache-hit/passthrough server 单测；mock 拆 `toolResultsAll`/`toolResultsCurrentTurn`；test-toggles 加 runtime assert。e2e 主 16/16 + meta 3/3 + server unit 425/425 全过；Codex 终审通过 |
+| 2026-05-02 | P1 阶段切分（Claude × Codex 方案对齐）：原 P1 10 case + 原 P2 2 case 重新切成 **P1-A**（A5 / C4-skipped，无基础设施改动）+ **P1-B**（其余 10 case + 8 项基础设施改动）。**P1-A 落地**：`phase-p1.test.ts` 加 2 case；npm test 入口扩到 `phase-p0.test.ts phase-p1.test.ts`，本地 `bash test/run-e2e-comprehensive.sh` 18/18 全绿；P1-B 范围登记在 §12 |
 
 ---
 
@@ -496,3 +511,63 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 3. ✅ 2 Nit 全修：N1（C2 描述 `>= drift ≤ 50`）、N2（删 F1 expectMarker）
 4. ✅ Codex 终审通过 + 文档闭环登记完成
 5. ➡️ 进入 §5 P1 阶段
+
+---
+
+### 12. P1 切分与 P1-B 基础设施清单 / P1 Split & P1-B Infrastructure Inventory
+
+> **背景 / Background**：P1 开工前，Claude × Codex 方案对齐发现原 §2.2 列入 P1 的 10 个 case 中只有 1 个（A5）能在 P0 helpers 覆盖范围内 honest 落地，其余 9 个若强行写都会绕过守护意图（"代码路径存在"假装等价于"行为正确"，是 P0-B Codex 终审已经吃过亏的反模式）。同期把 §2.3 P2 的 C4 也评估了一遍，skipped 半段 honest 可做，truncated 半段同样需要基础设施改动。最终切成 **P1-A**（A5 + C4-skipped，2 case，纯测试代码）+ **P1-B**（其余 10 case + 8 项基础设施改动）。
+>
+> P1 split rationale: pre-flight Claude × Codex review showed only 1 of original P1 10 cases (A5) was honestly testable with current P0 helpers; others would bypass the guarded invariant. P2 C4 was re-evaluated alongside, splitting into skipped (honest now) and truncated (needs infra). Final split: **P1-A** (A5 + C4-skipped, 2 cases) + **P1-B** (remaining 10 cases + 8 infra items).
+
+#### 12.1 P1-A 闭环登记 / P1-A Closure Log
+
+| 日期 | 事件 | 验证 |
+|---|---|---|
+| 2026-05-02 | A5-fallback-guidance + C4-large-skipped(skipped 半段) 落地 `phase-p1.test.ts`；npm test 入口扩到 `phase-p0.test.ts phase-p1.test.ts` | `bash test/run-e2e-comprehensive.sh` 18/18 全绿（P0 16 + P1-A 2） |
+| 2026-05-02 | Codex P1-A 终审通过（0 critical / 1 important / 3 nit）：important 是 A5 注释里"模型自动推理"措辞润色（已改为"脚本化下一轮 fallback 闭环"，并加注脚说明真模型推理由 `e2e-real-claude-bash.test.ts` 守护，不在本套件职责）；nit 中的 A5 meta-test 加固建议登记为 INF-10 进入 P1-B 待办 |
+
+#### 12.2 P1-B 基础设施清单 / P1-B Infrastructure Items
+
+每项给出"为什么 honest 测必须依赖它"。**P1-B 必须先以"基础设施 PR"落这些改动，再开"测试 PR"实现 §2.2 P1-B 段的 10 case**——按这个顺序才能保证测试代码不再绕过守护意图。
+
+| # | 改动 | 服务对象 case | honest 测的硬约束 |
+|---|---|---|---|
+| **INF-1** | server 加 `file-proxy.client.requested` / `file-proxy.client.miss` admin event | B5 | server 端 negative cache 已实现（`fuse-host-script.ts` `_cache.put_negative()` + server `putNegative()` + ledger 持久化），但**无任何观测点**判断"第二次同 path 是否真未穿透"。需要 emit "本次 read 是否回 client 取" 的计数事件 |
+| **INF-2** | server 加 `file-proxy.shadow.served` admin event 或扩展 `read.served` 覆盖 shadow file 出口 | B6 / D4 | 当前 `read.served` 4 个出口（snapshot-cache / snapshot-client / cache / passthrough-settings）都不覆盖"daemon 通过 shadowFiles 走本地真实文件 read"路径。settings.local.json（hook injection）+ credentials shadow 都属此类 |
+| **INF-3** | agent 加 `/run-async` + `/admin/run/{id}/status` + `/admin/run/{id}/kill` endpoint；`/run` 同步保留作兼容 | C3 / F2 / F4 / G2 | 当前 `/run` 阻塞到 child exit；C3 需要 session 内修 fixture，F2/F4 需要并发起多 session，G2 需要中途 kill ws。统一在 agent 加异步 API 一次解决 |
+| **INF-4** | agent 加 `/admin/mutate-home-fixture` endpoint：在指定 path 重写文件内容 | C3 | C3 需要 session 进行中改 `~/.claude/CLAUDE.md`，靠 INF-3 异步 run + 此 endpoint 配合，外部触发 watcher delta |
+| **INF-5** | agent 加 `/admin/server-data-dir/credentials` 读写代理 endpoint（仅 e2e build 启用） | D4 / E2 | D4 需要在 server 容器内预置 `${CERELAY_DATA_DIR}/credentials/default/.credentials.json` 才能验"shadow read 真触达 server 文件"；E2 需要在 namespace 写后从 server 侧验证持久化 |
+| **INF-6** | server 加 `file-proxy.write.served` admin event（含 root + relPath + servedTo） | E2 | namespace 内写 credentials shadow → server 端 redirect 到本地真实文件；当前**写路径无任何 admin event**，无法 honest 断言"写真的落到 server dataDir 文件" |
+| **INF-7** | server / client cache-sync 加 `MAX_FILE_BYTES` / `MAX_SCOPE_BYTES` env override（仅 e2e 配置） | C4-truncated | scope > 100MB 在 e2e 启动期同步太慢；协议链路（`cache_task_delta.truncated` + server `manifest.scopes[*].truncated`）已通，只缺可调阈值。生产侧守门：env 必须以 `CERELAY_E2E_` 前缀 + 仅在 `CERELAY_ADMIN_EVENTS=true` 下生效 |
+| **INF-8** | server 加 `injectToolTimeout` / `injectClientDisconnect` test-toggles + `tool.timeout.fired` / `session.disconnected` admin event | G1 / G2 | G1 需要触发 server 端 tool relay timeout（client 端真挂会让 PTY 卡住，必须从 server 端注入），G2 需要可观测 session disconnect 后 namespace + FUSE cleanup 发生 |
+| **INF-9** | mock-anthropic 加 `scriptError(status, body)` builder | G3 | mock 当前只支持 stream 响应，无 5xx error builder；扩 `ScriptDef.respond` 加 `{type:"error", status, body}` 分支 |
+| **INF-10** | meta-test：故意破坏 A5 deny 文案（移除 `mcp__cerelay__bash instead` 引导段） | A5 加固 | P1-A Codex 验收建议项：A5 主断言依赖 deny 文案命中正则，若未来 deny 文案被改动 / 简化导致正则全失效，A5 仍会假绿。补 meta-test 故意 stub `buildShadowFallbackReason`，断言 A5 应失败。属 P1-B 加固项，不阻断 P1-A 闭环 |
+
+#### 12.3 P1-B case 与基础设施依赖对照 / Case ↔ Infra Mapping
+
+| Case | 依赖 INF | 备注 |
+|---|---|---|
+| B5-negative-cache | INF-1 | |
+| B6-settings-local-shadow | INF-2 | 同时也守 hook injection 端到端可达 |
+| C3-runtime-delta | INF-3 + INF-4 | |
+| C4-truncated 半段 | INF-7 | skipped 半段已在 P1-A 落地 |
+| D4-credentials-shadow | INF-2 + INF-5 | |
+| E2-credentials-rw | INF-5 + INF-6 | |
+| F2-multi-session | INF-3 | |
+| F4-same-device-multi-cwd | INF-3 | |
+| G1-tool-timeout | INF-8 | |
+| G2-client-disconnect | INF-3 + INF-8 | |
+| G3-mock-5xx | INF-9 | |
+
+#### 12.4 P1-B 推荐落地顺序 / P1-B Recommended Implementation Order
+
+1. **基础设施 PR 1**（observability bundle）：INF-1 / INF-2 / INF-6 / INF-8（admin event 增量），都是 server 加 event，单 PR 串起来 + 对应 `server-events.ts` helper
+2. **基础设施 PR 2**（agent async runtime）：INF-3 / INF-4 / INF-5（agent endpoint 扩展），单 PR 一次性把 agent /run 升级为异步 + 加配套 admin endpoint
+3. **基础设施 PR 3**（cache budget override）：INF-7（client + server env 配置），单 PR
+4. **基础设施 PR 4**（mock error builder）：INF-9（mock-anthropic 扩展），单 PR
+5. **测试 PR 1**：B5 / B6 / D4 / E2（依赖 PR 1 + PR 2）
+6. **测试 PR 2**：C3 / F2 / F4 / C4-truncated（依赖 PR 2 + PR 3）
+7. **测试 PR 3**：G1 / G2 / G3（依赖 PR 1 + PR 2 + PR 4）
+
+每个测试 PR 跑一次 Claude × Codex 验收。基础设施 PR 由 Claude 独立完成 + Codex 并行评审。
