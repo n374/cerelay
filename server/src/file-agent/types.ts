@@ -40,6 +40,16 @@ export interface PrefetchResult {
   durationMs: number;
 }
 
+/**
+ * FileAgent 内部用的 fetcher 接口。Task 4 阶段接受 stub；
+ * Task 5 sync-coordinator 实例满足该接口。
+ */
+export interface FileAgentFetcher {
+  fetchFile(absPath: string): Promise<FileAgentReadResult>;
+  fetchStat(absPath: string): Promise<FileAgentStatResult>;
+  fetchReaddir(absPath: string): Promise<FileAgentReaddirResult>;
+}
+
 /** Task 4 引入：穿透 client 失败时抛出。 */
 export class FileAgentUnavailableError extends Error {
   override readonly name = "FileAgentUnavailableError";

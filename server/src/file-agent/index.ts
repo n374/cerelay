@@ -15,22 +15,10 @@ import type {
   FileAgentReadResult,
   FileAgentStatResult,
   FileAgentReaddirResult,
+  FileAgentFetcher,
   PrefetchItem,
   PrefetchResult,
 } from "./types.js";
-
-/**
- * FileAgent 内部用的 fetcher 接口。Task 4 阶段接受 stub，Task 5 sync-coordinator
- * 实例满足该接口。
- */
-export interface FileAgentFetcher {
-  /** miss 时穿透 client 拉取文件内容；返回 missing/skipped/file 三态。 */
-  fetchFile(absPath: string): Promise<FileAgentReadResult>;
-  /** miss 时穿透 client 拉取元数据。 */
-  fetchStat(absPath: string): Promise<FileAgentStatResult>;
-  /** miss 时穿透 client 拉取目录列表。 */
-  fetchReaddir(absPath: string): Promise<FileAgentReaddirResult>;
-}
 
 export interface FileAgentOptions {
   /** Device 唯一标识（plan §2 P6）。 */
@@ -192,6 +180,7 @@ export type {
   FileAgentReadResult,
   FileAgentStatResult,
   FileAgentReaddirResult,
+  FileAgentFetcher,
   PrefetchItem,
   PrefetchResult,
 } from "./types.js";
