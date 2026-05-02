@@ -76,7 +76,12 @@ Read 当前 detail interface 区块,找到 5 个 interface 的精确行号:`File
 
 - [ ] **Step 1.2: 扩 4 个 detail interface 字段**
 
-在每个 detail interface 加 `clientCwd?` / `clientPath?` / `contentSha256?`(三者都用 `?:` 可选,因为 emit 出口分批落地,过渡期混合状态)。
+在每个 detail interface 加 cwd-aware 字段(都用 `?:` 可选,因为 emit 出口分批落地,过渡期混合状态)。**注意各 interface 字段不一样**:
+
+- `FileProxyReadServedDetail` / `FileProxyClientRequestedDetail`:加 `clientCwd? / clientPath? / contentSha256?`
+- `FileProxyShadowServedDetail` / `FileProxyWriteServedDetail`:**只加 `clientCwd? / fusePath?`**,**不**加 `clientPath` 与 `contentSha256`
+
+裁量理由(spec 已同步):shadow/write 由 daemon sideband 转录,原始路径信息只有 FUSE 物理路径,以 `fusePath` 替代 `clientPath`(server 端可在转录时反查,避免在两个层重复表达);且断言矩阵(spec §5.3 阶段三)的 contentSha256 negative-assert 只针对 `read.served`,shadow/write 的 sha256 无消费方,YAGNI 不加。
 
 ```typescript
 export interface FileProxyReadServedDetail {
