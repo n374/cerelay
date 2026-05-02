@@ -2,8 +2,8 @@
 // P1 阶段 e2e case（详见 docs/e2e-comprehensive-testing.md §2.2 / §5）
 //
 // P1-A 当前批次（无基础设施改动、纯测试代码即可 honest 落地）：
-//   - A5-fallback-guidance：shadow MCP 启用 + 内置 Bash 被 deny → 模型下一轮自动改用
-//                          mcp__cerelay__bash（Plan D §4.5 fallback 闭环）
+//   - A5-fallback-guidance：shadow MCP 启用 + 内置 Bash 被 deny → 脚本化下一轮
+//                          改用 mcp__cerelay__bash（Plan D §4.5 fallback 闭环可执行）
 //   - C4-large-skipped(skipped 半段)：> 1MB 文件被 manifest 标记 skipped，
 //                                     server 仅同步元数据
 //
@@ -58,7 +58,7 @@ test.beforeEach(async () => {
 // 在 server/test/e2e-real-claude-bash.test.ts 之类的真模型 e2e 守护，不是本套件的
 // 职责（本套件用 mock anthropic 不可能验模型推理本身）。
 // ============================================================
-test("A5-fallback-guidance: builtin Bash deny → 模型下一轮自动改用 mcp__cerelay__bash", async () => {
+test("A5-fallback-guidance: builtin Bash deny → 脚本化下一轮 fallback 至 mcp__cerelay__bash 闭环", async () => {
   const caseId = "case-a5";
   const marker = "a5-fallback-marker";
   await writeFixture(caseId, {
@@ -642,6 +642,11 @@ test("C3-runtime-delta: session 内 mutate ~/.claude/CLAUDE.md → server cache 
     assert.notEqual(entryV1.sha256, entryV2.sha256, "sha256 must change between v1 and v2");
   } finally {
     await killAndWait("client-a", runId);
+    // Codex P1-B 终审 critical: 防 C3 v2 内容残留 ~/.claude/CLAUDE.md 污染下一 case
+    // (homeFixtureKeepAfter:true 让 RunRequest cleanup 没动 fixture; mutateHomeFixture
+    // 也不进 cleanup 路径)。mutate 成空内容比 deleteFile 安全 (CC 启动若依赖该路径
+    // 不存在的话不会报错)。
+    try { await clients.mutateHomeFixture("client-a", { ".claude/CLAUDE.md": "" }); } catch { /* ignore */ }
     await cleanupFixture(caseId);
   }
 });
@@ -666,10 +671,11 @@ test("G1-tool-timeout: tool relay 注入超时 → tool.timeout.fired emit + 不
   await writeFixture(caseId, { ".keep": "" });
   const cwd = clientCwd(caseId);
 
-  // 开 toggle: 200ms 强制 timeout Bash 调用。注意 dispatcher 收到的 toolName
+  // 开 toggle: 1000ms 强制 timeout Bash 调用 (Codex P1-B 终审 important: 200ms 在
+  // CI 抖动下易假阳性, 1000ms 仍远小于 sleep 5)。注意 dispatcher 收到的 toolName
   // 是 schema.builtinName (server/src/mcp-routed/handlers.ts:33) = "Bash",
   // 不是 CC 端的 fully qualified "mcp__cerelay__bash"。
-  await testToggles.set({ injectToolTimeout: { ms: 200, toolName: "Bash" } });
+  await testToggles.set({ injectToolTimeout: { ms: 1000, toolName: "Bash" } });
 
   // turn 1: 模型调 mcp__cerelay__bash + sleep 5 (client 端会真 sleep 5s,
   //         server 端 200ms 后 timeout fire)
@@ -709,17 +715,17 @@ test("G1-tool-timeout: tool relay 注入超时 → tool.timeout.fired emit + 不
       timeoutMs: 10_000,
     });
     assert.equal(timeoutEvt.detail.injected, true, "timeout should be from injected toggle");
-    assert.equal(timeoutEvt.detail.timeoutMs, 200, "injected timeoutMs should be 200");
+    assert.equal(timeoutEvt.detail.timeoutMs, 1000, "injected timeoutMs should be 1000");
 
-    // 旁证: turn 2 cap 应该有 turn 1 的 tool_result with is_error=true
-    // (server timeout reject → relay 给 CC 一个错误,CC 把 error 包成 tool_result)
+    // 旁证: turn 2 cap 必须有 turn 1 的 tool_result with is_error=true
+    // (server timeout reject → relay 给 CC 一个错误,CC 把 error 包成 tool_result)。
+    // Codex P1-B 终审 important: 把原 conditional if 改为硬断言, 否则只证明 event,
+    // 没证明 CC 真收到 error 并继续 fallback turn。
     const cap = await mockAdmin.captured();
-    if (cap.length >= 2) {
-      const tr = cap[1].toolResultsCurrentTurn[0];
-      if (tr) {
-        assert.equal(tr.is_error, true, "tool_result of timed-out tool should be is_error");
-      }
-    }
+    assert.ok(cap.length >= 2, `expected >=2 turns (CC should fallback after timeout error), got ${cap.length}`);
+    const tr = cap[1].toolResultsCurrentTurn[0];
+    assert.ok(tr, "expected tool_result for timed-out Bash on turn 2");
+    assert.equal(tr.is_error, true, "tool_result of timed-out tool should be is_error");
   } finally {
     await testToggles.reset();
     await cleanupFixture(caseId);
@@ -787,7 +793,7 @@ test("G2-client-disconnect: client 断 ws → server emit session.disconnected +
 //   不应 partial stream 卡住或 OOM。honest 触发:
 //     mock 用 scriptError(503) → CC 第一个 /v1/messages 拿 503 → SDK 抛错 → exit
 // ============================================================
-test("G3-mock-5xx: mock 返回 503 → cerelay session 优雅终止 (非 0 exit)", async () => {
+test("G3-mock-5xx: mock 返回 503 → 不挂死并记录首请求 (CC SDK exit code 行为不强求)", async () => {
   const caseId = "case-g3";
   await writeFixture(caseId, { ".keep": "" });
   const cwd = clientCwd(caseId);
