@@ -1181,6 +1181,8 @@ export class CerelayServer {
             fileAgent,
             ttlMs: 7 * 24 * 60 * 60 * 1000, // 7 天（plan §10.2 决策）
             totalTimeoutMs: 10_000, // 10s（preheat 是预热而非阻塞 session 的硬约束）
+            sessionId,
+            adminEvents: this.adminEvents,
           });
           const preheatResult = await preloader.preheat();
           log.info("ConfigPreloader 预热完成", {

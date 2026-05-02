@@ -14,6 +14,7 @@ import path from "node:path";
 import type { FileAgent, PrefetchItem, PrefetchResult } from "./file-agent/index.js";
 import { computeAncestorChain } from "./path-utils.js";
 import { createLogger } from "./logger.js";
+import type { AdminEventBuffer } from "./admin-events.js";
 
 const log = createLogger("config-preloader");
 
@@ -28,6 +29,10 @@ export interface ConfigPreloaderOptions {
    * 正常流程同步阻塞等 prefetch 完成。
    */
   totalTimeoutMs?: number;
+  /** session 标识，用于 admin event 关联（可选）。 */
+  sessionId?: string;
+  /** admin event buffer，用于 e2e probe（可选；未注入时静默跳过）。 */
+  adminEvents?: AdminEventBuffer;
 }
 
 export interface NamespaceMountPlan {
@@ -47,6 +52,8 @@ export class ConfigPreloader {
   private readonly fileAgent: FileAgent;
   private readonly ttlMs: number;
   private readonly totalTimeoutMs: number;
+  private readonly sessionId: string | undefined;
+  private readonly adminEvents: AdminEventBuffer | undefined;
 
   constructor(opts: ConfigPreloaderOptions) {
     if (!Number.isFinite(opts.ttlMs) || opts.ttlMs <= 0) {
@@ -59,6 +66,8 @@ export class ConfigPreloader {
     this.fileAgent = opts.fileAgent;
     this.ttlMs = opts.ttlMs;
     this.totalTimeoutMs = opts.totalTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.sessionId = opts.sessionId;
+    this.adminEvents = opts.adminEvents;
   }
 
   /**
@@ -133,6 +142,17 @@ export class ConfigPreloader {
       items.push({ kind: "file", absPath: path.join(dir, "CLAUDE.md") });
       items.push({ kind: "file", absPath: path.join(dir, "CLAUDE.local.md") });
     }
+
+    // F4 P2 不变量 (c) probe — config-preloader.plan
+    // 把 ancestor chain 和 prefetch items 暴露给 admin events，e2e 用此守
+    // "session A 的预热计划不串到 session B 的 cwd 子树"。
+    this.adminEvents?.record("config-preloader.plan", this.sessionId ?? null, {
+      sessionId: this.sessionId ?? null,
+      clientCwd: this.cwd,
+      homeDir: this.homeDir,
+      ancestorDirs: ancestorChain.slice(),
+      prefetchAbsPaths: items.map((it) => it.absPath),
+    });
 
     return items;
   }
