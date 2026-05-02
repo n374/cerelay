@@ -34,8 +34,10 @@ leave_on_failure() {
 }
 
 echo "[e2e-meta] starting supporting services..."
+# client-c 跟主 runner 一致预拉起：orchestrator depends_on client-c,即使
+# meta phase 暂未用到也会被自动拉起,显式 wait 让健康问题立即暴露。
 docker compose -p "$project" -f "$compose_file" up -d --build --wait \
-  mock-anthropic server client-a client-b
+  mock-anthropic server client-a client-b client-c
 
 echo "[e2e-meta] running meta orchestrator (test:meta)..."
 # 复用同一个 orchestrator 镜像，用 npm run test:meta 切换到 phase-p0-meta.test.ts

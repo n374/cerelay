@@ -28,9 +28,11 @@ leave_on_failure() {
 }
 
 # 启动支撑容器（带 healthcheck，等就绪）
+# client-c 是 C4-truncated 专用容器（cache scope budget 256KB），跟 client-a/b
+# 一起 wait 让其健康问题立即暴露（而不是延迟到 C4 case 才报错）。
 echo "[e2e] starting supporting services..."
 docker compose -p "$project" -f "$compose_file" up -d --build --wait \
-  mock-anthropic server client-a client-b
+  mock-anthropic server client-a client-b client-c
 
 # 跑 orchestrator
 echo "[e2e] running orchestrator..."

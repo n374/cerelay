@@ -29,6 +29,8 @@ export interface RunResponse {
 const HOSTS: Record<string, string> = {
   "client-a": process.env.CLIENT_A_URL || "http://client-a:9100",
   "client-b": process.env.CLIENT_B_URL || "http://client-b:9100",
+  // client-c 专用于 C4-truncated case：cache scope budget 256KB（见 docker-compose.e2e.yml）。
+  "client-c": process.env.CLIENT_C_URL || "http://client-c:9100",
 };
 
 export const clients = {

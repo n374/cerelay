@@ -136,6 +136,8 @@
 │         │                                                    │
 │         ├──► client-B:9100               ← 同上 (deviceB)     │
 │         └──► client-C:9100               ← 同上 (deviceC)     │
+│               CERELAY_E2E_MAX_SCOPE_BYTES=262144 (256KB)     │
+│               专用于 C4-truncated；不要把此 env 加到 A/B     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -454,6 +456,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | P0-B 闭环：11 项缺陷（4 Critical + 5 Important + 2 Nit）全部修复；新增 `file-proxy.read.served` admin event、`assertF3Isolation()` 公共断言、`/admin/cache` 单项查询 + gate、`pty.spawn.ready` 主断言；E1 拆 site=snapshot e2e + cache-hit/passthrough server 单测；mock 拆 `toolResultsAll`/`toolResultsCurrentTurn`；test-toggles 加 runtime assert。e2e 主 16/16 + meta 3/3 + server unit 425/425 全过；Codex 终审通过 |
 | 2026-05-02 | P1 阶段切分（Claude × Codex 方案对齐）：原 P1 10 case + 原 P2 2 case 重新切成 **P1-A**（A5 / C4-skipped，无基础设施改动）+ **P1-B**（其余 10 case + 8 项基础设施改动）。**P1-A 落地**：`phase-p1.test.ts` 加 2 case；npm test 入口扩到 `phase-p0.test.ts phase-p1.test.ts`，本地 `bash test/run-e2e-comprehensive.sh` 18/18 全绿；P1-B 范围登记在 §12 |
 | 2026-05-02 | §2.3 P2 需求池开张：补 H1-ws-reconnect / H2-server-restart 两条需求池条目（产品功能未实现，case 同步搁置；功能落地时本表是开 case 的锚点）。e2e coverage: N/A — 文档变更不引入新协议字段 / 工具 / 拓扑 / 隔离边界 / cache 维度 |
+| 2026-05-02 | **P1-B backlog 收尾 PR 6 (client-c 容器拓扑)**：docker-compose.e2e.yml 加 client-c service 携带 `CERELAY_E2E_MAX_SCOPE_BYTES=262144` (256KB)，专用于 C4-truncated case；orchestrator 加 CLIENT_C_URL + depends_on；clients.ts HOSTS 加 client-c。**严禁**把低 budget env 加到 client-a/client-b（会让 P0 C1 假阳性）。e2e coverage: 新增 client 容器拓扑维度 — 测试 case 在后续 PR 落地 |
 
 ---
 

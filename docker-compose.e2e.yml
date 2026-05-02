@@ -1,7 +1,12 @@
 # ============================================================
 # Cerelay — E2E 综合测试编排
-# 拓扑：orchestrator + mock-anthropic + server + client-a + client-b
+# 拓扑：orchestrator + mock-anthropic + server + client-a + client-b + client-c
 # 详见 docs/e2e-comprehensive-testing.md §3
+#
+# client-c 专用于 C4-truncated case：通过 CERELAY_E2E_MAX_SCOPE_BYTES
+# 把 cache scope budget 从 100MB 降到 256KB，让 fixture 触发 truncated
+# 路径。**严禁**把同样的 env 加到 client-a/client-b——会让 P0 C1
+# (1100 文件 17MB initial sync) 假阳性。
 # ============================================================
 
 services:
@@ -88,6 +93,28 @@ services:
       timeout: 1s
       retries: 15
 
+  client-c:
+    # C4-truncated 专用容器：cache scope budget 降到 256KB 触发 truncated 路径。
+    # 不要把 CERELAY_E2E_MAX_SCOPE_BYTES 加到 client-a/client-b，会让 P0 C1 假阳性。
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-client-agent
+    environment:
+      - SERVER_URL=ws://server:8765/ws
+      - CERELAY_E2E_MAX_SCOPE_BYTES=262144
+    volumes:
+      - e2e-fixtures:/workspace/fixtures
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - cerelay-e2e-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9100/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
   orchestrator:
     build:
       context: .
@@ -98,6 +125,7 @@ services:
       - SERVER_ADMIN_TOKEN=cerelay_e2e-admin-token
       - CLIENT_A_URL=http://client-a:9100
       - CLIENT_B_URL=http://client-b:9100
+      - CLIENT_C_URL=http://client-c:9100
       - FIXTURE_ROOT=/workspace/fixtures
     volumes:
       - e2e-fixtures:/workspace/fixtures
@@ -109,6 +137,8 @@ services:
       client-a:
         condition: service_healthy
       client-b:
+        condition: service_healthy
+      client-c:
         condition: service_healthy
     networks:
       - cerelay-e2e-net
