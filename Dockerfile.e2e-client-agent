@@ -1,0 +1,40 @@
+# ============================================================
+# Cerelay E2E — client agent 容器
+# 包含真 cerelay-client 编译产物 + thin HTTP agent
+# ============================================================
+FROM node:22-slim
+WORKDIR /app
+
+# 安装 client workspace 的 deps（编译期需要）+ tsx（agent 运行）
+COPY package.json package-lock.json ./
+COPY client/package.json ./client/
+COPY server/package.json ./server/
+COPY web/package.json ./web/
+RUN npm ci --workspaces --include-workspace-root
+
+# 复制 client 源码并构建
+COPY client/ ./client/
+COPY server/src/protocol.ts ./server/src/protocol.ts
+RUN npm run build --workspace=cerelay-client
+
+# 复制 agent 源码
+COPY test/e2e-comprehensive/agent/ /agent/
+WORKDIR /agent
+RUN npm ci
+
+# 每个容器启动时生成独立 device-id
+RUN mkdir -p /home/clientuser/.config/cerelay
+ENV HOME=/home/clientuser
+ENV XDG_CONFIG_HOME=/home/clientuser/.config
+ENV CLIENT_BIN=/app/client/dist/index.js
+ENV PORT=9100
+
+EXPOSE 9100
+
+# entrypoint 生成 device-id（如不存在）后启动 agent
+CMD sh -c '\
+  if [ ! -f "$XDG_CONFIG_HOME/cerelay/device-id" ]; then \
+    cat /proc/sys/kernel/random/uuid > "$XDG_CONFIG_HOME/cerelay/device-id"; \
+  fi; \
+  exec npx tsx /agent/index.ts \
+'

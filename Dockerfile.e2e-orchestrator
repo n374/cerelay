@@ -1,0 +1,13 @@
+# ============================================================
+# Cerelay E2E — orchestrator 容器
+# ============================================================
+FROM node:22-slim
+WORKDIR /workspace
+
+COPY test/e2e-comprehensive/orchestrator/package.json test/e2e-comprehensive/orchestrator/package-lock.json ./
+RUN npm ci
+
+COPY test/e2e-comprehensive/orchestrator/ ./
+
+# 默认入口：跑 P0 阶段所有 case（目前只有 phase-p0.test.ts）
+CMD ["npm", "test"]

@@ -1,0 +1,15 @@
+# ============================================================
+# Cerelay E2E — mock-anthropic 容器
+# ============================================================
+FROM node:22-slim
+WORKDIR /app
+
+COPY test/e2e-comprehensive/mock-anthropic/package.json test/e2e-comprehensive/mock-anthropic/package-lock.json ./
+RUN npm ci --omit=optional
+
+COPY test/e2e-comprehensive/mock-anthropic/ ./
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["npx", "tsx", "index.ts"]
