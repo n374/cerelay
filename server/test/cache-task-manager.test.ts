@@ -42,6 +42,94 @@ test("elect active under per-key lock when two capable clients connect concurren
   assert.equal(new Set(activeAssignments.map((message) => message.assignmentId)).size, 1);
 });
 
+test("same device clients from different cwd share one task and one active client", async (t) => {
+  const harness = await createHarness();
+  t.after(harness.cleanup);
+
+  const client1 = harness.addClient("client-1");
+  const client2 = harness.addClient("client-2");
+
+  await harness.manager.registerHello("client-1", capableHello("/Users/foo/project-a"));
+  await harness.manager.registerHello("client-2", capableHello("/Users/foo/project-b"));
+
+  const assignments = [
+    ...client1.messages.filter(isAssignment),
+    ...client2.messages.filter(isAssignment),
+  ];
+  assert.equal(assignments.filter((message) => message.role === "active").length, 1);
+  assert.equal(assignments.filter((message) => message.role === "inactive").length, 1);
+
+  const task = getTaskRecord(harness.manager);
+  assert.equal(task?.candidateClientIds.size, 2);
+});
+
+test("inactive client ancestor delta writes cwd-ancestor-md scope without changing active revision", async (t) => {
+  const harness = await createHarness();
+  t.after(harness.cleanup);
+
+  harness.addClient("client-1");
+  harness.addClient("client-2");
+  await harness.manager.registerHello("client-1", capableHello("/Users/foo/project-a"));
+  await harness.manager.registerHello("client-2", capableHello("/Users/foo/project-b"));
+
+  const task = getTaskRecord(harness.manager);
+  const activeRevision = task?.revision;
+  const content = "ancestor";
+  await harness.manager.applyAncestorDelta({
+    type: "cache_task_ancestor_delta",
+    deviceId: DEVICE_ID,
+    cwd: "/Users/foo/project-b",
+    changes: [{
+      kind: "upsert",
+      scope: "cwd-ancestor-md",
+      path: "/Users/foo/project-b/CLAUDE.md",
+      size: content.length,
+      mtime: 1,
+      sha256: sha256(content),
+      contentBase64: b64(content),
+    }],
+  });
+
+  const manifest = await harness.store.loadManifest(DEVICE_ID);
+  assert.ok(manifest.scopes["cwd-ancestor-md"].entries["/Users/foo/project-b/CLAUDE.md"]);
+  assert.equal(task?.revision, activeRevision);
+});
+
+test("ancestor deltas from two cwd are keyed by absolute path", async (t) => {
+  const harness = await createHarness();
+  t.after(harness.cleanup);
+
+  await harness.manager.applyAncestorDelta({
+    type: "cache_task_ancestor_delta",
+    deviceId: DEVICE_ID,
+    cwd: "/repo/a",
+    changes: [{
+      kind: "delete",
+      scope: "cwd-ancestor-md",
+      path: "/repo/a/CLAUDE.md",
+    }],
+  });
+  await harness.manager.applyAncestorDelta({
+    type: "cache_task_ancestor_delta",
+    deviceId: DEVICE_ID,
+    cwd: "/repo/b",
+    changes: [{
+      kind: "upsert",
+      scope: "cwd-ancestor-md",
+      path: "/repo/b/CLAUDE.md",
+      size: 1,
+      mtime: 1,
+      sha256: sha256("b"),
+      contentBase64: b64("b"),
+    }],
+  });
+
+  const manifest = await harness.store.loadManifest(DEVICE_ID);
+  assert.equal(manifest.scopes["cwd-ancestor-md"].entries["/repo/a/CLAUDE.md"], undefined);
+  assert.ok(manifest.scopes["cwd-ancestor-md"].entries["/repo/b/CLAUDE.md"]);
+});
+
+
 test("failover on heartbeat timeout", async (t) => {
   const harness = await createHarness();
   t.after(harness.cleanup);
@@ -314,7 +402,7 @@ test("重复 mutationId 的 delta 会直接 ack，不重复推进 revision", asy
   assert.equal(secondAck.ok, true);
   assert.equal(secondAck.appliedRevision, 1);
 
-  const manifest = await harness.store.loadManifest(DEVICE_ID, CWD);
+  const manifest = await harness.store.loadManifest(DEVICE_ID);
   assert.equal(manifest.revision, 1);
 });
 
@@ -356,11 +444,11 @@ async function createHarness() {
   };
 }
 
-function capableHello(): ClientHello {
+function capableHello(cwd = CWD): ClientHello {
   return {
     type: "client_hello",
     deviceId: DEVICE_ID,
-    cwd: CWD,
+    cwd,
     capabilities: {
       cacheTaskV1: {
         protocolVersion: 1,
@@ -388,9 +476,9 @@ function latestAck(messages: ServerToHandMessage[]): CacheTaskDeltaAck {
 function getTaskRecord(manager: CacheTaskManager) {
   return (
     manager as unknown as {
-      tasks: Map<string, { candidateClientIds: Set<string> }>;
+      tasks: Map<string, { candidateClientIds: Set<string>; revision: number }>;
     }
-  ).tasks.get(`${DEVICE_ID}\0${CWD}`);
+  ).tasks.get(DEVICE_ID);
 }
 
 function isAssignment(message: ServerToHandMessage): message is CacheTaskAssignment {

@@ -21,7 +21,7 @@ import type {
   CacheScope,
 } from "./protocol.js";
 
-export const CACHE_SCOPES: CacheScope[] = ["claude-home", "claude-json"];
+export const CACHE_SCOPES: CacheScope[] = ["claude-home", "claude-json", "cwd-ancestor-md"];
 
 /** Server 侧完整 manifest：按 scope 分组；未初始化的 scope 视为空条目集。 */
 export interface PersistedManifest {
@@ -341,6 +341,7 @@ export function emptyManifest(): PersistedManifest {
     scopes: {
       "claude-home": { entries: {} },
       "claude-json": { entries: {} },
+      "cwd-ancestor-md": { entries: {} },
     },
   };
 }
