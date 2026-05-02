@@ -551,6 +551,86 @@ export class CerelayServer {
       return;
     }
 
+    // INF-5: server data dir credentials 读写代理（GET / PUT / DELETE）。
+    // 给 D4-credentials-shadow + E2-credentials-rw 用：orchestrator 在测前预置
+    // server 侧 credentials 文件 / 测后验持久化 / 清理。
+    //
+    // 安全约束：
+    //   - 与 /admin/test-toggles + /admin/cache 同 gate（CERELAY_ADMIN_EVENTS=true）
+    //   - 生产默认 404，避免 admin token 泄漏即可读写 credentials
+    //   - 路径**硬编码**为 ${CERELAY_DATA_DIR || "/var/lib/cerelay"}/credentials/default/.credentials.json
+    //     (不接受 query 自定义路径，防 path traversal 写到任意位置)
+    if (url === "/admin/dataDir/credentials") {
+      if (!this.adminEvents.isEnabled()) {
+        this.sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const dataDir = process.env.CERELAY_DATA_DIR || "/var/lib/cerelay";
+      const credPath = `${dataDir}/credentials/default/.credentials.json`;
+      if (req.method === "GET") {
+        void (async () => {
+          try {
+            const fs = await import("node:fs/promises");
+            try {
+              const content = await fs.readFile(credPath, "utf8");
+              this.sendJson(res, 200, { exists: true, path: credPath, content });
+            } catch (err: unknown) {
+              if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+                this.sendJson(res, 200, { exists: false, path: credPath });
+                return;
+              }
+              throw err;
+            }
+          } catch (err) {
+            this.sendJson(res, 500, { error: String(err) });
+          }
+        })();
+        return;
+      }
+      if (req.method === "PUT") {
+        let bodyStr = "";
+        req.on("data", (chunk: Buffer) => { bodyStr += chunk.toString(); });
+        req.on("end", () => {
+          void (async () => {
+            try {
+              const body = JSON.parse(bodyStr) as { content: string };
+              if (typeof body.content !== "string") {
+                this.sendJson(res, 400, { error: "content (string) required" });
+                return;
+              }
+              const fs = await import("node:fs/promises");
+              const path = await import("node:path");
+              await fs.mkdir(path.dirname(credPath), { recursive: true });
+              // 原子写：先写 tmp 再 rename，避免 partial write 被 read 取到半截
+              const tmp = `${credPath}.tmp.${process.pid}.${Date.now()}`;
+              await fs.writeFile(tmp, body.content, "utf8");
+              await fs.rename(tmp, credPath);
+              // bytes 用 UTF-8 实际字节数（Codex PR2 review nit #2）。
+              // body.content 是 string,.length 给的是字符数（多字节字符不准）。
+              this.sendJson(res, 200, { ok: true, path: credPath, bytes: Buffer.byteLength(body.content, "utf8") });
+            } catch (err) {
+              this.sendJson(res, 500, { error: String(err) });
+            }
+          })();
+        });
+        return;
+      }
+      if (req.method === "DELETE") {
+        void (async () => {
+          try {
+            const fs = await import("node:fs/promises");
+            await fs.rm(credPath, { force: true });
+            this.sendJson(res, 200, { ok: true, path: credPath });
+          } catch (err) {
+            this.sendJson(res, 500, { error: String(err) });
+          }
+        })();
+        return;
+      }
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
     requestLog.debug("管理后台路由未命中");
     this.sendJson(res, 404, { error: "not_found" });
   }
