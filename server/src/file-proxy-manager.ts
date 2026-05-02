@@ -942,6 +942,7 @@ export class FileProxyManager {
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
       const { rootName, entries, negativeEntries } = result.value;
+      const rootClientPath = this.roots[rootName];
       if (entries) {
         for (const entry of entries) {
           entryCount++;
@@ -950,6 +951,23 @@ export class FileProxyManager {
           if (entry.entries) snapshot.readdirs[cachePath] = entry.entries;
           if (entry.data) snapshot.reads[cachePath] = entry.data;
           recordSampleFor(`client:${rootName}`, cachePath);
+          // C1: client-routed snapshot entry 进入 daemon snapshot——证明 server 端
+          // project-claude / cwd-ancestor-N 等 root 真触发了 client roundtrip 拿数据。
+          // relPath 由 cachePath 减去 rootClientPath 前缀；为根路径本身时取空串。
+          if (rootClientPath) {
+            const relPath = cachePath === rootClientPath
+              ? ""
+              : cachePath.startsWith(`${rootClientPath}/`)
+                ? cachePath.slice(rootClientPath.length + 1)
+                : cachePath;
+            this.adminEvents?.record("file-proxy.read.served", this.sessionId, {
+              root: rootName,
+              relPath,
+              servedFrom: "snapshot-client",
+              hasData: entry.data !== undefined,
+              size: entry.stat?.size ?? 0,
+            });
+          }
         }
       }
       if (negativeEntries) {
@@ -1150,6 +1168,18 @@ export class FileProxyManager {
       }
       // blob 缺失（被删 / 损坏）时不带 data，FUSE read 时会穿透 Client
     }
+    // C1: 在 server 端 snapshot 灌入 daemon 时 emit "file-proxy.read.served" event。
+    // 这个 entry 进入 snapshot 即代表后续 Python FUSE daemon 在 perm cache 命中时
+    // 不需要再走 server FUSE op——但 server 端确实"知道"并"提供"了这个 file 的内容，
+    // 这是 server 端 home-claude / home-claude-json 链路真触发的证据。e2e 主断言用。
+    const root = scope === "claude-home" ? "home-claude" : "home-claude-json";
+    this.adminEvents?.record("file-proxy.read.served", this.sessionId, {
+      root,
+      relPath,
+      servedFrom: "snapshot-cache",
+      hasData: data !== undefined,
+      size: entry.size,
+    });
     return {
       path: absPath,
       stat: makeFileStat(entry.size, entry.mtime),
@@ -1214,6 +1244,14 @@ export class FileProxyManager {
     this.writeToDaemon({
       reqId: req.reqId,
       data: slice.toString("base64"),
+    });
+    // C1: runtime cache hit——daemon perm cache miss 后回 server 拿 read，server 命中
+    // blob 直接服务。证明 server 端 home-claude / home-claude-json cache 链路真触发。
+    this.adminEvents?.record("file-proxy.read.served", this.sessionId, {
+      root: req.root,
+      relPath: req.relPath,
+      servedFrom: "cache",
+      sliceBytes: slice.byteLength,
     });
     return { served: true };
   }
@@ -1791,6 +1829,13 @@ export class FileProxyManager {
         : redacted.subarray(offsetOrig, end);
 
       this.writeToDaemon({ reqId: req.reqId, data: slice.toString("base64") });
+      // C1: runtime passthrough（settings.json 专用 redact 分支）。
+      this.adminEvents?.record("file-proxy.read.served", this.sessionId, {
+        root: req.root,
+        relPath: req.relPath,
+        servedFrom: "passthrough-settings",
+        sliceBytes: slice.byteLength,
+      });
     } catch (err) {
       log.warn("settings.json passthrough 失败", {
         sessionId: this.sessionId,

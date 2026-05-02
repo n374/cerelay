@@ -474,25 +474,68 @@ export class CerelayServer {
     }
 
     if (url.startsWith("/admin/cache") && req.method === "GET") {
-      // 测试用：按 deviceId 查 ClientCacheStore manifest 摘要（不暴露完整 path 列表，
-      // 避免无意泄漏 fixture 之外的真实路径）。仅给 revision + 每个 scope 的统计。
-      // 用于 P0-B-2 C1/C2 验证 pipeline initial sync 后服务端 manifest revision 正确。
+      // I1: 跟 /admin/test-toggles 一致 gate 到 CERELAY_ADMIN_EVENTS=true。
+      // 生产默认 404——避免 admin token 一旦泄漏即可枚举任意 deviceId 的
+      // revision / scope / 单项 sha256 摘要（C3 加了 single-entry 查询，泄漏面比
+      // 原先的 scope summary 更广，必须 gate）。
+      if (!this.adminEvents.isEnabled()) {
+        this.sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      // 按 deviceId 查 ClientCacheStore manifest。
+      // - 三参全缺时（仅 deviceId）：返回 scope 统计摘要（用于 C1/C2 pipeline 验证）。
+      // - 三参齐全（deviceId + scope + relPath）：返回单项摘要 { size, sha256 }，
+      //   缺失返回 404（用于 C3 双 device 内容隔离断言）。
       const u = new URL(req.url ?? "/admin/cache", "http://x");
       const deviceId = u.searchParams.get("deviceId");
+      const scope = u.searchParams.get("scope");
+      const relPath = u.searchParams.get("relPath");
       if (!deviceId) {
         this.sendJson(res, 400, { error: "deviceId required" });
         return;
       }
+      // 单项查询模式：scope + relPath 必须同时给出
+      if (scope || relPath) {
+        if (!scope || !relPath) {
+          this.sendJson(res, 400, { error: "scope + relPath must be provided together" });
+          return;
+        }
+        if (scope !== "claude-home" && scope !== "claude-json") {
+          this.sendJson(res, 400, { error: `invalid scope: ${scope}` });
+          return;
+        }
+        void this.cacheStore.lookupEntry(deviceId, scope, relPath).then((entry) => {
+          if (!entry) {
+            // 单项不存在用 404（meta-collision 反向断言要靠 404 区分"互查不到对方"
+            // 与"取到对方的 hash"两种 collision 失效模式）。
+            this.sendJson(res, 404, { error: "entry_not_found", deviceId, scope, relPath });
+            return;
+          }
+          this.sendJson(res, 200, {
+            deviceId,
+            scope,
+            relPath,
+            size: entry.size,
+            sha256: entry.sha256 ?? null,
+            skipped: entry.skipped === true,
+            mtime: entry.mtime,
+          });
+        }).catch((err) => {
+          this.sendJson(res, 500, { error: String(err) });
+        });
+        return;
+      }
+      // Summary 模式（兼容 P0-B-2 已有 case）
       void this.cacheStore.loadManifest(deviceId).then((m) => {
         const scopes: Record<string, { entryCount: number; totalBytes: number; truncated: boolean; skippedCount: number }> = {};
-        for (const [scope, data] of Object.entries(m.scopes)) {
+        for (const [scopeName, data] of Object.entries(m.scopes)) {
           let totalBytes = 0;
           let skippedCount = 0;
           for (const entry of Object.values(data.entries)) {
             totalBytes += entry.size;
             if (entry.skipped) skippedCount += 1;
           }
-          scopes[scope] = {
+          scopes[scopeName] = {
             entryCount: Object.keys(data.entries).length,
             totalBytes,
             truncated: data.truncated === true,

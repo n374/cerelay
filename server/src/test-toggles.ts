@@ -1,14 +1,20 @@
 // ============================================================
 // 测试用 process-global toggles（仅 e2e meta-test 使用）
 //
-// 用途：phase-p0-meta.test.ts 故意"引入 regression"验证 P0 case 能拦住。
-// 例如把 redact 关掉、把 ancestor IFS bug 重新注入。生产不应该读这些 flag。
+// !!!! DO NOT IMPORT FROM PRODUCTION CODE PATHS WITHOUT GATE !!!!
 //
-// 安全约束：
-//   - 仅当 CERELAY_ADMIN_EVENTS=true（仅在 e2e compose 设置）时，
-//     /admin/test-toggles 端点才挂载（参考 admin-events 同模式）
-//   - flag 默认全 false；只有 e2e meta-test 主动 POST 才会变更
-//   - meta-test 跑完必须 reset 回 false，避免污染同 process 的后续测试
+// 用途：phase-p0-meta.test.ts 故意"引入 regression"验证 P0 case 能拦住。
+// 例如把 redact 关掉、把 ancestor IFS bug 重新注入。
+//
+// 生产约束（I3 加固）：
+//   - getTestToggles 在生产路径**只允许返回默认全 false 状态**——文件级 const state
+//     初始化为全 false，setTestToggles 加了 runtime assert（必须 CERELAY_ADMIN_EVENTS=true
+//     才允许写）。即使 production code 误 import getTestToggles，也只能拿到默认值。
+//   - 真正的运行期 toggle 改写仅在 e2e（CERELAY_ADMIN_EVENTS=true + admin endpoint
+//     /admin/test-toggles）路径上发生。
+//   - 生产模块（file-proxy-manager.ts / claude-session-runtime.ts）依然 import
+//     getTestToggles 是有意为之——这是单文件实现 e2e 故意放水的最简方案。如果未来
+//     要做完全 DI 重构，参见 docs §11.2 I3 备选方案。
 // ============================================================
 
 interface TestToggles {
@@ -26,17 +32,41 @@ const state: TestToggles = {
   injectIfsBug: false,
 };
 
+/**
+ * 生产路径与测试路径都可以调；生产路径只会拿到默认全 false 状态（因为
+ * setTestToggles 在生产路径会 throw，state 永远不会被改）。
+ */
 export function getTestToggles(): Readonly<TestToggles> {
   return state;
 }
 
+/**
+ * I3 加固：runtime assert——只允许在 CERELAY_ADMIN_EVENTS=true 时改 toggle。
+ *
+ * 为什么不在 import 时 assert：file-proxy-manager.ts / claude-session-runtime.ts
+ * 在生产 path 也 import 这个模块来 read state（getTestToggles），生产 read 拿默认
+ * false 是合法的。真正不允许的是"生产路径写 state"——所以 assert 放在 setter。
+ *
+ * `process.env.NODE_ENV === "test"` 也被允许（server unit test 用，无 CERELAY_ADMIN_EVENTS env）。
+ */
+function assertWritable(): void {
+  if (process.env.CERELAY_ADMIN_EVENTS === "true") return;
+  if (process.env.NODE_ENV === "test") return;
+  throw new Error(
+    "test-toggles: setTestToggles/resetTestToggles 仅允许在 CERELAY_ADMIN_EVENTS=true 或 NODE_ENV=test 时调用。" +
+      "生产路径误调 = 测试用放水开关被打开，应当 throw 暴露问题。",
+  );
+}
+
 export function setTestToggles(patch: Partial<TestToggles>): TestToggles {
+  assertWritable();
   if (patch.disableRedact !== undefined) state.disableRedact = patch.disableRedact;
   if (patch.injectIfsBug !== undefined) state.injectIfsBug = patch.injectIfsBug;
   return { ...state };
 }
 
 export function resetTestToggles(): void {
+  assertWritable();
   state.disableRedact = false;
   state.injectIfsBug = false;
 }
