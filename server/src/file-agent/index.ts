@@ -11,6 +11,7 @@ import type { ClientCacheStore } from "./store.js";
 import { ScopeAdapter } from "./scope-adapter.js";
 import { TtlTable } from "./ttl-table.js";
 import { InflightMap, inflightKey } from "./inflight.js";
+import { GcRunner, DEFAULT_GC_INTERVAL_MS, type GcRunResult } from "./gc.js";
 import type {
   FileAgentReadResult,
   FileAgentStatResult,
@@ -31,6 +32,11 @@ export interface FileAgentOptions {
   now?: () => number;
   /** miss 时穿透 client 的 fetcher。Task 5 时由 sync-coordinator 提供。 */
   fetcher?: FileAgentFetcher;
+  /**
+   * GC 周期间隔。默认 DEFAULT_GC_INTERVAL_MS（60s）。设为 0 → 不启动周期 GC，
+   * 调用方需自己调 runGcOnce() 手动触发。测试场景常用 0。
+   */
+  gcIntervalMs?: number;
 }
 
 function assertValidTtl(ttlMs: number): void {
@@ -55,6 +61,7 @@ export class FileAgent {
   private readonly now: () => number;
   private readonly fetcher: FileAgentFetcher | null;
   private readonly inflight = new InflightMap();
+  private readonly gc: GcRunner | null;
 
   constructor(options: FileAgentOptions) {
     this.deviceId = options.deviceId;
@@ -63,6 +70,32 @@ export class FileAgent {
     this.now = options.now ?? (() => Date.now());
     this.ttl = new TtlTable({ now: this.now });
     this.fetcher = options.fetcher ?? null;
+
+    // 仅在 store 配置时启动 GC——没有 store 没有 manifest 可清。
+    const intervalMs = options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS;
+    if (this.store && intervalMs > 0) {
+      this.gc = new GcRunner({
+        deviceId: this.deviceId,
+        store: this.store,
+        scopeAdapter: this.scopeAdapter,
+        ttl: this.ttl,
+        inflight: this.inflight,
+        intervalMs,
+      });
+      this.gc.start();
+    } else if (this.store) {
+      // intervalMs=0 时仍构造 GC，便于调用方手动 runGcOnce
+      this.gc = new GcRunner({
+        deviceId: this.deviceId,
+        store: this.store,
+        scopeAdapter: this.scopeAdapter,
+        ttl: this.ttl,
+        inflight: this.inflight,
+        intervalMs: 1, // 占位，不会用到（不调 start）
+      });
+    } else {
+      this.gc = null;
+    }
   }
 
   async read(absPath: string, ttlMs: number): Promise<FileAgentReadResult> {
@@ -177,7 +210,17 @@ export class FileAgent {
   }
 
   async close(): Promise<void> {
-    // Task 7 GC 接入后会在这里关掉定时器。当前 noop。
+    if (this.gc) {
+      this.gc.stop();
+    }
+  }
+
+  /** 手动触发一次 GC（测试 / 启动期主动清理时用）。 */
+  async runGcOnce(): Promise<GcRunResult> {
+    if (!this.gc) {
+      return { evicted: 0, skippedInflight: 0, deletedBlobs: 0, durationMs: 0 };
+    }
+    return this.gc.runOnce();
   }
 
   /** 测试 only：暴露 TTL 表中某 path 的 expiresAt。 */
@@ -203,3 +246,5 @@ export { FileAgentUnavailableError } from "./types.js";
 export { ScopeAdapter } from "./scope-adapter.js";
 export { TtlTable } from "./ttl-table.js";
 export { InflightMap, inflightKey } from "./inflight.js";
+export { GcRunner, DEFAULT_GC_INTERVAL_MS } from "./gc.js";
+export type { GcRunResult } from "./gc.js";

@@ -76,17 +76,24 @@ export class TtlTable {
   }
 
   /**
-   * 把所有 expiresAt < now 的 path 收集出来并从表中移除（Task 7 GC 调用）。
-   * 调用方拿到这些 path 后再去 store 删 manifest entry / blob。
+   * 仅收集过期 paths（不从表移除）。GC 调用方决定要不要 drop——遇到 in-flight 时
+   * 跳过该 path 但**保留**ttl 条目，让下次 GC 重试。
    */
-  collectAndDropExpired(): string[] {
+  collectExpired(): string[] {
     const now = this.now();
     const expired: string[] = [];
     for (const [p, exp] of this.entries) {
-      if (exp < now) {
-        expired.push(p);
-      }
+      if (exp < now) expired.push(p);
     }
+    return expired;
+  }
+
+  /**
+   * 把所有 expiresAt < now 的 path 收集出来并从表中移除（保留旧 API，便于过渡）。
+   * 推荐 GC 用 collectExpired() + 选择性 drop()，给 in-flight 路径留缓刑。
+   */
+  collectAndDropExpired(): string[] {
+    const expired = this.collectExpired();
     for (const p of expired) {
       this.entries.delete(p);
     }
