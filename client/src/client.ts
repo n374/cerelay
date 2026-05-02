@@ -236,10 +236,11 @@ export class CerelayClient {
     await flushLogger();
   }
 
-  async sendCreatePtySession(cwd: string, model?: string): Promise<string> {
+  async sendCreatePtySession(cwd: string, model?: string, prompt?: string): Promise<string> {
     log.info("send create pty session", {
       cwd,
       model,
+      oneShot: Boolean(prompt),
     });
     await this.resetExecutor(cwd);
     const projectClaudeSettingsLocalContent = await readProjectClaudeSettingsLocal(cwd);
@@ -256,6 +257,7 @@ export class CerelayClient {
       termProgram: process.env.TERM_PROGRAM,
       termProgramVersion: process.env.TERM_PROGRAM_VERSION,
       deviceId: this.deviceId,
+      prompt,
     };
     await this.writeJSON(msg);
     const sessionId = await this.waitForPtySessionReady();
@@ -678,6 +680,96 @@ export class CerelayClient {
       stdin.on("data", onInput);
       stdout.on("resize", onResize);
       onResize();
+    });
+  }
+
+  /**
+   * One-shot 非交互模式：发送 prompt → 等 CC 完成 → 返回退出码。
+   * 不开 raw mode，不绑 stdin，只把 pty_output 写到 stdout，pty_exit 时 resolve。
+   * 供 e2e canary / CI 脚本化场景使用（对应 client CLI --prompt <text> 标志）。
+   */
+  async runOneShotMode(sessionId: string): Promise<number> {
+    log.info("run one-shot mode entry", { sessionId });
+    return new Promise((resolve, reject) => {
+      if (!this.ws) {
+        reject(new Error("WebSocket 未连接"));
+        return;
+      }
+
+      const ws = this.ws;
+
+      const cleanup = () => {
+        releaseMessageConsumer();
+        ws.off("error", onError);
+        ws.off("close", onClose);
+      };
+
+      const finish = (exitCode: number) => {
+        cleanup();
+        resolve(exitCode);
+      };
+
+      const onMessage = (raw: string) => {
+        let msg: ServerToHandMessage;
+        try {
+          msg = JSON.parse(raw) as ServerToHandMessage;
+        } catch (error) {
+          cleanup();
+          reject(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+
+        switch (msg.type) {
+          case "tool_call": {
+            const toolCall = msg as ToolCall;
+            if (toolCall.sessionId !== sessionId) break;
+            void this.executeToolCall(toolCall);
+            break;
+          }
+          case "tool_call_complete":
+            break;
+          case "pty_output": {
+            const output = msg as PtyOutput;
+            if (output.sessionId !== sessionId) break;
+            process.stdout.write(Buffer.from(output.data, "base64"));
+            break;
+          }
+          case "pty_exit": {
+            const exit = msg as PtyExit;
+            if (exit.sessionId !== sessionId) break;
+            log.info("one-shot pty_exit received", {
+              sessionId,
+              exitCode: exit.exitCode,
+              signal: exit.signal,
+            });
+            finish(exit.exitCode ?? 0);
+            break;
+          }
+          case "error": {
+            const serverError = msg as ServerError;
+            if (serverError.sessionId && serverError.sessionId !== sessionId) break;
+            cleanup();
+            reject(new Error(`服务器错误: ${serverError.message}`));
+            break;
+          }
+        }
+      };
+
+      const onError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+
+      const onClose = () => {
+        cleanup();
+        // WS 关闭时如果 CC 已 exit，pty_exit 应先到达。若 WS 先关则认为异常退出。
+        reject(new Error("WebSocket 连接已关闭（one-shot 模式等待 pty_exit 时）"));
+      };
+
+      const releaseMessageConsumer = this.attachMessageConsumer(onMessage);
+      this.flushPendingMessages();
+      ws.on("error", onError);
+      ws.on("close", onClose);
     });
   }
 

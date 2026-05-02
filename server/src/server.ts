@@ -995,6 +995,7 @@ export class CerelayServer {
       termProgram: message.termProgram,
       termProgramVersion: message.termProgramVersion,
       clientHomeDir: message.homeDir,
+      prompt: message.prompt,
       shouldRouteToolToClient: (toolName) => this.toolRouting.shouldRouteToHand(toolName),
       getFileProxyStartupStats: fileProxy ? () => fileProxy!.getStartupStats() : undefined,
       adminEvents: this.adminEvents,

@@ -19,10 +19,15 @@ program
   .option("--cwd <dir>", "工作目录（默认当前目录）")
   .option("--log-level <level>", "日志级别（debug/info/warn/error）", "info")
   .option("--log-file <path>", "Client 日志文件路径", resolveDefaultLogFilePath())
+  .option("--prompt <text>", "一次性 prompt（设置时启动 one-shot 模式：发完 prompt 等 CC 完成即退出）")
   .action(async () => {
     const opts = program.opts<CommonOptions>();
     configureHandLogging(opts);
-    await runPtyMode(opts.server, resolveKey(opts.key), opts.cwd);
+    if (opts.prompt) {
+      await runOneShotMode(opts.server, resolveKey(opts.key), opts.cwd, opts.prompt);
+    } else {
+      await runPtyMode(opts.server, resolveKey(opts.key), opts.cwd);
+    }
   });
 
 program
@@ -45,6 +50,7 @@ interface CommonOptions {
   cwd?: string;
   logLevel?: string;
   logFile?: string;
+  prompt?: string;
 }
 
 // ============================================================
@@ -154,6 +160,62 @@ async function runPtyMode(server: string, key: string | undefined, cwdOverride?:
     });
     await client.close();
   }
+}
+
+// ============================================================
+// One-shot 模式（--prompt <text>）
+// ============================================================
+
+async function runOneShotMode(
+  server: string,
+  key: string | undefined,
+  cwdOverride: string | undefined,
+  prompt: string,
+): Promise<void> {
+  const runStartedAt = Date.now();
+  const cwd = cwdOverride ?? process.cwd();
+  const serverURL = buildServerURL(server, key);
+  // one-shot 模式：非交互，不需要 interactiveOutput UI 装饰
+  const client = new CerelayClient(serverURL, cwd, { interactiveOutput: false });
+
+  let interrupting = false;
+  const handleInterrupt = (signal: NodeJS.Signals) => {
+    if (interrupting) {
+      process.exit(130);
+    }
+    interrupting = true;
+    process.stderr.write(`\n\x1b[33m[已中断 ${signal}, 正在退出...]\x1b[0m\n`);
+    void client.close()
+      .catch(() => undefined)
+      .finally(() => process.exit(130));
+    setTimeout(() => {
+      void flushLogger().finally(() => process.exit(130));
+    }, 1500).unref();
+  };
+  process.on("SIGINT", handleInterrupt);
+  process.on("SIGTERM", handleInterrupt);
+
+  let exitCode = 0;
+  try {
+    await client.connect();
+    const sessionId = await client.sendCreatePtySession(cwd, undefined, prompt);
+    log.info("one-shot session started", { sessionId, prompt: prompt.slice(0, 80) });
+    exitCode = await client.runOneShotMode(sessionId);
+  } catch (err) {
+    process.stderr.write(
+      `\x1b[31mOne-shot 模式失败: ${err instanceof Error ? err.message : String(err)}\x1b[0m\n`,
+    );
+    exitCode = 1;
+  } finally {
+    process.off("SIGINT", handleInterrupt);
+    process.off("SIGTERM", handleInterrupt);
+    log.info("runOneShotMode exiting", {
+      exitCode,
+      totalDurationMs: Date.now() - runStartedAt,
+    });
+    await client.close();
+  }
+  process.exit(exitCode);
 }
 
 function configureHandLogging(options: CommonOptions): void {

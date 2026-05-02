@@ -56,6 +56,11 @@ export interface ClaudePtySessionOptions {
    */
   adminEvents?: AdminEventBuffer;
   /**
+   * 可选：one-shot prompt。设置时 buildClaudeCommandArgs 注入 `-p <prompt>`，
+   * CC 非交互运行，session 在 CC exit 时自然结束。
+   */
+  prompt?: string;
+  /**
    * Plan D shadow MCP 注入开关。enabled=true 时 ClaudePtySession 会：
    * 1. 启动 per-session MCPIpcHost（unix socket）
    * 2. spawn CC 时追加 --mcp-config / --append-system-prompt / --disallowedTools
@@ -80,6 +85,7 @@ export class ClaudePtySession {
   readonly cwd: string;
 
   private readonly model?: string;
+  private readonly prompt?: string;
   private readonly runtime: ClaudeSessionRuntime;
   private readonly transport: PtySessionTransport;
   private readonly term?: string;
@@ -106,6 +112,7 @@ export class ClaudePtySession {
     this.id = options.id;
     this.cwd = options.cwd;
     this.model = options.model;
+    this.prompt = options.prompt;
     this.runtime = options.runtime;
     this.transport = options.transport;
     this.term = options.term;
@@ -141,7 +148,7 @@ export class ClaudePtySession {
       mcpInjectionArgs = await this.startShadowMcpHost();
     }
 
-    const commandLine = buildClaudeCommandArgs(this.model, mcpInjectionArgs);
+    const commandLine = buildClaudeCommandArgs(this.model, mcpInjectionArgs, this.prompt);
     this.log.debug("启动 Claude PTY passthrough 会话", {
       cols,
       rows,
@@ -583,7 +590,7 @@ function resolveShadowMcpSocketDir(): string {
   return "/tmp";
 }
 
-function buildClaudeCommandArgs(model: string | undefined, extraArgs: string[] = []): string[] {
+function buildClaudeCommandArgs(model: string | undefined, extraArgs: string[] = [], prompt?: string): string[] {
   const override = process.env.CERELAY_PTY_COMMAND?.trim();
   if (override) {
     // Test/dev override 下不混入 mcp 注入——override 通常用于跑 cat / sh
@@ -595,5 +602,6 @@ function buildClaudeCommandArgs(model: string | undefined, extraArgs: string[] =
     resolveClaudeCodeExecutable(),
     ...(model ? ["--model", model] : []),
     ...extraArgs,
+    ...(prompt ? ["-p", prompt] : []),
   ];
 }

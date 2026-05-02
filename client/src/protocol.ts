@@ -46,6 +46,11 @@ export interface CreatePtySession {
   termProgramVersion?: string;
   /** 本机持久化的 deviceId，Server 用它定位 cache 目录 */
   deviceId?: string;
+  /**
+   * 可选：one-shot 非交互模式提示词。设置时 server 把 -p <prompt> 透传到
+   * claude CLI，CC 跑完即退出，无需 stdin 交互。用于 e2e 测试 + 脚本化场景。
+   */
+  prompt?: string;
 }
 
 export interface PtySessionCreated {
