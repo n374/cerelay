@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { createLogger } from "./logger.js";
 import { PYTHON_FUSE_HOST_SCRIPT } from "./fuse-host-script.js";
 import {
@@ -310,6 +310,29 @@ export class FileProxyManager {
       });
     }
     return redacted;
+  }
+
+  /**
+   * 计算内容字节的 SHA-256 hex 字符串。
+   * 仅在 CERELAY_ADMIN_EVENTS=true 时计算——生产路径直接返回 undefined，零开销。
+   * 入参可以是 Buffer（直接用）或 string（按 UTF-8 处理，不做 base64 decode）。
+   * 调用方如需对 base64 内容算原始字节 sha256，应先自行 Buffer.from(data, "base64")。
+   * Spec: docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md §5.4
+   */
+  private computeContentSha256(bytes: Buffer | string): string | undefined {
+    if (process.env.CERELAY_ADMIN_EVENTS !== "true") return undefined;
+    return createHash("sha256").update(bytes).digest("hex");
+  }
+
+  /**
+   * 将 root + relPath 拼成 client 本机物理路径（用于 admin event detail）。
+   * this.roots[root] 是 client 侧该 root 的绝对路径；relPath 为空串时直接返回 root 路径。
+   */
+  private buildClientPath(root: string, relPath: string): string {
+    const rootPath = this.roots[root];
+    if (!rootPath) return relPath;
+    if (!relPath) return rootPath;
+    return path.join(rootPath, relPath);
   }
 
   /**
@@ -971,6 +994,9 @@ export class FileProxyManager {
               servedFrom: "snapshot-client",
               hasData: entry.data !== undefined,
               size: entry.stat?.size ?? 0,
+              clientCwd: this.clientCwd,
+              clientPath: this.buildClientPath(rootName, relPath),
+              contentSha256: this.computeContentSha256(Buffer.from(entry.data ?? "", "base64")),
             });
           }
         }
@@ -1184,6 +1210,9 @@ export class FileProxyManager {
       servedFrom: "snapshot-cache",
       hasData: data !== undefined,
       size: entry.size,
+      clientCwd: this.clientCwd,
+      clientPath: this.buildClientPath(root, relPath),
+      contentSha256: this.computeContentSha256(Buffer.from(data ?? "", "base64")),
     });
     return {
       path: absPath,
@@ -1257,6 +1286,9 @@ export class FileProxyManager {
       relPath: req.relPath,
       servedFrom: "cache",
       sliceBytes: slice.byteLength,
+      clientCwd: this.clientCwd,
+      clientPath: this.buildClientPath(req.root, req.relPath),
+      contentSha256: this.computeContentSha256(buf),
     });
     return { served: true };
   }
@@ -1913,6 +1945,9 @@ export class FileProxyManager {
         relPath: req.relPath,
         servedFrom: "passthrough-settings",
         sliceBytes: slice.byteLength,
+        clientCwd: this.clientCwd,
+        clientPath: this.buildClientPath(req.root, req.relPath ?? ""),
+        contentSha256: this.computeContentSha256(redacted),
       });
     } catch (err) {
       log.warn("settings.json passthrough 失败", {
