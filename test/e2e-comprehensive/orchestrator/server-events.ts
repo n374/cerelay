@@ -444,6 +444,43 @@ export const toolTimeoutEvents = {
   },
 };
 
+/**
+ * INF-5: server 容器内 ${CERELAY_DATA_DIR}/credentials/default/.credentials.json
+ * 读写代理。给 D4-credentials-shadow + E2-credentials-rw 用：
+ *   - D4: PUT 预置 server 侧 credentials → 验 namespace 内 read shadow 真触达
+ *   - E2: namespace 内写后 GET 验 server 侧持久化、bytes 一致
+ *   - cleanup: DELETE 防 case 间互相污染
+ *
+ * 仅 CERELAY_ADMIN_EVENTS=true 时挂载（与 /admin/test-toggles + /admin/cache 同 gate）;
+ * 生产返回 404。
+ */
+export const serverDataDir = {
+  async getCredentials(): Promise<{ exists: boolean; path: string; content?: string }> {
+    const r = await fetch(new URL("/admin/dataDir/credentials", BASE), {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    if (!r.ok) throw new Error(`server /admin/dataDir/credentials GET → ${r.status}: ${await r.text()}`);
+    return await r.json() as { exists: boolean; path: string; content?: string };
+  },
+  async putCredentials(content: string): Promise<{ ok: boolean; path: string; bytes: number }> {
+    const r = await fetch(new URL("/admin/dataDir/credentials", BASE), {
+      method: "PUT",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (!r.ok) throw new Error(`server /admin/dataDir/credentials PUT → ${r.status}: ${await r.text()}`);
+    return await r.json() as { ok: boolean; path: string; bytes: number };
+  },
+  async deleteCredentials(): Promise<{ ok: boolean; path: string }> {
+    const r = await fetch(new URL("/admin/dataDir/credentials", BASE), {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    if (!r.ok) throw new Error(`server /admin/dataDir/credentials DELETE → ${r.status}: ${await r.text()}`);
+    return await r.json() as { ok: boolean; path: string };
+  },
+};
+
 export const sessionEvents = {
   async findDisconnected(opts: {
     sessionId?: string;
