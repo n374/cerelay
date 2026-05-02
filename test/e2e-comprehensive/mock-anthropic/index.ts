@@ -35,13 +35,31 @@ interface ScriptDef {
   respond: { type: "stream"; events: ScriptStreamEvent[] };
 }
 
+interface ToolResultBlock {
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
 interface CapturedRequest {
   index: number;       // reset 后递增
   url: string;
   method: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
-  toolResults: Array<{ tool_use_id: string; content: string; is_error: boolean }>;
+  /**
+   * I4: 字段名表达"全部历史 tool_result（累计所有 user message 的 tool_result blocks）"。
+   * 此字段是 Anthropic transcript 的镜像，按发送时序追加；旧 case 用 .at(-1) 取
+   * "当前 turn 最后一个" 是绕语义的 workaround。新 case 应改用 toolResultsCurrentTurn。
+   */
+  toolResultsAll: ToolResultBlock[];
+  /**
+   * I4: 仅当前 turn 的 tool_result blocks——即 messages 数组里**最后一条** user
+   * message 内的 tool_result blocks。Anthropic 协议下，每轮 tool_use → tool_result
+   * 都封在最后一条 user message 里，所以"当前 turn 的工具结果" === 该 message 的
+   * tool_result blocks。多 tool（如 F1 并发）时该数组就是 N 条；单 tool 时即 1 条。
+   */
+  toolResultsCurrentTurn: ToolResultBlock[];
   matchedScript: string | null;
   receivedAt: string;  // ISO
 }
@@ -99,24 +117,49 @@ function getByPath(obj: unknown, path: string): unknown {
   return cur;
 }
 
-function flattenToolResults(body: Record<string, unknown>): CapturedRequest["toolResults"] {
-  const out: CapturedRequest["toolResults"] = [];
-  const messages = (body.messages as Array<{ role: string; content: unknown }>) || [];
-  for (const m of messages) {
-    if (m.role !== "user") continue;
-    if (typeof m.content !== "object" || m.content === null) continue;
-    const blocks = m.content as Array<Record<string, unknown>>;
-    for (const b of blocks) {
-      if (b.type !== "tool_result") continue;
-      const id = (b.tool_use_id as string) || "";
-      const content = typeof b.content === "string"
-        ? b.content
-        : JSON.stringify(b.content);
-      const isError = (b.is_error as boolean) ?? false;
-      out.push({ tool_use_id: id, content, is_error: isError });
-    }
+function extractToolResultsFromMessage(message: { role: string; content: unknown }): ToolResultBlock[] {
+  if (message.role !== "user") return [];
+  if (typeof message.content !== "object" || message.content === null) return [];
+  const blocks = message.content as Array<Record<string, unknown>>;
+  const out: ToolResultBlock[] = [];
+  for (const b of blocks) {
+    if (b.type !== "tool_result") continue;
+    const id = (b.tool_use_id as string) || "";
+    const content = typeof b.content === "string"
+      ? b.content
+      : JSON.stringify(b.content);
+    const isError = (b.is_error as boolean) ?? false;
+    out.push({ tool_use_id: id, content, is_error: isError });
   }
   return out;
+}
+
+/**
+ * I4: 拆出两种语义。
+ * - all: 把整段 transcript 里所有 user message 的 tool_result blocks 拍平累加。
+ *   语义对应"截至当前请求，模型见过的所有工具结果"。仅 transcript 级断言用。
+ * - currentTurn: 取 messages 末尾的 user message（CC 在每轮 tool_use 之后塞回来的
+ *   tool_result 总在最后一条 user message 里）。语义对应"本轮 tool_use 的执行结果"。
+ *   日常 case 应使用本字段，避免 .at(-1) 这种绕语义的 workaround。
+ */
+function flattenToolResults(body: Record<string, unknown>): {
+  toolResultsAll: ToolResultBlock[];
+  toolResultsCurrentTurn: ToolResultBlock[];
+} {
+  const all: ToolResultBlock[] = [];
+  const messages = (body.messages as Array<{ role: string; content: unknown }>) || [];
+  for (const m of messages) {
+    all.push(...extractToolResultsFromMessage(m));
+  }
+  // currentTurn = 末尾 user message 的 tool_result blocks（可能为空）
+  let currentTurn: ToolResultBlock[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      currentTurn = extractToolResultsFromMessage(messages[i]);
+      break;
+    }
+  }
+  return { toolResultsAll: all, toolResultsCurrentTurn: currentTurn };
 }
 
 // ============================================================
@@ -202,13 +245,15 @@ const server = createServer(async (req, res) => {
         if (typeof v === "string") headers[k] = v;
         else if (Array.isArray(v)) headers[k] = v.join(",");
       }
+      const { toolResultsAll, toolResultsCurrentTurn } = flattenToolResults(body);
       const cap: CapturedRequest = {
         index: counter,
         url,
         method: req.method,
         headers,
         body,
-        toolResults: flattenToolResults(body),
+        toolResultsAll,
+        toolResultsCurrentTurn,
         matchedScript: null,
         receivedAt: new Date().toISOString(),
       };

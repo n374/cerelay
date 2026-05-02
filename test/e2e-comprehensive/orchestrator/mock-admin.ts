@@ -10,13 +10,25 @@ export interface ScriptDef {
   respond: { type: "stream"; events: Array<Record<string, unknown>> };
 }
 
+export interface ToolResultBlock {
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
 export interface CapturedRequest {
   index: number;
   url: string;
   method: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
-  toolResults: Array<{ tool_use_id: string; content: string; is_error: boolean }>;
+  /** I4: 全部历史 tool_result（累计所有 user message）。仅 transcript 级断言用。 */
+  toolResultsAll: ToolResultBlock[];
+  /**
+   * I4: 仅当前 turn 的 tool_result（messages 末尾 user message 内的 tool_result blocks）。
+   * 日常 case 应使用本字段：1 个 turn 1 tool 时取 [0]，并发多 tool 时取整个数组。
+   */
+  toolResultsCurrentTurn: ToolResultBlock[];
   matchedScript: string | null;
   receivedAt: string;
 }
