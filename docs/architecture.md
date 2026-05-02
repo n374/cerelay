@@ -368,12 +368,14 @@ cerelay/
 
 ### 9.2 E2E 集成测试
 
-**关键文件**：`server/test/e2e-hand.test.ts`、`server/test/e2e-hand-mock-api.test.ts`、`server/test/e2e-mcp-shadow-bash.test.ts`、`server/test/e2e-real-claude-bash.test.ts`
-
-- 启动真实 Server 和 Client（或 mock brain）
-- 通过 WebSocket 交互
-- 验证完整的工具执行流程
+**单模块 / 协议层 e2e**（server-only，import 内部模块 + 注入 fixture）：
+- `server/test/e2e-real-claude-bash.test.ts`、`server/test/e2e-mcp-shadow-bash.test.ts`、`server/test/e2e-pty.test.ts`、`server/test/e2e-cross-cwd-and-mutations.test.ts`、`server/test/e2e-file-agent.test.ts`、`server/test/e2e-daemon-no-perforation.test.ts`、`server/test/e2e-runtime-negative-persisted.test.ts`
 - **Plan D 双路径不变量**：`mcp__cerelay__*` 路径 `is_error === false`；legacy hook 路径 `is_error === true`（CC 协议硬约束）
+
+**全链路综合 e2e**（多容器：真 server + N 真 client + mock anthropic + orchestrator）：
+- 详见 [`e2e-comprehensive-testing.md`](./e2e-comprehensive-testing.md)
+- 默认在 `npm test` 中容器化跑，覆盖工具链路、文件代理、cache 同步、mount namespace、redaction、多 device / 多 client 拓扑
+- 三阶段推进 P0 → P1 → P2，**每次功能变更必须同步审计覆盖矩阵**（约束写在 [`../CLAUDE.md`](../CLAUDE.md)）
 
 ### 9.3 烟测
 
@@ -402,6 +404,7 @@ npm run test:smoke
 
 | 文档 | 内容 |
 |---|---|
+| [`e2e-comprehensive-testing.md`](./e2e-comprehensive-testing.md) | 全链路 e2e 综合测试（多容器：真 server + N 真 client + mock anthropic）；P0/P1/P2 三阶段覆盖矩阵；强制审计约束 |
 | [`brain-docker.md`](./brain-docker.md) | Docker 部署、`cerelay-data` volume、SOCKS5 代理细节 |
 | [`acp-editor-integration.md`](./acp-editor-integration.md) | ACP stdio 模式协议、Zed / VS Code 集成 |
 | [`plan-d-mcp-shadow-tools.md`](./plan-d-mcp-shadow-tools.md) | Shadow MCP 设计（绕开 PreToolUse deny 协议约束） |
@@ -413,7 +416,7 @@ npm run test:smoke
 
 ## 12. 文档维护原则 / Documentation Maintenance Principles
 
-> 本节同步定义在 [`../CLAUDE.md`](../CLAUDE.md)（`文档结构与职责 / Documentation Structure & Responsibility`）。新增 / 修改文档时请遵循以下职责划分：
+> 通用文档**格式与模板**（中英双语、Markdown、代码示例、图表、章节顺序）见 `~/.claude/rules/doc-conventions.md`。本节定义 cerelay 项目内**各文档职责划分**（哪些内容放哪个文件）：
 
 - [`README.md`](../README.md) — **用户视角**：能力总览、前置条件、快速开始、鉴权、代理、Web UI、license。**不放架构图、组件分层、env vars 全表、内部模块路径**
 - [`docs/architecture.md`](./architecture.md)（本文档）— **贡献者视角**：架构总览 + 技术选型 + 核心机制 + 子文档索引。**专题深挖**（部署 / 编辑器集成 / Plan D 设计等）下沉到独立 `docs/<topic>.md`

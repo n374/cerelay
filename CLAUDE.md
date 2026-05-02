@@ -2,27 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 文档结构与职责 / Documentation Structure & Responsibility
+> **文档规范**：通用文档格式与模板见 `~/.claude/rules/doc-conventions.md`；项目内文档职责划分见 [`docs/architecture.md` §12 文档维护原则](./docs/architecture.md#12-文档维护原则--documentation-maintenance-principles)。
 
-> **强制约束**：在本仓库新增 / 修改文档时必须遵循以下职责划分。违反约束的提交应当在 review 阶段被打回。
+## E2E 综合测试覆盖审计 / E2E Comprehensive Test Coverage Audit
 
-| 文档 | 受众 | 该放什么 | **不该放什么** |
-|---|---|---|---|
-| [`README.md`](./README.md) | **用户** | 能做什么、前置条件、快速开始、鉴权、代理、Web UI、用户级 env vars、license | 架构图、组件分层表、内部模块路径、系统级 env vars、Plan 设计文档 |
-| [`docs/architecture.md`](./docs/architecture.md) | **贡献者 / 开发者** | 架构总览、技术选型、核心机制、项目结构、系统级 env vars、测试架构、子文档索引 | 用户安装步骤、商业 license 文案、单一专题深挖（应下沉到 `docs/<topic>.md`） |
-| `docs/<topic>.md` | 单一专题受众 | 一个特性 / 模块的完整设计与协议（如 Plan D shadow MCP、ACP relay、Docker 部署） | 跨模块的总览（应在 architecture.md） |
-| `CLAUDE.md`（本文档） | **AI 协作** | AI 工作约定、项目级强制约束（如 Phase 抽象约束、本节文档职责约束） | 大段重复 architecture.md 的描述性架构介绍——只在不便表达"必须 / 禁止"规则时补充 |
+> **强制约束**：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开 [`docs/e2e-comprehensive-testing.md`](./docs/e2e-comprehensive-testing.md) §2 覆盖矩阵，按下面三问做一次审计；不允许"功能合入但矩阵未审计"，review 阶段把这条作为硬卡点。
+>
+> **Mandatory**: After every feature dev / update / fix (before commit), open [`docs/e2e-comprehensive-testing.md`](./docs/e2e-comprehensive-testing.md) §2 coverage matrix and answer the three questions below. "Feature merged without coverage audit" is not allowed — reviewers MUST treat this as a hard blocker.
 
-**新增文档的检查清单**：
+1. 本次变更是否引入了**新的协议字段、新的工具、新的拓扑、新的隔离边界、新的 cache 维度**之一？
+   _Did this change introduce a new protocol field, tool, topology, isolation boundary, or cache dimension?_
+2. 如果是，§2.1 / §2.2 / §2.3 是否已有 case 覆盖？
+   _If yes, is it already covered by an existing case in §2.1 / §2.2 / §2.3?_
+3. 如果未覆盖，**本次 PR 必须同步**：
+   - 在矩阵对应阶段表格里加一行（按当前阶段归类 P0/P1/P2）
+   - 在对应 `phase-pX.test.ts` 加 case；尚未到该阶段则加 `test.todo` 占位 + issue link
+   _If not covered, this PR MUST: add a row to the matrix at the appropriate phase, and add a case (or `test.todo` placeholder + issue link) in the corresponding `phase-pX.test.ts`._
 
-1. **写之前先决定受众**：用户视角的怎么用 → README；贡献者视角的怎么实现 → architecture.md 或 docs/`<topic>`.md
-2. **新建 `docs/<topic>.md` 必须做两件事**：
-   - 在 `docs/architecture.md` §11 子文档索引 表格里登记
-   - 如果 README 也涉及该专题，README 用一句话提及并链接到 sub-doc，**禁止把整段细节抄进 README**
-3. **CLAUDE.md 与 architecture.md 重叠时**：架构描述以 architecture.md 为准；CLAUDE.md 只保留"必须 / 禁止"形式的强制约束 + 跨链接
-4. **修改 README 时反向检查**：新加内容是否其实属于 architecture.md / sub-doc？如果是请挪过去并在 README 里只放一句话指引
-
-参考实现：[`docs/architecture.md` §12 文档维护原则](./docs/architecture.md#12-文档维护原则--documentation-maintenance-principles)。
+如果本次变更**不属于**上述类别（例如：注释 / 文档微调 / 内部 refactor 不改外部行为），在 commit / PR 描述里写一句 "e2e coverage: N/A — 不引入新协议字段 / 工具 / 拓扑 / 隔离边界 / cache 维度" 即可豁免。
 
 ## 项目概述 / Project Overview
 
