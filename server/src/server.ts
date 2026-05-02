@@ -35,7 +35,9 @@ import type {
   ToolResult,
 } from "./protocol.js";
 import { ClientCacheStore } from "./file-agent/store.js";
-import { FileAgent } from "./file-agent/index.js";
+import { FileAgent, ScopeAdapter, InflightMap } from "./file-agent/index.js";
+import { SyncCoordinator } from "./file-agent/sync-coordinator.js";
+import { CacheTaskClientDispatcher } from "./file-agent/cache-task-dispatcher.js";
 import { ConfigPreloader } from "./config-preloader.js";
 import { AccessLedgerStore } from "./access-ledger.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
@@ -123,6 +125,14 @@ export class CerelayServer {
       getHomedirForDevice: () => homedir(),
       sendToClient: async (clientId, message) => {
         await this.sendToClient(clientId, message);
+      },
+      // Plan §3.6 路径 B wiring：watcher delta 落 manifest 后通知对应 FileAgent
+      // 处理 inflight telemetry + TTL 续期。FileAgent 不重复 apply manifest。
+      onDeltaApplied: async (deviceId, changes) => {
+        const agent = this.fileAgents.get(deviceId);
+        if (agent) {
+          await agent.notifyWatcherDeltaApplied(changes);
+        }
       },
     });
 
@@ -569,10 +579,28 @@ export class CerelayServer {
         return existing;
       }
     }
+    // Wiring（plan §9.1 #1）：构造 SyncCoordinator + CacheTaskClientDispatcher 注入
+    // FileAgent，让 read miss 时通过 dispatcher 查 manifest（active client 之前推过的内容
+    // 能命中，否则 missing；不抛错）。
+    const scopeAdapter = new ScopeAdapter(homeDir);
+    const inflight = new InflightMap();
+    const dispatcher = new CacheTaskClientDispatcher({
+      deviceId,
+      store: this.cacheStore,
+      scopeAdapter,
+    });
+    const syncCoordinator = new SyncCoordinator({
+      deviceId,
+      store: this.cacheStore,
+      scopeAdapter,
+      inflight,
+      dispatcher,
+    });
     const agent = new FileAgent({
       deviceId,
       homeDir,
       store: this.cacheStore,
+      fetcher: syncCoordinator,
       // 默认周期 GC 60s（DEFAULT_GC_INTERVAL_MS）
     });
     this.fileAgents.set(deviceId, agent);

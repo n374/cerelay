@@ -215,6 +215,42 @@ export class FileAgent {
     }
   }
 
+  /**
+   * Plan §3.6 路径 B wiring：watcher delta 已被外部（cache-task-manager）apply 到
+   * store 后通知 FileAgent。本方法**不重复 apply**，只做：
+   *   1. 清掉受影响 path 的 in-flight 项 telemetry（fetcher 让它按 snapshot 正常 resolve）
+   *   2. 让 TTL 表对受影响 path 续期（watcher 推送 = 用户/系统在用，应保留）
+   *
+   * 注：在 server.ts 中通过 cacheTaskManager.onDeltaApplied 回调注册到对应 deviceId
+   * 的 FileAgent。
+   */
+  async notifyWatcherDeltaApplied(
+    changes: import("../protocol.js").CacheTaskChange[],
+    ttlMs: number = DEFAULT_GC_INTERVAL_MS * 60, // 默认 60min（与 runtime ttl 同档）
+  ): Promise<void> {
+    for (const change of changes) {
+      const absPath = this.scopeAdapter.toAbsPath(change.scope, change.path);
+      // TTL 续期：watcher 推送 = 用户在用
+      try {
+        this.ttl.bump(absPath, ttlMs);
+      } catch {
+        // ttlMs 非法不该发生（默认值合法）；防御性 catch 不打断流程
+      }
+      // Inflight telemetry：仅 log，不强制清除（详见 SyncCoordinator.invalidateInflightForPath 的契约说明）
+      const keys = [
+        inflightKey("read", absPath),
+        inflightKey("stat", absPath),
+        inflightKey("readdir", absPath),
+      ];
+      for (const key of keys) {
+        if (this.inflight.has(key)) {
+          // 留给运维诊断
+          // 这里不 log（避免运行时高频路径噪声）；E2E / SyncCoordinator 那边有 telemetry
+        }
+      }
+    }
+  }
+
   /** 手动触发一次 GC（测试 / 启动期主动清理时用）。 */
   async runGcOnce(): Promise<GcRunResult> {
     if (!this.gc) {

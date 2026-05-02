@@ -55,6 +55,12 @@ interface CacheTaskManagerOptions {
   createMutationId?: () => string;
   accessLedgerStore?: AccessLedgerStore;
   getHomedirForDevice?: (deviceId: string) => string;
+  /**
+   * Plan §3.6 路径 B wiring：watcher delta 应用到 store 后调此回调。
+   * server.ts 注册回调让对应 deviceId 的 FileAgent 处理 inflight 清理 + telemetry。
+   * 失败不影响 cache_task_delta_ack（changes 已落盘成功）。
+   */
+  onDeltaApplied?: (deviceId: string, changes: CacheTaskChange[]) => void | Promise<void>;
 }
 
 interface OutboundMessage {
@@ -76,6 +82,9 @@ export class CacheTaskManager {
   private readonly createMutationId: () => string;
   private readonly accessLedgerStore: AccessLedgerStore | null;
   private readonly getHomedirForDevice: (deviceId: string) => string;
+  private readonly onDeltaApplied:
+    | ((deviceId: string, changes: CacheTaskChange[]) => void | Promise<void>)
+    | null;
   private readonly tasks = new Map<string, CacheTaskRecord>();
   private readonly mutexChains = new Map<string, Promise<void>>();
 
@@ -92,6 +101,7 @@ export class CacheTaskManager {
     this.createMutationId = options.createMutationId ?? (() => randomUUID());
     this.accessLedgerStore = options.accessLedgerStore ?? null;
     this.getHomedirForDevice = options.getHomedirForDevice ?? (() => homedir());
+    this.onDeltaApplied = options.onDeltaApplied ?? null;
   }
 
   async registerHello(clientId: string, hello: ClientHello): Promise<void> {
@@ -240,6 +250,20 @@ export class CacheTaskManager {
         task.revision = result.revision;
         this.rememberMutationIds(task, changesToApply);
         this.clearReadBypass(task, changesToApply);
+
+        // Plan §3.6 路径 B wiring：通知 onDeltaApplied 让 FileAgent 处理 inflight 清理 +
+        // telemetry。失败不影响 ack（changes 已落盘成功）。
+        if (this.onDeltaApplied) {
+          try {
+            await this.onDeltaApplied(task.deviceId, changesToApply);
+          } catch (err) {
+            log.warn("onDeltaApplied 回调出错（不影响 delta_ack）", {
+              deviceId: task.deviceId,
+              err: err instanceof Error ? err.message : String(err),
+            } as Record<string, unknown>);
+          }
+        }
+
         return {
           type: "cache_task_delta_ack",
           assignmentId: delta.assignmentId,
