@@ -19,3 +19,6 @@ export CERELAY_NAMESPACE_RUNTIME_ROOT="$HOST_TMP_ROOT/namespace-runtime"
 
 npm run test:smoke
 npm run test:workspaces
+
+echo "[host-tests] e2e comprehensive (in containers)"
+sh "$script_dir/run-e2e-comprehensive.sh"

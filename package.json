@@ -11,6 +11,7 @@
     "server:down": "docker compose down",
     "server:logs": "docker compose logs -f cerelay-server",
     "test": "sh ./test/run-host-tests.sh",
+    "test:e2e": "sh ./test/run-e2e-comprehensive.sh",
     "test:container": "sh ./test/run-container-tests.sh",
     "test:gc": "sh ./test/gc-test-resources.sh",
     "test:gc:all": "sh ./test/gc-test-resources.sh --all"
