@@ -151,6 +151,60 @@ test("buildScopePlan 生成 uploads、skipped metadata 与 remote deletes", asyn
   );
 });
 
+test("buildScopePlan handles exactFilesAbs with absolute keys", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "cerelay-ancestor-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = path.join(root, "project", "CLAUDE.md");
+  const second = path.join(root, "CLAUDE.md");
+  await mkdir(path.dirname(first), { recursive: true });
+  await writeFile(first, "project", "utf8");
+  await writeFile(second, "root", "utf8");
+
+  const plan = await buildScopePlan({
+    scope: "cwd-ancestor-md",
+    homedir: root,
+    remote: undefined,
+    instruction: {
+      subtrees: [],
+      files: [],
+      knownMissing: [],
+      exactFilesAbs: [first, second],
+    },
+  });
+
+  assert.deepEqual(plan.uploads.map((item) => item.change.path).sort(), [first, second].sort());
+  assert.equal(plan.uploads[0].change.scope, "cwd-ancestor-md");
+});
+
+test("buildScopePlan exactFilesAbs emits delete for missing remote entries", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "cerelay-ancestor-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const missing = path.join(root, "project", "CLAUDE.local.md");
+
+  const plan = await buildScopePlan({
+    scope: "cwd-ancestor-md",
+    homedir: root,
+    remote: {
+      entries: {
+        [missing]: { size: 1, mtime: 1, sha256: "old" },
+      },
+    },
+    instruction: {
+      subtrees: [],
+      files: [],
+      knownMissing: [],
+      exactFilesAbs: [missing],
+    },
+  });
+
+  assert.deepEqual(plan.metaChanges, [{
+    kind: "delete",
+    scope: "cwd-ancestor-md",
+    path: missing,
+  }]);
+});
+
+
 test("buildScopePlan 接受 exclude matcher，被排除的路径不会进入 plan", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);

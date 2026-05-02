@@ -223,6 +223,7 @@ export class CacheTaskStateMachine {
     switch (message.type) {
       case "cache_task_assignment":
         if (message.role === "inactive") {
+          await this.pushAncestorDeltaFromAssignment(message);
           await this.transitionToPassive();
           return;
         }
@@ -295,6 +296,7 @@ export class CacheTaskStateMachine {
 
     try {
       await watcher.start();
+      await this.pushAncestorDeltaFromAssignment(message);
       await this.runInitialSync(message, generation, syncPlan);
     } catch (error) {
       // Cache sync 失败一律降级为"无缓存继续"——CLAUDE.md 明确写过缓存同步失败不阻塞 PTY session，
@@ -474,6 +476,35 @@ export class CacheTaskStateMachine {
     });
     this.state = "assigned-watching";
     this.scheduleLiveDrain();
+  }
+
+  private async pushAncestorDeltaFromAssignment(message: CacheTaskAssignment): Promise<void> {
+    const instruction = message.syncPlan?.scopes["cwd-ancestor-md"];
+    if (!instruction?.exactFilesAbs || !message.manifest) return;
+    const locals = await this.walkScopeImpl({
+      scope: "cwd-ancestor-md",
+      homedir: this.homedir,
+      instruction,
+      exclude: this.exclude,
+    });
+    const plan = await this.hashScopeImpl({
+      scope: "cwd-ancestor-md",
+      locals,
+      remote: message.manifest.scopes["cwd-ancestor-md"],
+      instruction,
+      scanCache: this.scanCache,
+    });
+    const changes: CacheTaskChange[] = [
+      ...plan.metaChanges,
+      ...plan.uploads.map((upload) => upload.change),
+    ];
+    if (changes.length === 0) return;
+    await this.sendMessage({
+      type: "cache_task_ancestor_delta",
+      deviceId: this.deviceId,
+      cwd: this.cwd,
+      changes,
+    });
   }
 
   private async handleWatcherChanges(changes: CacheTaskChange[]): Promise<void> {
