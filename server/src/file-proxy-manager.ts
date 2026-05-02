@@ -1613,7 +1613,20 @@ export class FileProxyManager {
         detail?: Record<string, unknown>;
       };
       if (typeof evt.kind === "string" && evt.kind.length > 0) {
-        this.adminEvents?.record(evt.kind, this.sessionId, evt.detail);
+        this.adminEvents?.record(evt.kind, this.sessionId, {
+          ...evt.detail,
+          clientCwd: this.clientCwd,
+          // 优先用 daemon 提供的 fusePath（T5 后会携带）；
+          // fallback 用 root + relPath 拼；都没有则 undefined。
+          // server 侧是 source of truth——daemon 不知道 clientCwd，
+          // 理论上 daemon 不会主动发 clientCwd / clientPath，
+          // 但即使 daemon 带了，server 侧也以 prefer-server 语义覆盖。
+          clientPath: typeof evt.detail?.fusePath === "string"
+            ? evt.detail.fusePath
+            : (typeof evt.detail?.root === "string" && typeof evt.detail?.relPath === "string"
+                ? this.buildClientPath(evt.detail.root, evt.detail.relPath)
+                : undefined),
+        });
       }
       return;
     }
@@ -1745,6 +1758,8 @@ export class FileProxyManager {
       relPath,
       reason: reasonForPerforation,
       perforationCount: this.perforatedPaths.get(perforationKey)!.count,
+      clientCwd: this.clientCwd,
+      clientPath: this.buildClientPath(root, relPath),
     });
 
     const mutationTargets = this.collectMutationHintTargets(req);
@@ -1895,6 +1910,8 @@ export class FileProxyManager {
           relPath: req.relPath,
           reason: "settings_json_passthrough",
           perforationCount: 0,
+          clientCwd: this.clientCwd,
+          clientPath: this.buildClientPath(req.root, req.relPath),
         });
         const statResp = await this.sendClientRequest({
           op: "getattr",
@@ -1920,6 +1937,8 @@ export class FileProxyManager {
         relPath: req.relPath,
         reason: "settings_json_passthrough",
         perforationCount: 0,
+        clientCwd: this.clientCwd,
+        clientPath: this.buildClientPath(req.root, req.relPath),
       });
       const readResp = await this.sendClientRequest({
         op: "read",
