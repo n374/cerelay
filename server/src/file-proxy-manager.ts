@@ -996,7 +996,9 @@ export class FileProxyManager {
               size: entry.stat?.size ?? 0,
               clientCwd: this.clientCwd,
               clientPath: this.buildClientPath(rootName, relPath),
-              contentSha256: this.computeContentSha256(Buffer.from(entry.data ?? "", "base64")),
+              contentSha256: entry.data !== undefined
+                ? this.computeContentSha256(Buffer.from(entry.data, "base64"))
+                : undefined,
             });
           }
         }
@@ -1212,7 +1214,9 @@ export class FileProxyManager {
       size: entry.size,
       clientCwd: this.clientCwd,
       clientPath: this.buildClientPath(root, relPath),
-      contentSha256: this.computeContentSha256(Buffer.from(data ?? "", "base64")),
+      contentSha256: data !== undefined
+        ? this.computeContentSha256(Buffer.from(data, "base64"))
+        : undefined,
     });
     return {
       path: absPath,
@@ -1288,6 +1292,9 @@ export class FileProxyManager {
       sliceBytes: slice.byteLength,
       clientCwd: this.clientCwd,
       clientPath: this.buildClientPath(req.root, req.relPath),
+      // 注意:sha256 对全量 buf(未切片)计算,而非 slice。
+      // negative-assert(spec §5.4)需要与 fixture 文件完整内容的 sha256 对比,
+      // 切片 sha256 因 offset/size 变化而变,对比无意义。
       contentSha256: this.computeContentSha256(buf),
     });
     return { served: true };
@@ -1946,7 +1953,7 @@ export class FileProxyManager {
         servedFrom: "passthrough-settings",
         sliceBytes: slice.byteLength,
         clientCwd: this.clientCwd,
-        clientPath: this.buildClientPath(req.root, req.relPath ?? ""),
+        clientPath: this.buildClientPath(req.root, req.relPath),
         contentSha256: this.computeContentSha256(redacted),
       });
     } catch (err) {
