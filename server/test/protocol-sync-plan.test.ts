@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { CACHE_SCOPES } from "../src/protocol.js";
 import type {
   CacheTaskAssignment,
+  CacheTaskAncestorDelta,
   FileProxyResponse,
   ScopeWalkInstruction,
   SyncPlan,
@@ -13,9 +15,16 @@ test("protocol exports sync plan types used by cache assignment", () => {
     files: ["settings.json"],
     knownMissing: ["missing.json"],
   };
+  const ancestorInstruction: ScopeWalkInstruction = {
+    subtrees: [],
+    files: [],
+    knownMissing: ["/repo/missing/CLAUDE.md"],
+    exactFilesAbs: ["/repo/CLAUDE.md"],
+  };
   const syncPlan: SyncPlan = {
     scopes: {
       "claude-home": instruction,
+      "cwd-ancestor-md": ancestorInstruction,
     },
   };
   const assignment: CacheTaskAssignment = {
@@ -31,6 +40,28 @@ test("protocol exports sync plan types used by cache assignment", () => {
   };
 
   assert.equal(assignment.syncPlan?.scopes["claude-home"]?.files[0], "settings.json");
+  assert.deepEqual(CACHE_SCOPES, ["claude-home", "claude-json", "cwd-ancestor-md"]);
+  assert.equal(
+    assignment.syncPlan?.scopes["cwd-ancestor-md"]?.exactFilesAbs?.[0],
+    "/repo/CLAUDE.md",
+  );
+});
+
+test("protocol exports ancestor delta message", () => {
+  const delta: CacheTaskAncestorDelta = {
+    type: "cache_task_ancestor_delta",
+    deviceId: "device-1",
+    cwd: "/repo",
+    changes: [
+      {
+        kind: "delete",
+        scope: "cwd-ancestor-md",
+        path: "/repo/CLAUDE.md",
+      },
+    ],
+  };
+
+  assert.equal(delta.changes[0].scope, "cwd-ancestor-md");
 });
 
 test("file proxy response can carry shallowest missing ancestor", () => {
