@@ -84,8 +84,8 @@
 
 | 维度 | 案例 ID | 状态 | 备注 |
 |---|---|---|---|
-| F | F2-multi-session | ⏳ Backlog | 需要 Hand 端支持"同一 ws 一次连接起多 PTY session"。当前 Hand main 入口是单 prompt → 单 session，扩 Hand multi-prompt 能力超出基础设施 PR 范围 |
-| F | F4-same-device-multi-cwd | ⏳ Backlog | 同 F2，受 Hand 当前架构限制 |
+| F | F2-multi-session | ✅ `phase-p1.test.ts` | P1-B 收尾测试 PR 4：方案 A（Codex + Claude 共识）——不改 Hand 架构，case 内 `Promise.all` 两次 `clients.runAsync` 同 client 并发起两个 Hand child（独立 ws 连接但共享 deviceId 文件）。守护意图从"同一 ws 多 session"降级为"同 device 多 session 并发"——server 端 ptySessions Map 按 sessionId 隔离才是真守护对象，物理 ws 复用是 Hand 单进程 multi-session 的产品架构决策，不为测试污染 CLI |
+| F | F4-same-device-multi-cwd | ✅ `phase-p1.test.ts` | P1-B 收尾测试 PR 4：同 F2 方案 A，并发起同 deviceId 不同 cwd 两个 session。**实际断言范围**（收窄）：sessionId 唯一 + spawn.ready detail.cwd 各自对齐 + deviceId 共享。**TODO**: fileProxy 内部 path-lookup 是否真按 cwd 隔离 / FileAgent device 单例的 cross-cwd 污染风险 / cwd-ancestor walk / project-claude bind mount 真触发——本 case 没拉对应 admin event probe，需独立 P2 加固（参考 B6 `file-proxy.shadow.served` 模式或 `serverExec.run` namespace 内触发）|
 | C | C4-large-truncated 半段 | ✅ `phase-p1.test.ts` | P1-B 收尾测试 PR 5：client-c 专用容器（`CERELAY_E2E_MAX_SCOPE_BYTES=262144` = 256KB）+ 10 × 50KB fixture（500KB > 256KB）触发 `applyScopeBudget` 截断；主断言 `cacheAdmin.summary` 中 `claude-home.truncated === true` + `lookupEntry` 抽样验 preservedCount < FILE_COUNT |
 | (meta) | INF-10 A5 meta-test | ❌ Won't fix（探索后假设不成立） | **P1-B 收尾测试 PR 6 探索结论**：尝试加 `stubShadowFallbackReason` toggle + 对照断言 (baseline 必含 cerelay 引导 / stub on 必不含)，**baseline 即失败**——实测 A5 turn 2 deny content 是 `<tool_use_error>...Bash exists but is not enabled in this context...</tool_use_error>`（CC SDK 自带），**完全不含 `mcp__cerelay__bash` 子串**。结论：CC SDK `--disallowedTools` 在 PreToolUse hook 之前 short-circuit，cerelay `buildShadowFallbackReason` 路径在本套件 mock e2e 中**不可达**。A5 主断言 OR 正则的第一个分支(`mcp__cerelay__bash`)是死代码——主断言实际命中的是第二个分支 (`not (?:available\|enabled)`)，所以 cerelay 引导坏掉也不会让 A5 假绿。INF-10 反向加固设计的前提（cerelay 引导参与命中）不成立，无法在本套件 honest 实现。生产中 cerelay 引导路径可能仍在真模型场景被触发，由 `server/test/e2e-real-claude-bash.test.ts` 守护（本套件不重复） |
 
@@ -460,6 +460,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | **truncated 协议 gap 补完 (INF-7 配套)**：Codex 评审 C4-truncated case 时发现 client cache-sync 算出的 truncated 标记从未通过协议上报到 server。修复:`CacheTaskSyncComplete` 加 optional `scopeTruncated?: Partial<Record<CacheScope, boolean>>` 字段(client/server 镜像);client state-machine 在 sync_complete 时填充;server cache-task-manager 调 `store.updateScopeTruncated` 落地;放 `withManifestLock` 串行保证。typecheck + server 425/425 + client 135/135 全过 |
 | 2026-05-02 | **P1-B backlog 收尾 测试 PR 5 (C4-truncated 半段)**：phase-p1.test.ts 加 C4-large-truncated case，走 client-c 容器 + 10 × 50KB fixture (500KB > 256KB) 触发 `applyScopeBudget` 截断；主断言 `cacheAdmin.summary` 中 `claude-home.truncated === true` + `lookupEntry` 抽样验 preservedCount < FILE_COUNT。**关键陷阱**: client-c 是 fresh device 首次连接,SyncPlan 走 SEED_WHITELIST 限定 walk,fixture 必须落到 SEED_WHITELIST 内的 subtree(本 case 选 `.claude/plugins/c4-truncated/`),否则 ad-hoc 路径会被过滤导致 plans 为空。e2e: 26→27/27 |
 | 2026-05-02 | **P1-B backlog 收尾 测试 PR 6 (INF-10 A5 meta 加固) 探索结论 ❌ Won't fix**：尝试加 `stubShadowFallbackReason` toggle + 对照断言时 baseline 即失败——实测 A5 turn 2 deny content 是 `<tool_use_error>...Bash exists but is not enabled in this context...</tool_use_error>` (CC SDK 自带文案),完全不含 `mcp__cerelay__bash` 子串。**结论**:CC SDK `--disallowedTools` 在 PreToolUse hook 之前 short-circuit,cerelay `buildShadowFallbackReason` 在 mock e2e 中不可达;A5 主断言 OR 正则的第一分支是死代码,主套件实际命中第二分支。INF-10 反向加固设计的前提不成立,相关代码改动 (test-toggles / pty-session / server-events / phase-p0-meta) 已撤销,只保留文档结论。生产中 cerelay 引导路径可能仍在真模型场景触发,由 `server/test/e2e-real-claude-bash.test.ts` 守护 |
+| 2026-05-02 | **P1-B backlog 收尾 测试 PR 4 (F2 + F4 多 session 隔离)**：方案 A (Codex + Claude 共识) — 不改 Hand 架构，case 内 `Promise.all` 两次 `clients.runAsync` 同 client 并发起两个 Hand child（共享 deviceId 文件 + 独立 ws）。F2 同 cwd 守 sessionId 唯一性 (ptySessions Map);F4 不同 cwd 守 sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**收窄说明（Codex 终审 important）**: F4 不再声称守 fileProxy / FileAgent 单例 cross-cwd 污染 / cwd-ancestor walk / project-claude bind mount——这些路径需独立 admin event probe，留 P2 加固。守护意图从"同一 ws 多 session"降级为"同 device 多 session 并发"。Hand 单进程 multi-session 上线时必须新增 same-ws case。加 `killAndVerifyExited` cleanup 助手防 child 残留污染下一 case。e2e: 27→29/29 全过 |
 
 ### 11. Codex 终审遗留事项（已闭环 / Closed） / Codex Review Outstanding Items (Closed)
 
@@ -578,8 +579,8 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | C4-truncated 半段 ✅ | INF-7 + client-c 容器 | P1-B 收尾测试 PR 5 落地 |
 | D4-credentials-shadow ✅ | INF-2 + INF-3 + INF-5 + INF-11 | 测试 PR1 落地 |
 | E2-credentials-rw ✅ | INF-3 + INF-5 + INF-6 + INF-11 | 测试 PR1 落地 |
-| F2-multi-session | INF-3 | |
-| F4-same-device-multi-cwd | INF-3 | |
+| F2-multi-session ✅ | INF-3 | P1-B 收尾测试 PR 4 落地（方案 A：case 内并发 runAsync，不改 Hand）。**TODO**: 如果未来 Hand 上线"单进程内 multi-session"产品能力（`--prompts <file>` 或 batch 模式），必须新增真正的 same-ws case 守 client.ts 路由逻辑——本 case 物理 ws 是独立的 |
+| F4-same-device-multi-cwd ✅ | INF-3 | P1-B 收尾测试 PR 4 落地（方案 A）。**实际断言范围**（收窄）：sessionId 唯一 + cwd 字段对齐 + deviceId 共享。**未守**：fileProxy / FileAgent 单例 cross-cwd 污染 / cwd-ancestor walk / project-claude bind mount，留作 P2 加固 |
 | G1-tool-timeout | INF-3 + INF-8 | |
 | G2-client-disconnect | INF-3 + INF-8 | |
 | G3-mock-5xx | INF-9 | |

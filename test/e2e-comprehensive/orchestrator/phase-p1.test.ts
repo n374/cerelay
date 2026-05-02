@@ -249,6 +249,29 @@ async function killAndWait(label: string, runId: string): Promise<void> {
   try { await clients.waitRun(label, runId, 15_000); } catch { /* ignore */ }
 }
 
+/**
+ * F2/F4 用:同 killAndWait,但 cleanup 后再 verify 一次 runStatus,若 child 仍
+ * 在 running 状态打 warning 让人发现污染下一 case 的风险(参考 Codex P1-B 终审
+ * INF-3 important #3:hard deadline 防 child 残留)。runStatus 抛异常或返非
+ * running 状态都视为已退出。
+ */
+async function killAndVerifyExited(label: string, runId: string): Promise<void> {
+  await killAndWait(label, runId);
+  try {
+    const status = await clients.runStatus(label, runId);
+    if (status.state === "running") {
+      // 不抛错,避免遮盖前面真正的断言失败;只 warn 让人知道下一 case 可能被污染
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[killAndVerifyExited WARN] runId=${runId} 在 killAndWait(15s) 后仍处于 running;` +
+          `可能污染下一 case baseline。请关注 next case 是否假阳性。`,
+      );
+    }
+  } catch {
+    // status 查不到(404 / runState evict)→ child 已结束清理,正常
+  }
+}
+
 // ============================================================
 // B5-negative-cache：
 //   守护：第一次 read 不存在文件 miss 后被 daemon NegativeCache 记住，
@@ -943,4 +966,218 @@ test("C4-large-truncated(truncated 半段): scope > MAX_SCOPE_BYTES → 截断 +
   );
 
   await cleanupFixture(caseId);
+});
+
+// ============================================================
+// P1-B backlog 收尾 测试 PR 4: F2-multi-session + F4-same-device-multi-cwd
+//
+// 守的不变量(共同):server 端在同一 client(同 deviceId)的多个并发 PTY session
+// 之间按 sessionId / cwd 字段保持隔离——sessionId 唯一、cwd detail 字段对齐。
+//
+// 实现路径(方案 A,Codex + Claude 共识):
+//   - **不**改 Hand CLI(产品架构,不为测试污染)
+//   - 测试 case 内 Promise.all 两次 clients.runAsync,同 client 容器并发起两个
+//     Hand child process。每个 child 独立 ws 连接,但共享同一 device-id 文件
+//     (~/.config/cerelay/device-id),server 端看到"同 deviceId 多 ws 多 PTY session"
+//   - 文档原意"同一 ws 多 session"是 Hand 单进程内 multi-session 路径,本套件
+//     在守护意图层面降级为"同 device 多 session 并发"(server 端 ptySessions
+//     共享 map 的 race / 资源隔离才是真守护对象,不是物理 ws 复用)
+//
+// **TODO**: 如果未来 Hand 上线"单进程内 multi-session"产品能力(`--prompts <file>`
+// 或 batch 模式),必须新增真正的 same-ws case 守护那条路径——本 case 物理 ws 是
+// 独立的,不能覆盖 Hand 单 ws 多 session 的 client.ts 路由逻辑。
+// ============================================================
+
+// ============================================================
+// F2-multi-session: 同 client(同 deviceId) 同 cwd 并发起 2 PTY session
+//
+// 守:server 端按 sessionId 隔离 ptySessions Map / fileProxies / 各自 namespace
+// (server.ts ptySessions 是按 sessionId 索引的)。两个并发 session 必须各自有独立
+// namespace(各自 unshare 调用)、独立 cwd 与 home 视图、各自 spawn.ready emit。
+// ============================================================
+test("F2-multi-session: 同 client 同 cwd 并发 2 PTY session → server 按 sessionId 隔离", async () => {
+  const caseId = "case-f2";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  // mock predicate 匹配 marker 区分两个并发 session 的 prompt
+  await mockAdmin.loadScript({
+    name: "p1-f2-session-a",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F2-MARKER-A" } },
+    respond: scriptText("f2 session a ok"),
+  });
+  await mockAdmin.loadScript({
+    name: "p1-f2-session-b",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F2-MARKER-B" } },
+    respond: scriptText("f2 session b ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  // 同时起两个 async run(同 client → 同 deviceId → 同 cwd)
+  const [{ runId: runIdA }, { runId: runIdB }] = await Promise.all([
+    clients.runAsync("client-a", {
+      prompt: "session a [F2-MARKER-A]",
+      cwd,
+      timeoutMs: 60_000,
+    }),
+    clients.runAsync("client-a", {
+      prompt: "session b [F2-MARKER-B]",
+      cwd,
+      timeoutMs: 60_000,
+    }),
+  ]);
+
+  try {
+    // 等两个 spawn.ready event(同 expectedCwd,但是不同 sessionId)
+    // findSpawnReady 已经按 cwd 过滤,期望返回 ≥ 2 条
+    let spawnEvents: Awaited<ReturnType<typeof ptyEvents.findSpawnReady>> = [];
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      spawnEvents = await ptyEvents.findSpawnReady({ expectedCwd: cwd, since: baseline });
+      if (spawnEvents.length >= 2) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.ok(
+      spawnEvents.length >= 2,
+      `expected >= 2 pty.spawn.ready events for cwd ${cwd}, got ${spawnEvents.length}`,
+    );
+
+    // 主断言 #1: 两个 sessionId 不同(不能复用 / 串台)
+    const sessionIds = spawnEvents.slice(0, 2).map((e) => e.sessionId);
+    assert.notEqual(
+      sessionIds[0],
+      sessionIds[1],
+      `两个 PTY session 必须有不同 sessionId,实际 ${sessionIds[0]} === ${sessionIds[1]}`,
+    );
+
+    // 主断言 #2: 两个 spawn.ready detail.cwd 都等于 client 上报 cwd
+    for (const evt of spawnEvents.slice(0, 2)) {
+      assert.equal(
+        evt.detail.cwd,
+        cwd,
+        `spawn.ready cwd must align with client cwd (sessionId=${evt.sessionId})`,
+      );
+    }
+
+    // 旁证:两次 runAsync 的 deviceId 应该共享(同 client 容器 → 同 deviceId 文件)
+    const [statusA, statusB] = await Promise.all([
+      clients.runStatus("client-a", runIdA),
+      clients.runStatus("client-a", runIdB),
+    ]);
+    assert.equal(
+      statusA.deviceId,
+      statusB.deviceId,
+      `同 client 起的两个 run 必须共享 deviceId (got ${statusA.deviceId} vs ${statusB.deviceId})`,
+    );
+  } finally {
+    await Promise.all([
+      killAndVerifyExited("client-a", runIdA),
+      killAndVerifyExited("client-a", runIdB),
+    ]);
+    await cleanupFixture(caseId);
+  }
+});
+
+// ============================================================
+// F4-same-device-multi-cwd: 同 client(同 deviceId) 不同 cwd 并发 2 PTY session
+//
+// 本 case 实际断言范围(收窄,仅 sessionId 唯一性 + cwd 字段对齐 + deviceId 共享):
+//   - 两个 PTY session 的 sessionId 不同(server 端按 sessionId 索引 ptySessions Map)
+//   - spawn.ready detail.cwd 各自对齐(server.createClaudeSessionRuntime 按 message.cwd 构造)
+//   - deviceId 共享(同 client 容器 → 同 ~/.config/cerelay/device-id 文件)
+//
+// **本 case 不守(TODO 留 backlog)**: fileProxy 内部 path-lookup 是否真按 cwd 隔离 /
+// FileAgent 单例(server.ts:1145, 1161 fileAgent device 单例)是否存在 cross-cwd
+// 污染 / cwd-ancestor walk / project-claude bind mount 真正 trigger。这些路径
+// 需要独立的 fileProxy admin event probe(类似 B6 用 file-proxy.shadow.served)
+// 或 namespace 内 serverExec.run 触发,本 PR 范围不展开,留作 P2 加固。
+//
+// 跟 F2 区别:F2 同 cwd(守 sessionId 隔离),F4 不同 cwd(守 cwd 字段对齐 + sessionId 唯一)。
+// ============================================================
+test("F4-same-device-multi-cwd: 同 client 不同 cwd 并发 2 session → cwd-derived state 隔离", async () => {
+  const caseIdX = "case-f4-x";
+  const caseIdY = "case-f4-y";
+  await writeFixture(caseIdX, { ".keep": "" });
+  await writeFixture(caseIdY, { ".keep": "" });
+  const cwdX = clientCwd(caseIdX);
+  const cwdY = clientCwd(caseIdY);
+
+  await mockAdmin.loadScript({
+    name: "p1-f4-cwd-x",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F4-MARKER-X" } },
+    respond: scriptText("f4 cwd x ok"),
+  });
+  await mockAdmin.loadScript({
+    name: "p1-f4-cwd-y",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F4-MARKER-Y" } },
+    respond: scriptText("f4 cwd y ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  const [{ runId: runIdX }, { runId: runIdY }] = await Promise.all([
+    clients.runAsync("client-a", {
+      prompt: "cwd x session [F4-MARKER-X]",
+      cwd: cwdX,
+      timeoutMs: 60_000,
+    }),
+    clients.runAsync("client-a", {
+      prompt: "cwd y session [F4-MARKER-Y]",
+      cwd: cwdY,
+      timeoutMs: 60_000,
+    }),
+  ]);
+
+  try {
+    // 等两个 spawn.ready event,各自 cwd 不同。一次拉所有 events,自己分类
+    const deadline = Date.now() + 30_000;
+    let spawnX: Awaited<ReturnType<typeof ptyEvents.findSpawnReady>> = [];
+    let spawnY: Awaited<ReturnType<typeof ptyEvents.findSpawnReady>> = [];
+    while (Date.now() < deadline) {
+      [spawnX, spawnY] = await Promise.all([
+        ptyEvents.findSpawnReady({ expectedCwd: cwdX, since: baseline }),
+        ptyEvents.findSpawnReady({ expectedCwd: cwdY, since: baseline }),
+      ]);
+      if (spawnX.length >= 1 && spawnY.length >= 1) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.ok(
+      spawnX.length >= 1,
+      `expected >= 1 pty.spawn.ready for cwd ${cwdX}, got ${spawnX.length}`,
+    );
+    assert.ok(
+      spawnY.length >= 1,
+      `expected >= 1 pty.spawn.ready for cwd ${cwdY}, got ${spawnY.length}`,
+    );
+
+    // 主断言 #1: 两边 sessionId 不同
+    assert.notEqual(
+      spawnX[0].sessionId,
+      spawnY[0].sessionId,
+      "两个不同 cwd 的 session 必须 sessionId 不同",
+    );
+
+    // 主断言 #2: 各自 cwd 严格对齐(不能串台到对方 cwd)
+    assert.equal(spawnX[0].detail.cwd, cwdX, "cwd_X session detail.cwd 必须等于 cwd_X");
+    assert.equal(spawnY[0].detail.cwd, cwdY, "cwd_Y session detail.cwd 必须等于 cwd_Y");
+
+    // 主断言 #3: 共享 deviceId(同 client → 同 device-id 文件)
+    const [statusX, statusY] = await Promise.all([
+      clients.runStatus("client-a", runIdX),
+      clients.runStatus("client-a", runIdY),
+    ]);
+    assert.equal(
+      statusX.deviceId,
+      statusY.deviceId,
+      `F4 守护:同 client 多 cwd 必须共享 deviceId (got ${statusX.deviceId} vs ${statusY.deviceId})`,
+    );
+  } finally {
+    await Promise.all([
+      killAndVerifyExited("client-a", runIdX),
+      killAndVerifyExited("client-a", runIdY),
+    ]);
+    await cleanupFixture(caseIdX);
+    await cleanupFixture(caseIdY);
+  }
 });
