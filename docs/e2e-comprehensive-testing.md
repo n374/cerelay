@@ -44,20 +44,20 @@
 |---|---|---|---|
 | **A. 工具链路** | A1-bash-basic | 单 client 触发 `Bash ls`，server→ws→client 执行→回写 | tool relay 双向链路、stdout 完整回传 |
 |  | A2-fs-rwe | `Read` / `Write` / `Edit` 三件套对临时 cwd 内文件 | fs 工具协议、Edit `old_string` 唯一性约束 |
-|  | A3-search | `Glob '**/*.md'` + `Grep 'TODO'` 在 fixture 项目内 | search 工具的 path normalize、glob 语义 |
+|  | A3-search | `Glob '*.md'` (basename 匹配，client search.ts 不支持 `**` 跨目录) + `Grep 'TODO'` 在 fixture 项目内 | search 工具的 path normalize、basename glob 语义 |
 |  | A4-shadow-mcp | 模型调 `mcp__cerelay__bash` 路径 | tool_result.is_error === false（Plan D 不变量） |
-| **B. 文件代理** | B1-home-claude-snapshot | server 启动期 `~/.claude/` snapshot 走 cache，命中已上传的 fixture | snapshot ledger 命中、不二次穿透 |
-|  | B2-claude-json-read | server 读 `~/.claude.json` 走 FUSE | 文件级 bind mount 正确性 |
-|  | B3-project-claude | server 读 `{cwd}/.claude/settings.local.json` | project-claude bind mount + hook injection 注入路径 |
+| **B. 文件代理** | B1-home-claude-snapshot | server 启动期 `~/.claude/` snapshot 走 cache；主断言验 `file-proxy.read.served` admin event 出现 root=`home-claude` + relPath=root 内相对路径（如 `case-b1-marker.md`，不含 `.claude/` 前缀，因为 home-claude root 已经指向 `~/.claude/`） | snapshot ledger 命中、走 server FUSE 链路 |
+|  | B2-claude-json-read | server 读 `~/.claude.json` 走 FUSE；主断言验 admin event root=`home-claude-json` 出现 | 文件级 bind mount + 走 server FUSE 链路 |
+|  | B3-project-claude | server 读 `{cwd}/.claude/<file>` 走 project-claude bind mount；主断言验 admin event root=`project-claude` 出现 | project-claude bind mount 链路真发生 |
 |  | B4-ancestor-claudemd | 在 cwd 与 home 之间放置 `CLAUDE.md`，server 通过 cwd-ancestor-N FUSE root 读到 | **直接守护 IFS bug 类 regression**（bootstrap ancestor 段必须能跑通） |
 | **C. Cache 同步** | C1-initial-pipeline | client 首次连，1k+ 文件 initial sync，pipeline 流控生效 | manifest 写入串行锁、batch ack 不丢、最终 revision 正确 |
-|  | C2-revision-ack | initial sync 完成后 server 报告 final revision == client 已 push 的最大 revision | revision 单调、ack 配对 |
-| **D. Mount namespace** | D1-cwd-aligned | session 内 `pwd` 输出 == client 上报的 cwd | cwd 字符串对齐 |
-|  | D2-home-aligned | session 内 `echo $HOME` == client 上报的 home | HOME 重定向 |
+|  | C2-revision-ack | initial sync 完成后 server revision **>=** client 已 ack 的 revision，drift ≤ 50（runtime FUSE 访问/TTL 续期会持续 bump）| revision 单调、ack 配对、bound drift |
+| **D. Mount namespace** | D1-cwd-aligned | server 端 `pty.spawn.ready` admin event 的 detail.cwd === client 上报 cwd（POSIX spawn 契约：child 启动 pwd === parent 配置 cwd）；次断言保留 mcp__cerelay__bash 跑 pwd 验 client 端也对齐 | namespace 内 cwd 字符串严格对齐 |
+|  | D2-home-aligned | server 端 `pty.spawn.ready` admin event 的 detail.homeDir === client 上报 home；次断言保留 echo $HOME 验 client 端 | HOME 环境变量真实重定向 |
 |  | D3-ancestor-no-crash | B4 case 同时验 bootstrap 不在 `set -u` 下退出 | **IFS bug 死亡回归** |
-| **E. Redaction** | E1-settings-redact | client 上报的 `~/.claude/settings.json` 含 `env.ANTHROPIC_API_KEY`；session 内 `cat ~/.claude/settings.json` 看到的 redacted 版本 | 三处出口（snapshot / cache hit / passthrough）全部 redact |
+| **E. Redaction** | E1-settings-redact | client 上报 `~/.claude/settings.json` 含 `env.ANTHROPIC_API_KEY`，三个独立子 case 分别强制走 snapshot / cache-hit / passthrough 三条路径，分别断言 `file-proxy.settings.redacted` admin event 出现且 detail.site 命中对应 site；e2e 不可稳定触发的出口降级为 server 单测（`server/test/file-proxy-redact.test.ts`） | 三处出口（snapshot / cache-hit / passthrough）全部 redact，无 site 漏 emit |
 | **F. 多拓扑** | F1-single-client-concurrent | 同一 client 一次连接，session 内并发 5 次 Bash | tool relay race、ack 序号正确 |
-|  | F3-multi-device | 起 client-A / client-B 两容器，并发触发各自的 session；server 端 cache 按 deviceId 隔离 | per-device store 隔离、互不污染 |
+|  | F3-multi-device | 起 client-A / client-B 两容器，并发触发各自的 session，**两侧写入相同 cache relPath 但不同 marker 内容**（cache scope=claude-home 下 relPath=`CLAUDE.md`，不含 `.claude/` 前缀）；通过 `/admin/cache?deviceId=&scope=&relPath=` 单项查询断言 A/B sha256 不同，且各自 hash 匹配本端写入；assertF3Isolation helper 同时被 meta-deviceid-collision 反向期望 throw | per-device store 内容隔离（不仅是目录隔离，hash 真不串） |
 
 #### 2.2 P1：尽量覆盖（第二阶段） / P1: Should-Cover (Phase 2)
 
@@ -240,20 +240,38 @@ npm test
 | `test/e2e-comprehensive/mock-anthropic/index.ts` | 扩展自 `server/test/fixtures/mock-anthropic-api.ts` 的可编程 mock + admin |
 | `server/src/admin-events.ts` | server 端结构化事件流 endpoint（**新增**，仅在 `CERELAY_ADMIN_EVENTS=true` 启用，生产默认关） |
 
-#### 4.2 server admin endpoints（仅测试用） / Server Admin Endpoints (Test-Only)
+#### 4.2 server admin endpoints（运维 / 测试） / Server Admin Endpoints (Ops & Test)
 
-新增 admin HTTP 路由（`server/src/admin-events.ts`），仅当 `CERELAY_ADMIN_EVENTS=true` 时挂载：
+实际架构（**与早期设想不同**：admin 路由挂主端口，不独立 8766；生产路由保留壳但 e2e-only endpoint 受 `CERELAY_ADMIN_EVENTS=true` gate）：
 
-| 路由 | 用途 |
-|---|---|
-| `GET /admin/events?sessionId=...&since=...` | 拉该 session 的结构化事件流（PTY 启动 / tool relay / FUSE op / cache hit/miss / namespace bootstrap）。**仅 in-memory 环形 buffer**，不持久化 |
-| `GET /admin/sessions` | 当前活跃 session 列表 + deviceId / cwd |
-| `POST /admin/sessions/:id/terminate` | 强制结束 session（G2 类 case 用） |
+| 路由 | 生产可用 | E2E gate | 用途 |
+|---|---|---|---|
+| `GET /admin/stats` | ✅ | — | 运维统计 |
+| `GET /admin/clients` | ✅ | — | 在线 client 列表 |
+| `GET /admin/sessions` | ✅ | — | 当前活跃 PTY session 列表 |
+| `GET /admin/tokens` / `POST /admin/tokens` / `DELETE /admin/tokens/:id` | ✅ | — | Token 管理 |
+| `GET /admin/tool-routing` / `PUT /admin/tool-routing` | ✅ | — | 工具路由配置 |
+| `GET /admin/events?sessionId=&since=` | 壳保留，禁用时返回 `{enabled:false, events:[]}` | `CERELAY_ADMIN_EVENTS=true` 才有数据 | 结构化事件 ring buffer（pty.spawn.ready / file-proxy.read.served / file-proxy.settings.redacted 等） |
+| `POST /admin/test-toggles` | ❌ 403 | `CERELAY_ADMIN_EVENTS=true` 才接受 | meta-test 用：disableRedact / injectIfsBug |
+| `GET /admin/cache?deviceId=` (summary) | ❌ 404 | `CERELAY_ADMIN_EVENTS=true` 才挂载 | manifest scope summary（C1/C2 用） |
+| `GET /admin/cache?deviceId=&scope=&relPath=` (single entry) | ❌ 404 | `CERELAY_ADMIN_EVENTS=true` 才挂载 | 单项摘要 `{size, sha256}`，缺失 404（C3/F3/C4 用） |
 
 **安全约束**：
-- 该路由组**仅在 `CERELAY_ADMIN_EVENTS=true` 时挂载**，生产 `docker-compose.yml` 不设此 env
-- 路由**不挂主端口**，挂在独立的 `8766`（admin port），compose 只在 `cerelay-e2e-net` 网络内暴露
-- buffer 容量上限（默认 10k 事件）防 OOM
+- 所有 admin 路由都需通过 Bearer Token 认证（`/admin/tokens` 管理）
+- e2e-only endpoints（`/admin/events` 数据、`/admin/test-toggles`、`/admin/cache`）由 `CERELAY_ADMIN_EVENTS=true` 二次 gate；生产 `docker-compose.yml` 不设此 env
+- `events` ring buffer 容量上限（默认 10k 事件）防 OOM
+- 单项 cache 查询不返回文件内容，只返回 `{size, sha256}`，避免暴露真实路径内容
+- 早期 spec 提到的"独立 8766 admin port"未落地——e2e compose 通过 token + env gate 在主端口隔离 e2e endpoints
+
+**file-proxy / namespace 结构化 event 列表**（`CERELAY_ADMIN_EVENTS=true` 启用时记录）：
+
+| event kind | 触发点 | detail 字段 |
+|---|---|---|
+| `pty.spawn.ready` | PTY child spawn 成功（namespace runtime ready） | `{ cwd, homeDir, pid }` |
+| `pty.spawn.failed` | PTY child spawn 失败 | `{ error, ... }` |
+| `file-proxy.read.served` | server 端实际 served 一次 read 内容（启动期 snapshot 灌入 daemon 或运行时命中） | `{ root, relPath, servedFrom, hasData?/sliceBytes?/size? }`<br>root ∈ `home-claude` / `home-claude-json` / `project-claude` / `cwd-ancestor-N`<br>servedFrom ∈ `snapshot-cache`（buildSnapshotFromManifest）/ `snapshot-client`（client snapshot round-trip）/ `cache`（运行时 tryServeReadFromCache）/ `passthrough-settings`（settings.json 专用 redact 分支）<br>relPath：root 内的相对路径（`home-claude` 不含 `.claude/` 前缀；`home-claude-json` 始终为空串；`project-claude` 不含 `.claude/` 前缀） |
+| `file-proxy.settings.redacted` | settings.json 出口实际改写（移除登录态字段） | `{ site, relPath, beforeBytes, afterBytes }` （site ∈ snapshot / cache-hit / passthrough） |
+| `file-proxy.settings.redact.bypassed` | meta-redact-leak 把 redact 关掉时的 honest 标记 | `{ site, relPath, bytes }` |
 
 #### 4.3 多 device 隔离实现 / Multi-Device Isolation
 
@@ -413,14 +431,21 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | 初版：定义 P0/P1/P2 三阶段覆盖矩阵、多容器拓扑、orchestrator/agent/mock 协议、强制审计约束 |
 | 2026-05-02 | P0-A Foundation 落地（容器拓扑 / orchestrator / agent / mock-anthropic / admin-events / canary cases A1+B4） |
 | 2026-05-02 | P0-B 4 commits 落地，主套件 16/16 + meta 3/3 在容器内跑通；Codex 终审认定 4 Critical 阻断、5 Important、2 Nit，详见 §11，**P0-B 未闭环** |
+| 2026-05-02 | P0-B 闭环：11 项缺陷（4 Critical + 5 Important + 2 Nit）全部修复；新增 `file-proxy.read.served` admin event、`assertF3Isolation()` 公共断言、`/admin/cache` 单项查询 + gate、`pty.spawn.ready` 主断言；E1 拆 site=snapshot e2e + cache-hit/passthrough server 单测；mock 拆 `toolResultsAll`/`toolResultsCurrentTurn`；test-toggles 加 runtime assert。e2e 主 16/16 + meta 3/3 + server unit 425/425 全过；Codex 终审通过 |
 
 ---
 
-### 11. Codex 终审遗留事项（P0-B 阻断） / Codex Review Outstanding Items
+### 11. Codex 终审遗留事项（已闭环 / Closed） / Codex Review Outstanding Items (Closed)
 
-> 状态（2026-05-02）：P0-B 4 commits 已落，但 Codex 独立终审认定主套件**case 名字对上 §2.1 matrix，主断言没真覆盖对应不变量**。下方清单未全部修完前，P0-B 不能视为闭环；P0-A 的 canary（A1/B4）不受影响。
+> 状态（2026-05-02 闭环）：下方 11 项（4 Critical / 5 Important / 2 Nit）全部落地。Codex 独立终审通过：主套件 16/16 + meta 3/3 + server unit 425/425 全过；新增 `file-proxy.read.served` admin event + `assertF3Isolation()` 公共断言 + E1 三 site server 单测覆盖。本节作为 P0-B 实施过程的 honest 留痕保留，不再作为开工 todo。
 >
-> Status (2026-05-02): P0-B is **landed but not closed**. Independent Codex review found that several P0 cases assert against the wrong invariant. The list below MUST be addressed before P0-B can be considered done; P0-A canary cases (A1/B4) are unaffected.
+> Status (closed 2026-05-02): All 11 items landed; Codex final review passed. Main suite 16/16 + meta 3/3 + server unit 425/425 all green. Section preserved as honest process record; no longer an open todo.
+
+#### 11.0 闭环登记 / Closure Log
+
+| 日期 | 事件 | 验证 |
+|---|---|---|
+| 2026-05-02 | P0-B Critical/Important/Nit 全部落地，Codex 终审通过 | `bash test/run-e2e-comprehensive.sh` 16/16 ＋ `bash test/run-e2e-comprehensive-meta.sh` 3/3 ＋ `cd server && npm test` 425/425 |
 
 #### 11.1 Critical（必须修，未修不可 merge / Must-fix blockers）
 
@@ -464,11 +489,10 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 
 #### 11.5 闭环路径 / Closing the Loop
 
-新 session 开工建议顺序：
+历史路径已走完：
 
-1. **修 4 个 Critical**（C1-C4，P0-B 才算真闭环）
-2. **修 5 个 Important**（特别是 I1 `/admin/cache` gate—生产 safety）
-3. **修 2 个 Nit**（N1-N2）
-4. **再走一次 Codex 终审**（用 §6 强制审计约束 + `rules/review-workflow.md` 阶段 5 流程）
-5. 终审通过 → 在本节追加"2026-XX-XX P0-B 闭环"行 + 把 §11 整节移到归档（或保留作为"P0 实施过程的 honest 留痕"）
-6. 全部完成 → 进入 §5 P1 阶段
+1. ✅ 4 Critical 全修：C1（file-proxy.read.served event + B1/B2/B3 主断言改造）、C2（E1 site=snapshot e2e + cache-hit/passthrough server 单测降级）、C3（/admin/cache 单项查询 + F3 内容隔离）、C4（assertF3Isolation 公共断言 + meta 反向期望 throw）
+2. ✅ 5 Important 全修：I1（/admin/cache CERELAY_ADMIN_EVENTS gate）、I2（§4.2 admin 路由文档同步）、I3（test-toggles assertWritable runtime check）、I4（mock 拆 toolResultsAll + toolResultsCurrentTurn）、I5（matrix 改 `*.md` 对齐 basename 实现）
+3. ✅ 2 Nit 全修：N1（C2 描述 `>= drift ≤ 50`）、N2（删 F1 expectMarker）
+4. ✅ Codex 终审通过 + 文档闭环登记完成
+5. ➡️ 进入 §5 P1 阶段
