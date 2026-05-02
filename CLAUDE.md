@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **文档规范**：通用文档格式与模板见 `~/.claude/rules/doc-conventions.md`；项目内文档职责划分见 [`docs/architecture.md` §12 文档维护原则](./docs/architecture.md#12-文档维护原则--documentation-maintenance-principles)。
+> **文档规范**：以 `~/.claude/rules/doc-conventions.md` 为准（中英双语、章节模板、图表）。新增 sub-doc 在 [`docs/architecture.md` §11 子文档索引](./docs/architecture.md#11-子文档索引--sub-documents-index) 登记。
 
 ## E2E 综合测试覆盖审计 / E2E Comprehensive Test Coverage Audit
 

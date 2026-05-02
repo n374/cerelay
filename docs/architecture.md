@@ -412,13 +412,4 @@ npm run test:smoke
 | [`superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md`](./superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md) | Access-Ledger 驱动的 Snapshot + 增量同步缓存重构设计（修复 phase_syncing 抢跑、持久化 missing 路径、扩展 cwd-ancestor `CLAUDE.md` 覆盖） |
 | [`../CLAUDE.md`](../CLAUDE.md) | 项目级 AI 协作规范、架构特点详细约束 |
 
----
-
-## 12. 文档维护原则 / Documentation Maintenance Principles
-
-> 通用文档**格式与模板**（中英双语、Markdown、代码示例、图表、章节顺序）见 `~/.claude/rules/doc-conventions.md`。本节定义 cerelay 项目内**各文档职责划分**（哪些内容放哪个文件）：
-
-- [`README.md`](../README.md) — **用户视角**：能力总览、前置条件、快速开始、鉴权、代理、Web UI、license。**不放架构图、组件分层、env vars 全表、内部模块路径**
-- [`docs/architecture.md`](./architecture.md)（本文档）— **贡献者视角**：架构总览 + 技术选型 + 核心机制 + 子文档索引。**专题深挖**（部署 / 编辑器集成 / Plan D 设计等）下沉到独立 `docs/<topic>.md`
-- [`docs/<topic>.md`](.) — 单一专题深挖。新增专题文档必须从 architecture.md §11 子文档索引登记
-- [`CLAUDE.md`](../CLAUDE.md) — **AI 协作规范 + 项目级强制约束**（如 Phase 抽象约束）。**不重复 architecture.md 已有的描述性内容**，但可定义 architecture.md 不便表达的"必须 / 禁止"规则
+> 文档**格式 / 模板 / 章节顺序**等通用规范见 `~/.claude/rules/doc-conventions.md`。新增 sub-doc 时记得回到本节表格登记一行。
