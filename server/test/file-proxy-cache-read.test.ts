@@ -39,7 +39,7 @@ function sha256(text: string): string {
 }
 
 async function seedCache(store: ClientCacheStore, changes: CacheTaskChange[]) {
-  await store.applyDelta(DEVICE_ID, changes);
+  await store.applyDelta(DEVICE_ID, CLIENT_CWD, changes);
 }
 
 function createManager(options?: {
@@ -99,7 +99,7 @@ test("buildSnapshotFromManifest 生成目录 + 文件 + 嵌套子目录", async 
   ]);
 
   const { manager } = createManager({ store, deviceId: DEVICE_ID });
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CLIENT_CWD);
   const entries = (manager as unknown as {
     buildSnapshotFromManifest: (m: typeof manifest) => Array<{
       path: string;
@@ -148,7 +148,7 @@ test("buildSnapshotFromManifest 对 skipped 文件只有 stat 无 data", async (
   ]);
 
   const { manager } = createManager({ store, deviceId: DEVICE_ID });
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CLIENT_CWD);
   const entries = (manager as unknown as {
     buildSnapshotFromManifest: (m: typeof manifest) => Array<{
       path: string;
@@ -518,7 +518,7 @@ test("cache 未启用时 buildSnapshotFromManifest 返回空", async (t) => {
   t.after(cleanup);
 
   const { manager } = createManager();
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CLIENT_CWD);
   const entries = (manager as unknown as {
     buildSnapshotFromManifest: (m: typeof manifest) => unknown[];
   }).buildSnapshotFromManifest(manifest);

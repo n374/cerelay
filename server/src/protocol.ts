@@ -168,14 +168,8 @@ export interface FileProxyResponse {
 //   3. 在 watcher 建立后发送 cache_task_sync_complete 切到 ready
 // ============================================================
 
-/** 缓存覆盖的路径子集。 */
-export type CacheScope = "claude-home" | "claude-json" | "cwd-ancestor-md";
-
-export const CACHE_SCOPES: CacheScope[] = [
-  "claude-home",
-  "claude-json",
-  "cwd-ancestor-md",
-];
+/** 缓存覆盖的路径子集。claude-home = `~/.claude/` 目录，claude-json = `~/.claude.json` 单文件。 */
+export type CacheScope = "claude-home" | "claude-json";
 
 /** Server 侧缓存 manifest 中的单个条目。 */
 export interface CacheEntry {
@@ -207,18 +201,16 @@ export interface CacheTaskManifestSnapshot {
 }
 
 export interface SyncPlan {
-  scopes: Partial<Record<CacheScope, ScopeWalkInstruction>>;
+  scopes: {
+    "claude-home"?: ScopeWalkInstruction;
+    "claude-json"?: ScopeWalkInstruction;
+  };
 }
 
 export interface ScopeWalkInstruction {
   subtrees: Array<{ relPath: string; maxDepth: number }>;
   files: string[];
   knownMissing: string[];
-  /**
-   * Only used by cwd-ancestor-md. Absolute file paths; no recursive walk.
-   * When set, subtrees/files should be empty.
-   */
-  exactFilesAbs?: string[];
 }
 
 export type CacheTaskRole = "active" | "inactive";
@@ -322,13 +314,6 @@ export interface CacheTaskDelta {
   sentAt: number;
 }
 
-export interface CacheTaskAncestorDelta {
-  type: "cache_task_ancestor_delta";
-  deviceId: string;
-  cwd: string;
-  changes: CacheTaskChange[];
-}
-
 export interface CacheTaskDeltaAck {
   type: "cache_task_delta_ack";
   assignmentId: string;
@@ -385,7 +370,6 @@ export type ServerToHandMessage =
   | ToolCallComplete;
 
 export type HandToServerMessage =
-  | CacheTaskAncestorDelta
   | CacheTaskDelta
   | CacheTaskFault
   | CacheTaskHeartbeat

@@ -10,7 +10,6 @@ const log = createLogger("cache-task-manager");
 import type {
   CacheScope,
   CacheTaskAckErrorCode,
-  CacheTaskAncestorDelta,
   CacheTaskAssignment,
   CacheTaskAssignmentReason,
   CacheTaskChange,
@@ -30,7 +29,7 @@ type TaskPhase = "idle" | "syncing" | "ready" | "degraded";
 interface CacheTaskRecord {
   cacheKey: string;
   deviceId: string;
-  activeClientCwd: string | null;
+  cwd: string;
   phase: TaskPhase;
   activeClientId: string | null;
   assignmentId: string | null;
@@ -113,7 +112,7 @@ export class CacheTaskManager {
       return;
     }
 
-    const cacheKey = this.cacheKeyOf(deviceId);
+    const cacheKey = this.cacheKeyOf(deviceId, hello.cwd);
     const actions = await this.withTaskLock(deviceId, hello.cwd, async () => {
       const task = this.getOrCreateTask(deviceId, hello.cwd);
       task.candidateClientIds.add(clientId);
@@ -131,7 +130,7 @@ export class CacheTaskManager {
           clientId,
           message: this.buildInactiveAssignment(
             task.deviceId,
-            task.activeClientCwd ?? hello.cwd,
+            task.cwd,
             "standby",
             task.assignmentId ?? undefined,
           ),
@@ -144,14 +143,14 @@ export class CacheTaskManager {
   }
 
   async handleDisconnect(clientId: string): Promise<void> {
-    const client = this.registry.get(clientId);
-    const cacheKey = client?.deviceId ? this.cacheKeyOf(client.deviceId) : null;
-    for (const task of cacheKey ? [this.tasks.get(cacheKey)] : []) {
+    const cacheKeys = this.registry.cacheKeysOf(clientId);
+    for (const cacheKey of cacheKeys) {
+      const task = this.tasks.get(cacheKey);
       if (!task) {
         continue;
       }
 
-      const actions = await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+      const actions = await this.withTaskLock(task.deviceId, task.cwd, async () => {
         task.candidateClientIds.delete(clientId);
         if (task.activeClientId !== clientId) {
           if (!task.activeClientId && task.candidateClientIds.size === 0) {
@@ -175,7 +174,7 @@ export class CacheTaskManager {
       return;
     }
 
-    await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+    await this.withTaskLock(task.deviceId, task.cwd, async () => {
       if (task.activeClientId !== clientId) {
         return;
       }
@@ -192,7 +191,7 @@ export class CacheTaskManager {
       return;
     }
 
-    const actions = await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+    const actions = await this.withTaskLock(task.deviceId, task.cwd, async () => {
       if (task.activeClientId !== clientId || task.assignmentId !== fault.assignmentId) {
         return [];
       }
@@ -214,7 +213,7 @@ export class CacheTaskManager {
       return;
     }
 
-    const ack = await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+    const ack = await this.withTaskLock(task.deviceId, task.cwd, async () => {
       if (task.activeClientId !== clientId) {
         return this.rejectAck(delta, "NOT_ACTIVE", "当前连接不是 active executor");
       }
@@ -237,7 +236,7 @@ export class CacheTaskManager {
           } satisfies CacheTaskDeltaAck;
         }
 
-        const result = await this.store.applyDelta(task.deviceId, changesToApply);
+        const result = await this.store.applyDelta(task.deviceId, task.cwd, changesToApply);
         task.revision = result.revision;
         this.rememberMutationIds(task, changesToApply);
         this.clearReadBypass(task, changesToApply);
@@ -268,7 +267,7 @@ export class CacheTaskManager {
       return;
     }
 
-    const actions = await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+    const actions = await this.withTaskLock(task.deviceId, task.cwd, async () => {
       if (task.activeClientId !== clientId || task.assignmentId !== message.assignmentId) {
         return [];
       }
@@ -278,7 +277,7 @@ export class CacheTaskManager {
       task.phase = "ready";
       log.info("cache task 进入 ready 状态", {
         deviceId: task.deviceId,
-        cwd: task.activeClientCwd,
+        cwd: task.cwd,
         assignmentId: task.assignmentId,
         revision: task.revision,
         activeClientId: task.activeClientId,
@@ -294,7 +293,7 @@ export class CacheTaskManager {
     cwd: string,
     targets: CacheTaskMutationHintTarget[],
   ): Promise<void> {
-    const task = this.tasks.get(this.cacheKeyOf(deviceId));
+    const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
     if (!task) {
       return;
     }
@@ -331,8 +330,7 @@ export class CacheTaskManager {
   }
 
   shouldUseCacheSnapshot(deviceId: string, cwd: string): boolean {
-    const task = this.tasks.get(this.cacheKeyOf(deviceId));
-    void cwd;
+    const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
     return task?.phase === "ready";
   }
 
@@ -350,8 +348,7 @@ export class CacheTaskManager {
     candidateClientCount: number;
     lastHeartbeatAt: number | null;
   } {
-    const task = this.tasks.get(this.cacheKeyOf(deviceId));
-    void cwd;
+    const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
     if (!task) {
       return {
         exists: false,
@@ -375,8 +372,7 @@ export class CacheTaskManager {
   }
 
   shouldBypassCacheRead(deviceId: string, cwd: string, scope: CacheScope, relPath: string): boolean {
-    const task = this.tasks.get(this.cacheKeyOf(deviceId));
-    void cwd;
+    const task = this.tasks.get(this.cacheKeyOf(deviceId, cwd));
     if (!task) {
       return false;
     }
@@ -410,8 +406,7 @@ export class CacheTaskManager {
    * 或者 store 新增了任何回调 manager 的路径，就必须重新评估这里的锁顺序。
    */
   async withTaskLock<T>(deviceId: string, cwd: string, fn: () => Promise<T>): Promise<T> {
-    const key = this.cacheKeyOf(deviceId);
-    void cwd;
+    const key = this.cacheKeyOf(deviceId, cwd);
     const previous = this.mutexChains.get(key) ?? Promise.resolve();
     let releaseSelf!: () => void;
     const self = new Promise<void>((resolve) => {
@@ -444,7 +439,7 @@ export class CacheTaskManager {
         continue;
       }
 
-      const actions = await this.withTaskLock(task.deviceId, task.activeClientCwd ?? "", async () => {
+      const actions = await this.withTaskLock(task.deviceId, task.cwd, async () => {
         if (!task.activeClientId || task.lastHeartbeatAt === null) {
           return [];
         }
@@ -464,18 +459,18 @@ export class CacheTaskManager {
   }
 
   private taskForClient(clientId: string): CacheTaskRecord | undefined {
-    const client = this.registry.get(clientId);
-    return client?.deviceId ? this.tasks.get(this.cacheKeyOf(client.deviceId)) : undefined;
+    const cacheKey = this.registry.cacheKeyOf(clientId);
+    return cacheKey ? this.tasks.get(cacheKey) : undefined;
   }
 
   private getOrCreateTask(deviceId: string, cwd: string): CacheTaskRecord {
-    const cacheKey = this.cacheKeyOf(deviceId);
+    const cacheKey = this.cacheKeyOf(deviceId, cwd);
     let task = this.tasks.get(cacheKey);
     if (!task) {
       task = {
         cacheKey,
         deviceId,
-        activeClientCwd: cwd,
+        cwd,
         phase: "idle",
         activeClientId: null,
         assignmentId: null,
@@ -505,9 +500,8 @@ export class CacheTaskManager {
       return [];
     }
 
-    const manifest = await this.store.loadManifest(task.deviceId);
+    const manifest = await this.store.loadManifest(task.deviceId, task.cwd);
     task.activeClientId = winner;
-    task.activeClientCwd = this.registry.get(winner)?.cwd ?? task.activeClientCwd;
     task.assignmentId = this.createAssignmentId();
     task.phase = "syncing";
     task.revision = manifest.revision;
@@ -529,12 +523,7 @@ export class CacheTaskManager {
       }
       actions.push({
         clientId: candidateId,
-        message: this.buildInactiveAssignment(
-          task.deviceId,
-          this.registry.get(candidateId)?.cwd ?? task.activeClientCwd ?? "",
-          "standby",
-          task.assignmentId,
-        ),
+        message: this.buildInactiveAssignment(task.deviceId, task.cwd, "standby", task.assignmentId),
       });
     }
 
@@ -546,9 +535,8 @@ export class CacheTaskManager {
     clientId: string,
     reason: Extract<CacheTaskAssignmentReason, "resync">,
   ): Promise<OutboundMessage[]> {
-    const manifest = await this.store.loadManifest(task.deviceId);
+    const manifest = await this.store.loadManifest(task.deviceId, task.cwd);
     task.activeClientId = clientId;
-    task.activeClientCwd = this.registry.get(clientId)?.cwd ?? task.activeClientCwd;
     task.assignmentId = this.createAssignmentId();
     task.phase = "syncing";
     task.revision = manifest.revision;
@@ -573,7 +561,6 @@ export class CacheTaskManager {
     task.activeClientId = null;
     task.assignmentId = null;
     task.lastHeartbeatAt = null;
-    task.activeClientCwd = null;
     task.phase = task.candidateClientIds.size > 0 ? "degraded" : "idle";
 
     if (task.candidateClientIds.size === 0) {
@@ -612,13 +599,12 @@ export class CacheTaskManager {
     const syncPlan = computeSyncPlan({
       ledger,
       homedir: this.getHomedirForDevice(task.deviceId),
-      cwd: task.activeClientCwd ?? "",
     });
 
     return {
       type: "cache_task_assignment",
       deviceId: task.deviceId,
-      cwd: task.activeClientCwd ?? "",
+      cwd: task.cwd,
       assignmentId: task.assignmentId,
       role: "active",
       reason,
@@ -629,10 +615,6 @@ export class CacheTaskManager {
         scopes: {
           "claude-home": { ...manifest.scopes["claude-home"], entries: { ...manifest.scopes["claude-home"].entries } },
           "claude-json": { ...manifest.scopes["claude-json"], entries: { ...manifest.scopes["claude-json"].entries } },
-          "cwd-ancestor-md": {
-            ...manifest.scopes["cwd-ancestor-md"],
-            entries: { ...manifest.scopes["cwd-ancestor-md"].entries },
-          },
         },
       },
       syncPlan,
@@ -744,14 +726,8 @@ export class CacheTaskManager {
     this.tasks.delete(cacheKey);
   }
 
-  async applyAncestorDelta(delta: CacheTaskAncestorDelta): Promise<void> {
-    const ancestorChanges = delta.changes.filter((change) => change.scope === "cwd-ancestor-md");
-    if (ancestorChanges.length === 0) return;
-    await this.store.applyDelta(delta.deviceId, ancestorChanges);
-  }
-
-  private cacheKeyOf(deviceId: string): string {
-    return deviceId;
+  private cacheKeyOf(deviceId: string, cwd: string): string {
+    return `${deviceId}\0${cwd}`;
   }
 
   private readBypassKey(scope: CacheScope, relPath: string): string {

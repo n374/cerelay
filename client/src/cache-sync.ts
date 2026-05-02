@@ -482,9 +482,6 @@ export async function buildScopePlan(args: BuildPlanArgs): Promise<ScopePlan> {
 
 export async function walkScope(args: WalkScopeArgs): Promise<LocalEntry[]> {
   const instruction = args.instruction ?? WHOLE_SCOPE_INSTRUCTION;
-  if (instruction.exactFilesAbs) {
-    return scanExactFilesAbs(instruction.exactFilesAbs, args.exclude, args.shouldAbort);
-  }
   if (isWholeScopeInstruction(instruction)) {
     return scanLocalFiles(args.scope, args.homedir, args.exclude, args.shouldAbort);
   }
@@ -563,32 +560,6 @@ const WHOLE_SCOPE_INSTRUCTION: ScopeWalkInstruction = {
   files: [],
   knownMissing: [],
 };
-
-async function scanExactFilesAbs(
-  files: string[],
-  exclude?: (relPath: string) => boolean,
-  shouldAbort?: () => boolean,
-): Promise<LocalEntry[]> {
-  const results: LocalEntry[] = [];
-  for (const absPath of files) {
-    if (shouldAbort?.()) break;
-    if (exclude?.(absPath)) continue;
-    try {
-      const stats = await stat(absPath);
-      if (!stats.isFile()) continue;
-      results.push({
-        relPath: absPath,
-        absPath,
-        size: stats.size,
-        mtime: Math.floor(stats.mtimeMs),
-      });
-    } catch {
-      // Missing exact files are represented by absence from locals; hashScope
-      // emits delete only when the remote manifest previously had that key.
-    }
-  }
-  return results;
-}
 
 export async function scanLocalFiles(
   scope: CacheScope,
@@ -765,9 +736,6 @@ function isPathCoveredByInstruction(relPath: string, instruction: ScopeWalkInstr
   if (isWholeScopeInstruction(instruction)) {
     return true;
   }
-  if (instruction.exactFilesAbs?.includes(relPath)) {
-    return true;
-  }
   const normalized = normalizeInstructionPath(relPath);
   if (instruction.files.map(normalizeInstructionPath).includes(normalized)) {
     return true;
@@ -866,9 +834,6 @@ export function applyScopeBudget<T extends { size: number; mtime: number; skippe
 }
 
 function formatDisplayPath(scope: CacheScope, relPath: string): string {
-  if (scope === "cwd-ancestor-md") {
-    return relPath;
-  }
   if (scope === "claude-json") {
     return "~/.claude.json";
   }

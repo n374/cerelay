@@ -5,10 +5,11 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { ClientCacheStore, sanitizeDeviceId } from "../src/client-cache-store.js";
+import { ClientCacheStore, cwdHash, sanitizeDeviceId } from "../src/client-cache-store.js";
 import type { CacheTaskChange } from "../src/protocol.js";
 
 const DEVICE_ID = "device-abc";
+const CWD = "/Users/foo/project";
 
 async function makeStore() {
   const dataDir = await mkdtemp(path.join(tmpdir(), "cerelay-store-"));
@@ -27,50 +28,56 @@ function sha256(text: string): string {
   return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
 }
 
-test("loadManifest returns empty v3 manifest for a new device", async (t) => {
+test("loadManifest 对新设备返回空 manifest", async (t) => {
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
-  const manifest = await store.loadManifest(DEVICE_ID);
-  assert.equal(manifest.version, 3);
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.version, 2);
   assert.equal(manifest.revision, 0);
   assert.deepEqual(manifest.scopes["claude-home"].entries, {});
   assert.deepEqual(manifest.scopes["claude-json"].entries, {});
 });
 
-test("old v1/v2 manifest files are treated as empty v3 manifests", async (t) => {
+test("loadManifest 兼容读取 v1 manifest 并补 revision=0", async (t) => {
   const { store, dataDir, cleanup } = await makeStore();
   t.after(cleanup);
 
-  const manifestPath = path.join(dataDir, "client-cache", DEVICE_ID, "manifest.json");
+  const manifestPath = path.join(dataDir, "client-cache", DEVICE_ID, cwdHash(CWD), "manifest.json");
   await mkdir(path.dirname(manifestPath), { recursive: true });
-  for (const version of [1, 2]) {
-    await writeFile(
-      manifestPath,
-      JSON.stringify({
-        version,
-        revision: 99,
-        scopes: {
-          "claude-home": { entries: { "legacy.txt": { size: 1, mtime: 1, sha256: "abc" } } },
-          "claude-json": { entries: {} },
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      scopes: {
+        "claude-home": {
+          entries: {
+            "legacy.txt": { size: 1, mtime: 1, sha256: "abc" },
+          },
+          truncated: true,
         },
-      }),
-      "utf8",
-    );
+        "claude-json": { entries: {} },
+      },
+    }),
+    "utf8",
+  );
 
-    const manifest = await store.loadManifest(DEVICE_ID);
-    assert.equal(manifest.version, 3);
-    assert.equal(manifest.revision, 0);
-    assert.deepEqual(manifest.scopes["claude-home"].entries, {});
-  }
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.version, 2);
+  assert.equal(manifest.revision, 0);
+  assert.equal(manifest.scopes["claude-home"].truncated, true);
+  assert.deepEqual(
+    manifest.scopes["claude-home"].entries["legacy.txt"],
+    { size: 1, mtime: 1, sha256: "abc" },
+  );
 });
 
-test("applyDelta writes device-level blob and manifest", async (t) => {
+test("applyDelta 写入 blob 并更新 manifest", async (t) => {
   const { store, dataDir, cleanup } = await makeStore();
   t.after(cleanup);
 
   const content = "hello";
-  const result = await store.applyDelta(DEVICE_ID, [
+  const result = await store.applyDelta(DEVICE_ID, CWD, [
     {
       kind: "upsert",
       scope: "claude-home",
@@ -86,26 +93,26 @@ test("applyDelta writes device-level blob and manifest", async (t) => {
   assert.equal(result.written, 1);
   assert.equal(result.deleted, 0);
 
-  const blobPath = store.blobPath(DEVICE_ID, sha256(content));
-  assert.ok(existsSync(blobPath), "blob should exist");
+  const blobPath = store.blobPath(DEVICE_ID, CWD, sha256(content));
+  assert.ok(existsSync(blobPath), "blob 应该存在");
   assert.equal(await readFile(blobPath, "utf8"), content);
 
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
   assert.equal(manifest.revision, 1);
   assert.deepEqual(
     manifest.scopes["claude-home"].entries["settings.json"],
     { size: content.length, mtime: 1_700_000_000_000, sha256: sha256(content) },
   );
 
-  assert.ok(existsSync(path.join(dataDir, "client-cache", DEVICE_ID, "manifest.json")));
+  const expectedSessionDir = path.join(dataDir, "client-cache", DEVICE_ID, cwdHash(CWD));
+  assert.ok(existsSync(path.join(expectedSessionDir, "manifest.json")));
 });
 
-test("applyDelta covers delete, skipped entries, empty blobs, and sha256 validation", async (t) => {
+test("applyDelta 覆盖 delete、skipped 与 sha256 校验", async (t) => {
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
-  const emptySha = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
-  await store.applyDelta(DEVICE_ID, [
+  await store.applyDelta(DEVICE_ID, CWD, [
     {
       kind: "upsert",
       scope: "claude-home",
@@ -133,25 +140,19 @@ test("applyDelta covers delete, skipped entries, empty blobs, and sha256 validat
       sha256: sha256("{}"),
       contentBase64: b64("{}"),
     },
-    {
-      kind: "upsert",
-      scope: "claude-home",
-      path: "tasks/abc/.lock",
-      size: 0,
-      mtime: 4,
-      sha256: emptySha,
-      contentBase64: "",
-    },
   ]);
 
-  const result = await store.applyDelta(DEVICE_ID, [
-    { kind: "delete", scope: "claude-home", path: "keep.txt" },
+  const result = await store.applyDelta(DEVICE_ID, CWD, [
+    {
+      kind: "delete",
+      scope: "claude-home",
+      path: "keep.txt",
+    },
   ]);
   assert.equal(result.deleted, 1);
   assert.equal(result.revision, 2);
-  assert.ok(existsSync(store.blobPath(DEVICE_ID, emptySha)), "0-byte blob should be written");
 
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
   assert.equal(manifest.scopes["claude-home"].entries["keep.txt"], undefined);
   assert.deepEqual(manifest.scopes["claude-home"].entries["big.bin"], {
     size: 8 * 1024 * 1024,
@@ -166,7 +167,7 @@ test("applyDelta covers delete, skipped entries, empty blobs, and sha256 validat
   });
 
   await assert.rejects(
-    store.applyDelta(DEVICE_ID, [
+    store.applyDelta(DEVICE_ID, CWD, [
       {
         kind: "upsert",
         scope: "claude-home",
@@ -181,47 +182,88 @@ test("applyDelta covers delete, skipped entries, empty blobs, and sha256 validat
   );
 });
 
-test("same device writes from multiple cwd-equivalent callers share one manifest and blob pool", async (t) => {
+test("applyDelta 接受 0 字节文件（contentBase64 为空字符串）", async (t) => {
+  // 回归：早期 server 用 if (!change.contentBase64) 判存在，
+  // 0 字节文件的 base64 是 ""，会被误判为"缺少 contentBase64"。
+  // 典型触发：~/.claude/tasks/<uuid>/.lock。
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
-  const content = "shared";
-  await store.applyDelta(DEVICE_ID, [
+  const emptySha = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+  const result = await store.applyDelta(DEVICE_ID, CWD, [
     {
       kind: "upsert",
       scope: "claude-home",
-      path: "a.txt",
-      size: content.length,
-      mtime: 1,
-      sha256: sha256(content),
-      contentBase64: b64(content),
-    },
-  ]);
-  await store.applyDelta(DEVICE_ID, [
-    {
-      kind: "upsert",
-      scope: "claude-home",
-      path: "b.txt",
-      size: content.length,
-      mtime: 2,
-      sha256: sha256(content),
-      contentBase64: b64(content),
+      path: "tasks/abc/.lock",
+      size: 0,
+      mtime: 1_700_000_000_000,
+      sha256: emptySha,
+      contentBase64: "",
     },
   ]);
 
-  const manifest = await store.loadManifest(DEVICE_ID);
-  assert.ok(manifest.scopes["claude-home"].entries["a.txt"]);
-  assert.ok(manifest.scopes["claude-home"].entries["b.txt"]);
-  assert.ok(existsSync(store.blobPath(DEVICE_ID, sha256(content))));
+  assert.equal(result.written, 1);
+  assert.equal(result.deleted, 0);
+
+  const blobPath = store.blobPath(DEVICE_ID, CWD, emptySha);
+  assert.ok(existsSync(blobPath), "0 字节 blob 应该被写入（且 sha256 等于空 buffer 的 hash）");
+  const blob = await readFile(blobPath);
+  assert.equal(blob.length, 0);
+
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.deepEqual(manifest.scopes["claude-home"].entries["tasks/abc/.lock"], {
+    size: 0,
+    mtime: 1_700_000_000_000,
+    sha256: emptySha,
+  });
 });
 
-test("per-device manifest lock serializes concurrent applyDelta calls", async (t) => {
+test("不同 cwd 的缓存互不污染", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  await store.applyDelta(DEVICE_ID, "/a", [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "f",
+      size: 1,
+      mtime: 1,
+      sha256: sha256("x"),
+      contentBase64: b64("x"),
+    },
+  ]);
+
+  const m1 = await store.loadManifest(DEVICE_ID, "/a");
+  const m2 = await store.loadManifest(DEVICE_ID, "/b");
+  assert.ok(m1.scopes["claude-home"].entries.f);
+  assert.equal(m2.scopes["claude-home"].entries.f, undefined);
+});
+
+test("sanitizeDeviceId 拒绝非法字符", () => {
+  assert.equal(sanitizeDeviceId("abc-123_XYZ"), "abc-123_XYZ");
+  assert.throws(() => sanitizeDeviceId("../evil"), /非法字符/);
+  assert.throws(() => sanitizeDeviceId(""), /invalid/);
+  assert.throws(() => sanitizeDeviceId("a".repeat(200)), /invalid/);
+  assert.throws(() => sanitizeDeviceId("-starts-with-dash"), /非法字符/);
+});
+
+test("cwdHash 稳定且长度 16", () => {
+  const h1 = cwdHash("/Users/foo/project");
+  const h2 = cwdHash("/Users/foo/project");
+  const h3 = cwdHash("/Users/foo/other");
+  assert.equal(h1.length, 16);
+  assert.equal(h1, h2);
+  assert.notEqual(h1, h3);
+});
+
+test("withManifestLock 串行化并发 applyDelta，防止 manifest read-modify-write 丢更新", async (t) => {
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
   const changes = Array.from({ length: 20 }, (_, i) => {
     const content = `content-${i}`;
-    return store.applyDelta(DEVICE_ID, [
+    return store.applyDelta(DEVICE_ID, CWD, [
       {
         kind: "upsert",
         scope: "claude-home",
@@ -236,19 +278,58 @@ test("per-device manifest lock serializes concurrent applyDelta calls", async (t
 
   await Promise.all(changes);
 
-  const manifest = await store.loadManifest(DEVICE_ID);
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
   const entries = Object.keys(manifest.scopes["claude-home"].entries).sort();
   assert.equal(entries.length, 20);
   for (let i = 0; i < 20; i += 1) {
-    assert.ok(entries.includes(`file-${i}.json`), `missing entry: file-${i}.json`);
+    assert.ok(entries.includes(`file-${i}.json`), `缺少 entry: file-${i}.json`);
   }
 });
 
-test("applyDelta increments revision after each successful batch including empty batches", async (t) => {
+test("withManifestLock 不同 (deviceId, cwd) 之间不互相阻塞", async (t) => {
   const { store, cleanup } = await makeStore();
   t.after(cleanup);
 
-  const first = await store.applyDelta(DEVICE_ID, [
+  const longPromise = store.applyDelta(DEVICE_ID, "/long", [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "f",
+      size: 100,
+      mtime: 1,
+      sha256: sha256("a".repeat(100)),
+      contentBase64: b64("a".repeat(100)),
+    },
+  ]);
+
+  const shortFinished = await store.applyDelta(DEVICE_ID, "/short", [
+    {
+      kind: "upsert",
+      scope: "claude-home",
+      path: "g",
+      size: 1,
+      mtime: 1,
+      sha256: sha256("b"),
+      contentBase64: b64("b"),
+    },
+  ]).then(() => Date.now());
+
+  await longPromise;
+
+  assert.ok(shortFinished > 0);
+  const longManifest = await store.loadManifest(DEVICE_ID, "/long");
+  const shortManifest = await store.loadManifest(DEVICE_ID, "/short");
+  assert.ok(longManifest.scopes["claude-home"].entries.f);
+  assert.ok(shortManifest.scopes["claude-home"].entries.g);
+  assert.equal(longManifest.scopes["claude-home"].entries.g, undefined);
+  assert.equal(shortManifest.scopes["claude-home"].entries.f, undefined);
+});
+
+test("applyDelta 每次成功应用后 revision 递增", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const first = await store.applyDelta(DEVICE_ID, CWD, [
     {
       kind: "upsert",
       scope: "claude-home",
@@ -261,45 +342,29 @@ test("applyDelta increments revision after each successful batch including empty
   ]);
   assert.equal(first.revision, 1);
 
-  const second = await store.applyDelta(DEVICE_ID, [] satisfies CacheTaskChange[]);
-  assert.equal(second.revision, 2);
-  assert.equal(second.written, 0);
-  assert.equal(second.deleted, 0);
-
-  const manifest = await store.loadManifest(DEVICE_ID);
-  assert.equal(manifest.revision, 2);
-});
-
-test("gcOrphanBlobs removes unreferenced blobs and keeps referenced blobs", async (t) => {
-  const { store, cleanup } = await makeStore();
-  t.after(cleanup);
-
-  const live = sha256("live");
-  const orphan = sha256("orphan");
-  await store.applyDelta(DEVICE_ID, [
+  const second = await store.applyDelta(DEVICE_ID, CWD, [
     {
       kind: "upsert",
       scope: "claude-home",
-      path: "live.txt",
+      path: "beta.txt",
       size: 4,
-      mtime: 1,
-      sha256: live,
-      contentBase64: b64("live"),
+      mtime: 11,
+      sha256: sha256("beta"),
+      contentBase64: b64("beta"),
     },
   ]);
-  await mkdir(path.dirname(store.blobPath(DEVICE_ID, orphan)), { recursive: true });
-  await writeFile(store.blobPath(DEVICE_ID, orphan), "orphan", "utf8");
+  assert.equal(second.revision, 2);
 
-  const result = await store.gcOrphanBlobs(DEVICE_ID);
-  assert.equal(result.deleted, 1);
-  assert.ok(existsSync(store.blobPath(DEVICE_ID, live)));
-  assert.equal(existsSync(store.blobPath(DEVICE_ID, orphan)), false);
+  const manifest = await store.loadManifest(DEVICE_ID, CWD);
+  assert.equal(manifest.revision, 2);
 });
 
-test("sanitizeDeviceId rejects unsafe values", () => {
-  assert.equal(sanitizeDeviceId("abc-123_XYZ"), "abc-123_XYZ");
-  assert.throws(() => sanitizeDeviceId("../evil"), /非法字符/);
-  assert.throws(() => sanitizeDeviceId(""), /invalid/);
-  assert.throws(() => sanitizeDeviceId("a".repeat(200)), /invalid/);
-  assert.throws(() => sanitizeDeviceId("-starts-with-dash"), /非法字符/);
+test("applyDelta 支持空变更批次并递增 revision", async (t) => {
+  const { store, cleanup } = await makeStore();
+  t.after(cleanup);
+
+  const result = await store.applyDelta(DEVICE_ID, CWD, [] satisfies CacheTaskChange[]);
+  assert.equal(result.revision, 1);
+  assert.equal(result.written, 0);
+  assert.equal(result.deleted, 0);
 });

@@ -58,7 +58,7 @@ async function buildSnapshot(args: {
   ledgerMissing: string[];
   runtimeRoot: string;
 }): Promise<{ snapshotJson: string; clientRpcs: FileProxyRequest[] }> {
-  await args.cacheStore.applyDelta(DEVICE_ID, args.cacheEntries);
+  await args.cacheStore.applyDelta(DEVICE_ID, CLIENT_CWD, args.cacheEntries);
 
   const ledgerRuntime = new AccessLedgerRuntime(DEVICE_ID);
   for (const p of args.ledgerMissing) {
