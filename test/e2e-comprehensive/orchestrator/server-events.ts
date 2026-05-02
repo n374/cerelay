@@ -102,6 +102,59 @@ export interface FileProxyReadServedDetail {
   sliceBytes?: number;
 }
 
+/**
+ * INF-2: shadow file 的 daemon 内部本地 read 事件。
+ * shadow file (settings.local.json / credentials/.credentials.json) 由
+ * daemon 直接读本地真实文件，不经过 server FUSE handling，read.served
+ * 4 个出口都看不到——必须用本 event 才能 honest 断言"shadow 注入端到端可达"。
+ */
+export interface FileProxyShadowServedDetail {
+  op: string;        // 当前只有 "read"；INF-6 用 file-proxy.write.served
+  root: string;      // home-claude / project-claude / ...
+  relPath: string;
+  shadowPath: string;
+  bytes: number;
+  offset: number;
+  size: number;
+}
+
+/**
+ * INF-6: shadow file write 事件（与 INF-2 同 sideband 通道）。
+ */
+export interface FileProxyWriteServedDetail {
+  op: string;        // "write"
+  root: string;
+  relPath: string;
+  servedTo: string;  // 实际落到的 server 侧绝对路径（shadow 模式下为本地真实文件）
+  bytes: number;
+  offset: number;
+  shadow: boolean;   // true = 经 daemon shadow 写本地；false 预留给未来 server 端 write 出口
+}
+
+/**
+ * INF-1: 每次 server 真要回 client 拿一次 round-trip 时 emit。
+ * 与 perforatedPaths 不同：admin event 每次穿透都 emit（perforatedPaths 只记首次）。
+ * B5-negative-cache 用此 event 精确判断"两次 read 同 path 是否都穿透"。
+ */
+export interface FileProxyClientRequestedDetail {
+  op: string;
+  root: string;
+  relPath: string;
+  reason: string;
+  perforationCount: number;
+}
+
+/**
+ * INF-1: 穿透 client 后 client 报 ENOENT → 进入 negative cache 入口。
+ * 之后同 path 在 daemon 本地 _negative_perm 命中，不再回 server，更不再回 client。
+ */
+export interface FileProxyClientMissDetail {
+  op: string;
+  root: string;
+  relPath: string;
+  errorCode: number;  // 应当是 2 (ENOENT)
+}
+
 export const fileProxyEvents = {
   /**
    * 拉 file-proxy.read.served events，按 root + relPath 过滤。
@@ -154,6 +207,139 @@ export const fileProxyEvents = {
         `已抓到的 file-proxy.* events:\n${JSON.stringify(proxyEvents, null, 2)}`,
     );
   },
+
+  /** INF-2 helper：findShadowServed — daemon 内部 shadow read 事件按 (root, relPath) 过滤。 */
+  async findShadowServed(opts: {
+    root: string;
+    relPath: string;
+    sessionId?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: FileProxyShadowServedDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events
+      .filter((e) => e.kind === "file-proxy.shadow.served")
+      .filter((e) => {
+        const d = e.detail as Partial<FileProxyShadowServedDetail> | undefined;
+        return d?.root === opts.root && d?.relPath === opts.relPath;
+      }) as Array<AdminEvent & { detail: FileProxyShadowServedDetail }>;
+  },
+
+  /** INF-2 helper：等 file-proxy.shadow.served 出现；超时给 file-proxy.* 全量诊断。 */
+  async waitForShadowServed(opts: {
+    root: string;
+    relPath: string;
+    sessionId?: string;
+    since?: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: FileProxyShadowServedDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 10_000);
+    let lastSnapshot: AdminEvent[] = [];
+    while (Date.now() < deadline) {
+      const matched = await this.findShadowServed(opts);
+      if (matched.length > 0) return matched[0];
+      lastSnapshot = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const proxyEvents = lastSnapshot
+      .filter((e) => e.kind.startsWith("file-proxy."))
+      .map((e) => ({
+        kind: e.kind,
+        root: (e.detail as { root?: string } | undefined)?.root,
+        relPath: (e.detail as { relPath?: string } | undefined)?.relPath,
+      }));
+    throw new Error(
+      `waitForShadowServed(root=${opts.root}, relPath=${opts.relPath}) timeout after ${opts.timeoutMs ?? 10_000}ms\n` +
+        `已抓到的 file-proxy.* events:\n${JSON.stringify(proxyEvents, null, 2)}`,
+    );
+  },
+
+  /** INF-6 helper：findWriteServed — daemon 内部 shadow write 事件按 (root, relPath) 过滤。 */
+  async findWriteServed(opts: {
+    root: string;
+    relPath: string;
+    sessionId?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: FileProxyWriteServedDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events
+      .filter((e) => e.kind === "file-proxy.write.served")
+      .filter((e) => {
+        const d = e.detail as Partial<FileProxyWriteServedDetail> | undefined;
+        return d?.root === opts.root && d?.relPath === opts.relPath;
+      }) as Array<AdminEvent & { detail: FileProxyWriteServedDetail }>;
+  },
+
+  /** INF-6 helper：等 file-proxy.write.served 出现。 */
+  async waitForWriteServed(opts: {
+    root: string;
+    relPath: string;
+    sessionId?: string;
+    since?: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: FileProxyWriteServedDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 10_000);
+    let lastSnapshot: AdminEvent[] = [];
+    while (Date.now() < deadline) {
+      const matched = await this.findWriteServed(opts);
+      if (matched.length > 0) return matched[0];
+      lastSnapshot = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const proxyEvents = lastSnapshot
+      .filter((e) => e.kind.startsWith("file-proxy."))
+      .map((e) => ({
+        kind: e.kind,
+        root: (e.detail as { root?: string } | undefined)?.root,
+        relPath: (e.detail as { relPath?: string } | undefined)?.relPath,
+      }));
+    throw new Error(
+      `waitForWriteServed(root=${opts.root}, relPath=${opts.relPath}) timeout after ${opts.timeoutMs ?? 10_000}ms\n` +
+        `已抓到的 file-proxy.* events:\n${JSON.stringify(proxyEvents, null, 2)}`,
+    );
+  },
+
+  /**
+   * INF-1 helper：findClientRequested — 每次穿透 client 都 emit 的事件。
+   * 与 read.served 不同：本事件 = "server 决定要回 client 拿"；read.served = "server 提供了内容"。
+   * B5-negative-cache 用法：first read 应有 1 条 client.requested + 1 条 client.miss；
+   * second read 应有 0 条 client.requested（被 daemon negative cache 拦在 server 之外）。
+   */
+  async findClientRequested(opts: {
+    root: string;
+    relPath: string;
+    op?: string;
+    sessionId?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: FileProxyClientRequestedDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events
+      .filter((e) => e.kind === "file-proxy.client.requested")
+      .filter((e) => {
+        const d = e.detail as Partial<FileProxyClientRequestedDetail> | undefined;
+        if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
+        if (opts.op !== undefined && d?.op !== opts.op) return false;
+        return true;
+      }) as Array<AdminEvent & { detail: FileProxyClientRequestedDetail }>;
+  },
+
+  /** INF-1 helper：findClientMiss — 穿透 client 拿到 ENOENT、进 negative cache 时 emit。 */
+  async findClientMiss(opts: {
+    root: string;
+    relPath: string;
+    op?: string;
+    sessionId?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: FileProxyClientMissDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events
+      .filter((e) => e.kind === "file-proxy.client.miss")
+      .filter((e) => {
+        const d = e.detail as Partial<FileProxyClientMissDetail> | undefined;
+        if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
+        if (opts.op !== undefined && d?.op !== opts.op) return false;
+        return true;
+      }) as Array<AdminEvent & { detail: FileProxyClientMissDetail }>;
+  },
 };
 
 /**
@@ -205,9 +391,94 @@ export const ptyEvents = {
   },
 };
 
+/**
+ * INF-8: tool relay timeout 触发时 emit。G1-tool-timeout case 用此 event 验证
+ * timeout 路径真触发(而不只是 reject log)。
+ */
+export interface ToolTimeoutFiredDetail {
+  requestId: string;
+  toolName: string;
+  timeoutMs: number;
+  injected: boolean;   // true = 由 testToggles.injectToolTimeout 注入的短超时
+  pendingCount: number;
+}
+
+/**
+ * INF-8: ws session 断开 / cleanup 时 emit。G2-client-disconnect case 用此
+ * event 验证 "断 ws → server 真触发 destroyPtySession + cleanup"。
+ */
+export interface SessionDisconnectedDetail {
+  clientId: string;
+  reason: string;       // "client_close" | "server_shutdown" | "pty_exit" | ...
+}
+
+export const toolTimeoutEvents = {
+  async findFired(opts: {
+    sessionId?: string;
+    toolName?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: ToolTimeoutFiredDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events
+      .filter((e) => e.kind === "tool.timeout.fired")
+      .filter((e) => {
+        if (opts.toolName === undefined) return true;
+        return (e.detail as Partial<ToolTimeoutFiredDetail> | undefined)?.toolName === opts.toolName;
+      }) as Array<AdminEvent & { detail: ToolTimeoutFiredDetail }>;
+  },
+  async waitForFired(opts: {
+    sessionId?: string;
+    toolName?: string;
+    since?: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: ToolTimeoutFiredDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+    while (Date.now() < deadline) {
+      const matched = await this.findFired(opts);
+      if (matched.length > 0) return matched[0];
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(
+      `waitForFired(toolName=${opts.toolName ?? "<any>"}) timeout after ${opts.timeoutMs ?? 30_000}ms`,
+    );
+  },
+};
+
+export const sessionEvents = {
+  async findDisconnected(opts: {
+    sessionId?: string;
+    since?: number;
+  }): Promise<Array<AdminEvent & { detail: SessionDisconnectedDetail }>> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    return events.filter((e) => e.kind === "session.disconnected") as Array<
+      AdminEvent & { detail: SessionDisconnectedDetail }
+    >;
+  },
+  async waitForDisconnected(opts: {
+    sessionId?: string;
+    since?: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: SessionDisconnectedDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+    while (Date.now() < deadline) {
+      const matched = await this.findDisconnected(opts);
+      if (matched.length > 0) return matched[0];
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(
+      `waitForDisconnected(sessionId=${opts.sessionId ?? "<any>"}) timeout after ${opts.timeoutMs ?? 30_000}ms`,
+    );
+  },
+};
+
 /** P0-B-4 meta-test 用：toggle server-side process-global flags（disableRedact / injectIfsBug）。 */
 export const testToggles = {
-  async set(toggles: { disableRedact?: boolean; injectIfsBug?: boolean }): Promise<void> {
+  async set(toggles: {
+    disableRedact?: boolean;
+    injectIfsBug?: boolean;
+    /** INF-8 fault injection: 强制 tool relay 在 ms 后超时。null = 关闭。 */
+    injectToolTimeout?: { ms: number; toolName?: string } | null;
+  }): Promise<void> {
     const r = await fetch(new URL("/admin/test-toggles", BASE), {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
