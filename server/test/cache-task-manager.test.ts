@@ -314,7 +314,7 @@ test("重复 mutationId 的 delta 会直接 ack，不重复推进 revision", asy
   assert.equal(secondAck.ok, true);
   assert.equal(secondAck.appliedRevision, 1);
 
-  const manifest = await harness.store.loadManifest(DEVICE_ID, CWD);
+  const manifest = await harness.store.loadManifest(DEVICE_ID);
   assert.equal(manifest.revision, 1);
 });
 

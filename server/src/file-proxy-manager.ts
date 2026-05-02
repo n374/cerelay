@@ -808,7 +808,7 @@ export class FileProxyManager {
     const shouldUseCacheSnapshot = this.shouldUseCacheSnapshot();
 
     if (shouldUseCacheSnapshot) {
-      const manifest = await this.cacheStore!.loadManifest(this.deviceId!, this.clientCwd);
+      const manifest = await this.cacheStore!.loadManifest(this.deviceId!);
       const built = this.buildSnapshotFromManifest(manifest);
       cachedEntries.push(...built);
       cachedEntryCount = built.length;
@@ -1076,7 +1076,7 @@ export class FileProxyManager {
   ): FileProxySnapshotEntry {
     let data: string | undefined;
     if (!entry.skipped && entry.sha256 && this.cacheAvailable()) {
-      const buf = this.cacheStore!.readBlobSync(this.deviceId!, this.clientCwd, entry.sha256);
+      const buf = this.cacheStore!.readBlobSync(this.deviceId!, entry.sha256);
       if (buf) {
         // 出口 #1：~/.claude/settings.json 灌进 Python 启动 snapshot 缓存前 redact 登录态字段。
         // size-preserving padding 保证 stat.size（取自 entry.size）与实际 data 一致。
@@ -1128,7 +1128,6 @@ export class FileProxyManager {
     }
     const entry = await this.cacheStore.lookupEntry(
       this.deviceId,
-      this.clientCwd,
       scope,
       cacheRelPath,
     );
@@ -1136,7 +1135,7 @@ export class FileProxyManager {
     if (entry.skipped) return { served: false, reason: "entry_skipped" };
     if (!entry.sha256) return { served: false, reason: "entry_no_sha256" };
 
-    let buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
+    let buf = this.cacheStore.readBlobSync(this.deviceId, entry.sha256);
     if (!buf) return { served: false, reason: "blob_missing" };
 
     // 出口 #2：~/.claude/settings.json 命中 cache 后、切片前 redact 登录态字段。
@@ -1743,7 +1742,6 @@ export class FileProxyManager {
     try {
       const entry = await this.cacheStore.lookupEntry(
         this.deviceId,
-        this.clientCwd,
         "claude-home",
         "settings.json",
       );

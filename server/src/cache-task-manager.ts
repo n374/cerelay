@@ -236,7 +236,7 @@ export class CacheTaskManager {
           } satisfies CacheTaskDeltaAck;
         }
 
-        const result = await this.store.applyDelta(task.deviceId, task.cwd, changesToApply);
+        const result = await this.store.applyDelta(task.deviceId, changesToApply);
         task.revision = result.revision;
         this.rememberMutationIds(task, changesToApply);
         this.clearReadBypass(task, changesToApply);
@@ -500,7 +500,7 @@ export class CacheTaskManager {
       return [];
     }
 
-    const manifest = await this.store.loadManifest(task.deviceId, task.cwd);
+    const manifest = await this.store.loadManifest(task.deviceId);
     task.activeClientId = winner;
     task.assignmentId = this.createAssignmentId();
     task.phase = "syncing";
@@ -535,7 +535,7 @@ export class CacheTaskManager {
     clientId: string,
     reason: Extract<CacheTaskAssignmentReason, "resync">,
   ): Promise<OutboundMessage[]> {
-    const manifest = await this.store.loadManifest(task.deviceId, task.cwd);
+    const manifest = await this.store.loadManifest(task.deviceId);
     task.activeClientId = clientId;
     task.assignmentId = this.createAssignmentId();
     task.phase = "syncing";

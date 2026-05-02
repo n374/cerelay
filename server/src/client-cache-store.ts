@@ -1,19 +1,22 @@
 // ============================================================
-// Client 文件缓存的持久化存储
+// Client 文件缓存的持久化存储（per-device 全局，不再分 cwd）。
 //
-// 目录布局（以默认 CERELAY_DATA_DIR=/var/lib/cerelay 为例）：
+// 物理布局（默认 CERELAY_DATA_DIR=/var/lib/cerelay）：
 //
-//   /var/lib/cerelay/client-cache/<deviceId>/<cwdHash>/
-//     manifest.json                   按 scope 组织的元数据（path → {size, mtime, sha256, skipped}）
-//     blobs/<sha256>                  实际内容，内容寻址，天然去重
+//   /var/lib/cerelay/client-cache/<deviceId>/
+//     manifest.json                   按 scope 组织的元数据（v3 schema）
+//     blobs/<sha256>                  实际内容，内容寻址 + 跨 cwd 共享
 //
-// - cwdHash = sha256(cwd 绝对路径).slice(0,16)，避免同一 deviceId 下 cwd 切换时缓存互相污染
-// - 跳过的大文件（skipped=true）只记 manifest，不写 blob；运行时需要穿透到 Client 读取
+// 设计要点（plan 2026-05-02-file-agent-and-config-preloader.md）：
+//   - 缓存维度从 (deviceId, cwd) → deviceId（一台设备一份 manifest + 一个 blob 池）
+//   - 跨 cwd 内容寻址 dedup：同 sha256 内容只写一次（§11.3）
+//   - manifest schema bump v3；老 v1/v2 文件直接当空 manifest 处理（无历史包袱）
+//   - mutex 锁键 = deviceId（同 device 任意 cwd 的并发写互相串行）
 // ============================================================
 
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   CacheEntry,
@@ -24,16 +27,11 @@ import type {
 
 export const CACHE_SCOPES: CacheScope[] = ["claude-home", "claude-json"];
 
-/** Server 侧完整 manifest：按 scope 分组；未初始化的 scope 视为空条目集。 */
+/** Server 侧完整 manifest（v3：device-only）。 */
 export interface PersistedManifest {
-  version: 2;
+  version: 3;
   revision: number;
   scopes: Record<CacheScope, CacheManifestData>;
-}
-
-interface PersistedManifestV1 {
-  version: 1;
-  scopes: Record<CacheScope, CacheManifestData & { truncated?: boolean }>;
 }
 
 export interface ClientCacheStoreOptions {
@@ -51,16 +49,12 @@ export interface ApplyDeltaResult {
 export class ClientCacheStore {
   private readonly dataDir: string;
   /**
-   * 按 (deviceId, cwd) 维护的串行锁。
+   * 按 deviceId 维护的串行锁。
    *
    * 背景：WebSocket message handler 是并发的（server.ts 里 void this.handleMessage(...)），
-   * 同一 (deviceId, cwd) 的多个 delta / 单条目更新可能并发落盘，manifest 的
-   * read-modify-write 之间没有同步原语，会互相覆盖丢更新。因此这里加 per-manifest
-   * 串行锁（注意是 per-deviceId+cwd，不是 per-scope，
-   * 因为 manifest.json 是单文件存所有 scope）的串行锁。
-   *
-   * 实现是简单的 promise 链：每个新请求 await 上一个的结尾，自己再追加上去。
-   * 同 key 的请求严格 FIFO；不同 key 之间天然并发。
+   * 同一 deviceId 的多个 delta / 单条目更新可能并发落盘，manifest 的 read-modify-write
+   * 之间没有同步原语，会互相覆盖丢更新。device-only 化后同 device 任意 cwd 的写都
+   * 共享这把锁。实现是 promise 链 FIFO；不同 deviceId 之间天然并发。
    */
   private readonly mutexChains = new Map<string, Promise<void>>();
 
@@ -68,62 +62,49 @@ export class ClientCacheStore {
     this.dataDir = options.dataDir;
   }
 
-  /**
-   * 在 (deviceId, cwd) 锁下串行执行 fn。
-   * 实现：经典 promise 链——每次拿当前 tail 的 promise，await 它后自己再追加一节。
-   * Map 仅记录"最新尾节点 promise"，所以每个 key 永远只占一项；条目数受
-   * (deviceId, cwd) 的活跃组合数约束，不会无界增长。
-   */
+  /** 在 deviceId 锁下串行执行 fn。 */
   private async withManifestLock<T>(
     deviceId: string,
-    cwd: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const key = `${sanitizeDeviceId(deviceId)}\0${cwd}`;
+    const key = sanitizeDeviceId(deviceId);
     const previous = this.mutexChains.get(key) ?? Promise.resolve();
     let releaseSelf!: () => void;
     const self = new Promise<void>((resolve) => {
       releaseSelf = resolve;
     });
-    // 新尾节点 = 上一节完成后等本节点
     const newTail = previous.then(() => self);
     this.mutexChains.set(key, newTail);
     try {
-      // 上一节失败不影响后续：业务异常已经各自上报
       await previous.catch(() => undefined);
       return await fn();
     } finally {
       releaseSelf();
-      // 如果我们就是当前尾巴（没有后继接上来），清理 Map 防长留 settled promise
       if (this.mutexChains.get(key) === newTail) {
         this.mutexChains.delete(key);
       }
     }
   }
 
-  /**
-   * 返回 Client cache 的根目录，如 /var/lib/cerelay/client-cache/。
-   * 外部（例如 commit 3 的 FUSE 读路径）只应通过本 store 访问，不要手动拼路径。
-   */
+  /** 返回 client cache 根目录，如 /var/lib/cerelay/client-cache/。 */
   rootDir(): string {
     return path.join(this.dataDir, "client-cache");
   }
 
   /**
-   * 读取指定 (deviceId, cwd) 的完整 manifest。
-   * 不存在或损坏时返回一个全空的 manifest，不抛异常——新设备首次连接走这条路径。
+   * 读取指定 device 的完整 manifest。
+   * 不存在 / 损坏 / 老版本（v1/v2）→ 返空 manifest，不抛异常。
    */
-  async loadManifest(deviceId: string, cwd: string): Promise<PersistedManifest> {
-    const manifestPath = this.manifestPath(deviceId, cwd);
+  async loadManifest(deviceId: string): Promise<PersistedManifest> {
     try {
-      const raw = await readFile(manifestPath, "utf8");
-      const parsed = JSON.parse(raw) as PersistedManifest | PersistedManifestV1;
-      if (parsed?.version === 2 && parsed.scopes) {
-        return normalizeManifestV2(parsed);
+      const raw = await readFile(this.manifestPath(deviceId), "utf8");
+      const parsed = JSON.parse(raw) as Partial<PersistedManifest> & {
+        version?: number;
+      };
+      if (parsed?.version === 3 && parsed.scopes) {
+        return normalizeManifestV3(parsed as PersistedManifest);
       }
-      if (parsed?.version === 1 && parsed.scopes) {
-        return upgradeManifestV1(parsed);
-      }
+      // v1 / v2 / 其他：直接当空 manifest 处理（无迁移，无历史包袱）
     } catch {
       // ENOENT / JSON 解析失败 → 回空
     }
@@ -132,17 +113,16 @@ export class ClientCacheStore {
 
   async applyDelta(
     deviceId: string,
-    cwd: string,
     changes: CacheTaskChange[],
   ): Promise<ApplyDeltaResult> {
-    return this.withManifestLock(deviceId, cwd, async () => {
-      const sessionDir = this.sessionDir(deviceId, cwd);
-      await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
+    return this.withManifestLock(deviceId, async () => {
+      const deviceDir = this.deviceDir(deviceId);
+      await mkdir(path.join(deviceDir, "blobs"), { recursive: true });
 
-      const manifest = await this.loadManifest(deviceId, cwd);
-      const result = await this.applyChangesToManifest(manifest, sessionDir, changes);
+      const manifest = await this.loadManifest(deviceId);
+      const result = await this.applyChangesToManifest(manifest, deviceDir, changes);
       manifest.revision += 1;
-      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+      await writeManifestAtomic(this.manifestPath(deviceId), manifest);
       return {
         revision: manifest.revision,
         written: result.written,
@@ -152,25 +132,22 @@ export class ClientCacheStore {
     });
   }
 
-  /**
-   * 根据 (deviceId, cwd, sha256) 定位 blob 文件路径。commit 3 的 FUSE read
-   * 优先查 blob；调用方负责判断文件是否存在（skipped 的没有 blob）。
-   */
-  blobPath(deviceId: string, cwd: string, sha256: string): string {
-    return path.join(this.sessionDir(deviceId, cwd), "blobs", sha256);
+  /** 根据 (deviceId, sha256) 定位 blob 文件路径。 */
+  blobPath(deviceId: string, sha256: string): string {
+    return path.join(this.deviceDir(deviceId), "blobs", sha256);
   }
 
-  blobExists(deviceId: string, cwd: string, sha256: string): boolean {
-    return existsSync(this.blobPath(deviceId, cwd, sha256));
+  blobExists(deviceId: string, sha256: string): boolean {
+    return existsSync(this.blobPath(deviceId, sha256));
   }
 
   /**
-   * 同步读取 blob 内容。commit 3 的 FUSE 读路径使用：
-   * - 文件不存在（skipped / 新文件）→ 返回 null，调用方 fallback 到穿透 Client
+   * 同步读取 blob 内容（FUSE 读路径使用）。
+   * - 文件不存在 → 返回 null，调用方 fallback 到穿透 Client
    * - 文件存在 → 返回 Buffer
    */
-  readBlobSync(deviceId: string, cwd: string, sha256: string): Buffer | null {
-    const p = this.blobPath(deviceId, cwd, sha256);
+  readBlobSync(deviceId: string, sha256: string): Buffer | null {
+    const p = this.blobPath(deviceId, sha256);
     if (!existsSync(p)) return null;
     try {
       return readFileSync(p);
@@ -180,14 +157,14 @@ export class ClientCacheStore {
   }
 
   /**
-   * 把一个内存 buffer 作为"已写入 cache 的变更"落盘。供 FUSE 写入同步调用。
-   * 返回写入后的 CacheEntry，调用方负责把它合并进 manifest（通常通过 upsertEntry）。
+   * 把内存 buffer 落盘为 blob，返回对应的 CacheEntry。
+   * 调用方需自己把它合并进 manifest（通常通过 upsertEntry）。
    */
-  async writeBlobBuffer(deviceId: string, cwd: string, buf: Buffer): Promise<CacheEntry> {
-    const sessionDir = this.sessionDir(deviceId, cwd);
-    await mkdir(path.join(sessionDir, "blobs"), { recursive: true });
+  async writeBlobBuffer(deviceId: string, buf: Buffer): Promise<CacheEntry> {
+    const deviceDir = this.deviceDir(deviceId);
+    await mkdir(path.join(deviceDir, "blobs"), { recursive: true });
     const sha = sha256Hex(buf);
-    await writeBlobIfMissing(sessionDir, sha, buf);
+    await writeBlobIfMissing(deviceDir, sha, buf);
     return {
       size: buf.byteLength,
       mtime: Date.now(),
@@ -195,71 +172,91 @@ export class ClientCacheStore {
     };
   }
 
-  /**
-   * 更新单个 entry 的 manifest 记录（不写 blob）。适合与 writeBlobBuffer 搭配，
-   * 或用于 Claude Code 通过 FUSE write 后刷新 manifest。
-   */
+  /** 更新单条 entry 到 manifest（不写 blob）。 */
   async upsertEntry(
     deviceId: string,
-    cwd: string,
     scope: CacheScope,
     relPath: string,
     entry: CacheEntry,
   ): Promise<void> {
-    return this.withManifestLock(deviceId, cwd, async () => {
-      const manifest = await this.loadManifest(deviceId, cwd);
+    return this.withManifestLock(deviceId, async () => {
+      const manifest = await this.loadManifest(deviceId);
       manifest.scopes[scope].entries[relPath] = entry;
       manifest.revision += 1;
-      await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+      await writeManifestAtomic(this.manifestPath(deviceId), manifest);
     });
   }
 
-  /**
-   * 从 manifest 移除一个 entry。供 FUSE unlink 同步调用。
-   */
+  /** 从 manifest 移除一条 entry。 */
   async removeEntry(
     deviceId: string,
-    cwd: string,
     scope: CacheScope,
     relPath: string,
   ): Promise<void> {
-    return this.withManifestLock(deviceId, cwd, async () => {
-      const manifest = await this.loadManifest(deviceId, cwd);
+    return this.withManifestLock(deviceId, async () => {
+      const manifest = await this.loadManifest(deviceId);
       if (scope in manifest.scopes && relPath in manifest.scopes[scope].entries) {
         delete manifest.scopes[scope].entries[relPath];
         manifest.revision += 1;
-        await writeManifestAtomic(this.manifestPath(deviceId, cwd), manifest);
+        await writeManifestAtomic(this.manifestPath(deviceId), manifest);
       }
     });
   }
 
-  /**
-   * 查询某个 (scope, relPath) 在 cache 中的元数据。未命中返回 null。
-   * FUSE 读优先策略：先 lookupEntry，命中且未 skipped → readBlobSync，否则回源 Client。
-   */
+  /** 查询 (scope, relPath) 在 cache 中的元数据，未命中返回 null。 */
   async lookupEntry(
     deviceId: string,
-    cwd: string,
     scope: CacheScope,
     relPath: string,
   ): Promise<CacheEntry | null> {
-    const manifest = await this.loadManifest(deviceId, cwd);
+    const manifest = await this.loadManifest(deviceId);
     return manifest.scopes[scope]?.entries[relPath] ?? null;
+  }
+
+  /**
+   * 启动期 / 手动触发：清理 device 下未被 manifest 引用的 orphan blob。
+   * 算法：mark-and-sweep——扫 manifest 收 sha256 live set，目录里不在 live set 的 blob 删除。
+   * 与运行期 manifest 写竞争由 withManifestLock 串行保证。
+   */
+  async gcOrphanBlobs(deviceId: string): Promise<{ deleted: number }> {
+    return this.withManifestLock(deviceId, async () => {
+      const manifest = await this.loadManifest(deviceId);
+      const live = new Set<string>();
+      for (const scope of Object.values(manifest.scopes)) {
+        for (const e of Object.values(scope.entries)) {
+          if (e.sha256) live.add(e.sha256);
+        }
+      }
+      const blobsDir = path.join(this.deviceDir(deviceId), "blobs");
+      let deleted = 0;
+      try {
+        const names = await readdir(blobsDir);
+        for (const n of names) {
+          if (!live.has(n)) {
+            await rm(path.join(blobsDir, n), { force: true });
+            deleted += 1;
+          }
+        }
+      } catch {
+        // ENOENT 等 → 没有 blobs 目录，无需清
+      }
+      return { deleted };
+    });
   }
 
   // ---------- 内部 ----------
 
-  private sessionDir(deviceId: string, cwd: string): string {
-    return path.join(this.rootDir(), sanitizeDeviceId(deviceId), cwdHash(cwd));
+  private deviceDir(deviceId: string): string {
+    return path.join(this.rootDir(), sanitizeDeviceId(deviceId));
   }
 
-  private manifestPath(deviceId: string, cwd: string): string {
-    return path.join(this.sessionDir(deviceId, cwd), "manifest.json");
+  private manifestPath(deviceId: string): string {
+    return path.join(this.deviceDir(deviceId), "manifest.json");
   }
 
   private async applyChangesToManifest(
     manifest: PersistedManifest,
-    sessionDir: string,
+    deviceDir: string,
     changes: CacheTaskChange[],
   ): Promise<Omit<ApplyDeltaResult, "revision">> {
     let written = 0;
@@ -309,7 +306,7 @@ export class ClientCacheStore {
           `declared=${change.sha256} actual=${actualSha}`,
         );
       }
-      await writeBlobIfMissing(sessionDir, actualSha, buf);
+      await writeBlobIfMissing(deviceDir, actualSha, buf);
       scopeData.entries[change.path] = {
         size: change.size,
         mtime: change.mtime,
@@ -324,17 +321,13 @@ export class ClientCacheStore {
 
 export function emptyManifest(): PersistedManifest {
   return {
-    version: 2,
+    version: 3,
     revision: 0,
     scopes: {
       "claude-home": { entries: {} },
       "claude-json": { entries: {} },
     },
   };
-}
-
-export function cwdHash(cwd: string): string {
-  return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
 }
 
 /**
@@ -357,11 +350,11 @@ function sha256Hex(buf: Buffer): string {
 }
 
 async function writeBlobIfMissing(
-  sessionDir: string,
+  deviceDir: string,
   sha256: string,
   buf: Buffer,
 ): Promise<void> {
-  const blobPath = path.join(sessionDir, "blobs", sha256);
+  const blobPath = path.join(deviceDir, "blobs", sha256);
   if (existsSync(blobPath)) return;
   const tmpPath = `${blobPath}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(tmpPath, buf);
@@ -383,13 +376,12 @@ async function writeManifestAtomic(
   await rename(tmpPath, manifestPath);
 }
 
-// 该 helper 被 commit 3 使用：按流读 blob 的 0-size 检测；commit 2 内部暂未调用
-// 但一并导出，避免 commit 3 再动 ClientCacheStore 接口。
+/** FUSE 读路径按流读 blob 时使用。 */
 export function createBlobReadStream(blobPath: string): NodeJS.ReadableStream {
   return createReadStream(blobPath);
 }
 
-function normalizeManifestV2(manifest: PersistedManifest): PersistedManifest {
+function normalizeManifestV3(manifest: PersistedManifest): PersistedManifest {
   for (const scope of CACHE_SCOPES) {
     if (!manifest.scopes[scope]) {
       manifest.scopes[scope] = { entries: {} };
@@ -399,14 +391,4 @@ function normalizeManifestV2(manifest: PersistedManifest): PersistedManifest {
     manifest.revision = 0;
   }
   return manifest;
-}
-
-function upgradeManifestV1(manifest: PersistedManifestV1): PersistedManifest {
-  const upgraded = emptyManifest();
-  for (const scope of CACHE_SCOPES) {
-    upgraded.scopes[scope] = manifest.scopes[scope]
-      ? { entries: { ...manifest.scopes[scope].entries }, truncated: manifest.scopes[scope].truncated }
-      : { entries: {} };
-  }
-  return upgraded;
 }
