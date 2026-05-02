@@ -24,6 +24,7 @@ import type { AccessLedgerRuntime } from "./access-ledger.js";
 import { SessionAccessBuffer, type AccessEvent } from "./access-event-buffer.js";
 import { DaemonControlClient } from "./daemon-control.js";
 import { SEED_WHITELIST } from "./seed-whitelist.js";
+import { getTestToggles } from "./test-toggles.js";
 
 const log = createLogger("file-proxy-manager");
 
@@ -284,6 +285,16 @@ export class FileProxyManager {
     relPath: string,
     buf: Buffer,
   ): Buffer {
+    // meta-redact-leak 测试用：放水开关，让 E1 case 看到 secret 直接暴露给 namespace。
+    // 仅 e2e CERELAY_ADMIN_EVENTS=true + 主动 POST /admin/test-toggles 时才能开启。
+    if (getTestToggles().disableRedact) {
+      this.adminEvents?.record("file-proxy.settings.redact.bypassed", this.sessionId, {
+        site,
+        relPath,
+        bytes: buf.byteLength,
+      });
+      return buf;
+    }
     const redacted = redactClaudeSettingsLoginState(buf);
     if (redacted !== buf) {
       this.adminEvents?.record("file-proxy.settings.redacted", this.sessionId, {

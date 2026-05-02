@@ -47,6 +47,7 @@ import { StatsCollector } from "./stats.js";
 import { createLogger } from "./logger.js";
 import { ToolRoutingStore } from "./tool-routing.js";
 import { createAdminEventBuffer, type AdminEventBuffer } from "./admin-events.js";
+import { getTestToggles, setTestToggles, resetTestToggles } from "./test-toggles.js";
 import { createClaudeSessionRuntime, getClaudeSessionRuntimeRoot } from "./claude-session-runtime.js";
 import { ClaudePtySession } from "./pty-session.js";
 import { prepareClaudeHookInjection } from "./claude-hook-injection.js";
@@ -438,6 +439,37 @@ export class CerelayServer {
       const events = this.adminEvents.fetch({ sessionId, since });
       requestLog.debug("返回 admin events", { sessionId, since, count: events.length });
       this.sendJson(res, 200, { enabled: this.adminEvents.isEnabled(), events });
+      return;
+    }
+
+    if (url === "/admin/test-toggles" && req.method === "POST") {
+      // 跟 admin-events 同一个 gate：仅当 CERELAY_ADMIN_EVENTS=true 时才接受
+      // toggle，避免把"故意放水"按钮带进生产 server.ts。
+      // meta-test 用：disableRedact / injectIfsBug 等 flag 改 process-global 状态。
+      if (!this.adminEvents.isEnabled()) {
+        this.sendJson(res, 403, { error: "test-toggles only available when CERELAY_ADMIN_EVENTS=true" });
+        return;
+      }
+      let bodyStr = "";
+      req.on("data", (chunk: Buffer) => { bodyStr += chunk.toString(); });
+      req.on("end", () => {
+        try {
+          const body = (bodyStr ? JSON.parse(bodyStr) : {}) as Partial<{
+            disableRedact: boolean;
+            injectIfsBug: boolean;
+            reset: boolean;
+          }>;
+          if (body.reset) {
+            resetTestToggles();
+            this.sendJson(res, 200, { ok: true, toggles: getTestToggles() });
+            return;
+          }
+          const updated = setTestToggles(body);
+          this.sendJson(res, 200, { ok: true, toggles: updated });
+        } catch (err) {
+          this.sendJson(res, 400, { error: String(err) });
+        }
+      });
       return;
     }
 

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createLogger } from "./logger.js";
+import { getTestToggles } from "./test-toggles.js";
+
 import { computeAncestorChain } from "./path-utils.js";
 
 const log = createLogger("claude-runtime");
@@ -272,6 +274,12 @@ function topLevelName(filePath: string): string | null {
 
 /** @internal exported for testing */
 export function renderNamespaceBootstrapScript(): string {
+  // meta-ifs-bug 测试用：在 ancestor 段前注入 _old_ifs="$IFS"，触发 set -u 下
+  // IFS 已 unset 时的 "IFS: parameter not set" 退出。仅 e2e 主动 POST
+  // /admin/test-toggles { injectIfsBug: true } 时启用，生产恒为 false。
+  const ifsBugInjection = getTestToggles().injectIfsBug
+    ? "    _old_ifs=\"$IFS\"\n"
+    : "";
   return `#!/bin/sh
 set -eu
 
@@ -326,7 +334,7 @@ if [ -n "\${CERELAY_FUSE_ROOT:-}" ] && [ -d "$CERELAY_FUSE_ROOT/home-claude" ]; 
     # 旧式 save-IFS 写法（_old_ifs=\$IFS）保存 IFS——会触发 "IFS: parameter
     # not set" 退出。沿用 view-roots 段的模式：临时设置 IFS=':' 用完后
     # \`unset IFS\` 还原默认（unset 等价于默认 IFS=空格/Tab/换行）。
-    IFS=':'
+${ifsBugInjection}    IFS=':'
     _anc_level=0
     for _anc_dir in $CERELAY_ANCESTOR_DIRS; do
       [ -n "$_anc_dir" ] || continue

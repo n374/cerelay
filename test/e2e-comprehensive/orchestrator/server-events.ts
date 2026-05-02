@@ -58,3 +58,23 @@ export const cacheAdmin = {
     return await r.json() as CacheManifestSummary;
   },
 };
+
+/** P0-B-4 meta-test 用：toggle server-side process-global flags（disableRedact / injectIfsBug）。 */
+export const testToggles = {
+  async set(toggles: { disableRedact?: boolean; injectIfsBug?: boolean }): Promise<void> {
+    const r = await fetch(new URL("/admin/test-toggles", BASE), {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(toggles),
+    });
+    if (!r.ok) throw new Error(`server /admin/test-toggles → ${r.status}: ${await r.text()}`);
+  },
+  async reset(): Promise<void> {
+    const r = await fetch(new URL("/admin/test-toggles", BASE), {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ reset: true }),
+    });
+    if (!r.ok) throw new Error(`server /admin/test-toggles reset → ${r.status}: ${await r.text()}`);
+  },
+};

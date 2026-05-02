@@ -64,4 +64,16 @@ export const clients = {
     const body = await r.json() as { deviceId: string };
     return body.deviceId;
   },
+
+  /** meta-deviceid-collision 测试用：覆盖 / 恢复持久化 device-id 文件。 */
+  async setForcedDeviceId(label: string, opts: { forceDeviceId: string } | { reset: true }): Promise<void> {
+    const base = HOSTS[label];
+    if (!base) throw new Error(`unknown client label: ${label}`);
+    const r = await fetch(`${base}/admin/toggles`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!r.ok) throw new Error(`client ${label} /admin/toggles → ${r.status}: ${await r.text()}`);
+  },
 };

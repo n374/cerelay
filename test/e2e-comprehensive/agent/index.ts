@@ -67,6 +67,26 @@ async function readDeviceId(): Promise<string> {
   }
 }
 
+// meta-deviceid-collision 测试用：把持久化 device-id 文件覆写成指定值，让 client
+// 进程（read 这个文件）拿到伪造 ID，模拟两个容器共用同一 deviceId 的 regression。
+// 同时记录原始值，reset 时恢复，避免污染同一 process 后续测试。
+let backupDeviceId: string | null = null;
+async function setForcedDeviceId(forced: string | null): Promise<void> {
+  if (forced === null) {
+    if (backupDeviceId !== null) {
+      await mkdir(path.dirname(DEVICE_ID_PATH), { recursive: true });
+      await writeFile(DEVICE_ID_PATH, backupDeviceId, "utf8");
+      backupDeviceId = null;
+    }
+    return;
+  }
+  if (backupDeviceId === null) {
+    backupDeviceId = await readDeviceId();
+  }
+  await mkdir(path.dirname(DEVICE_ID_PATH), { recursive: true });
+  await writeFile(DEVICE_ID_PATH, forced, "utf8");
+}
+
 async function applyHomeFixture(files: Record<string, string>): Promise<string[]> {
   const written: string[] = [];
   for (const [rel, content] of Object.entries(files)) {
@@ -223,6 +243,20 @@ const server = createServer(async (req, res) => {
       // orchestrator 用它去查 server 端 cache manifest。
       const deviceId = await readDeviceId();
       return sendJson(res, 200, { deviceId });
+    }
+    if (req.url === "/admin/toggles" && req.method === "POST") {
+      // meta-deviceid-collision 测试用：覆盖持久化 device-id 文件。
+      // body 形式：{ forceDeviceId: string } 设置；{ reset: true } 恢复原值。
+      const body = JSON.parse(await readBody(req)) as { forceDeviceId?: string; reset?: boolean };
+      if (body.reset) {
+        await setForcedDeviceId(null);
+        return sendJson(res, 200, { ok: true, deviceId: await readDeviceId() });
+      }
+      if (typeof body.forceDeviceId === "string") {
+        await setForcedDeviceId(body.forceDeviceId);
+        return sendJson(res, 200, { ok: true, deviceId: body.forceDeviceId });
+      }
+      return sendJson(res, 400, { error: "forceDeviceId or reset required" });
     }
     if (req.url === "/run" && req.method === "POST") {
       const body = JSON.parse(await readBody(req)) as RunRequest;
