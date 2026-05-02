@@ -45,6 +45,11 @@ READY_FILE = os.environ.get("CERELAY_FUSE_READY_FILE", "")
 # Shadow files: FUSE 内路径 → 本地真实文件路径（如 hook injection 的 settings.local.json）
 # 这些文件由 FUSE daemon 直接从本地读取，不代理到 Client
 SHADOW_FILES = json.loads(os.environ.get("CERELAY_FUSE_SHADOW_FILES", "{}"))
+# INF-2/INF-6: emit_event 仅在 server 端 admin events 启用时才写 stdout sideband，
+# 关闭时直接 no-op，避免在生产 (CERELAY_ADMIN_EVENTS != true) 路径上每次 shadow
+# read/write 都同步走 sys.stdout.write/flush ——若 server 端 readline 异常停滞、
+# pipe 写满会真正阻塞 FUSE op。Codex PR1 终审 important #5。
+ADMIN_EVENTS_ENABLED = os.environ.get("CERELAY_ADMIN_EVENTS", "") == "true"
 
 # reqId 计数器
 _req_counter = 0
@@ -367,6 +372,32 @@ def send_request(req):
 
     return resp
 
+
+# ============================================================
+# INF-2 / INF-6: daemon sideband admin event 通道
+# ============================================================
+# 与 send_request 共享 stdout，但**不等 server reply**——fire-and-forget。
+# server 端 file-proxy-manager.handleFuseLine 通过 type:"event" 字段区分:
+#   - 有 reqId + op  → FUSE RPC 请求
+#   - type == "event" + kind  → 直接 emit 到 AdminEventBuffer
+#
+# 用途:
+#   - shadow file 的 read/write/getattr 完全在 daemon 内部本地完成，不走
+#     send_request 回 server，server 端 file-proxy.read.served 4 个出口都看不到
+#   - INF-2 read.shadow.served / INF-6 write.shadow.served 都用这个通道 emit
+def emit_event(kind, detail):
+    """fire-and-forget admin event。失败 silent 不阻塞 FUSE op。"""
+    if not ADMIN_EVENTS_ENABLED:
+        # 生产路径零开销 + 零阻塞风险（Codex PR1 终审 important #5）
+        return
+    try:
+        with _stdout_lock:
+            sys.stdout.write(json.dumps({"type": "event", "kind": kind, "detail": detail}) + "\n")
+            sys.stdout.flush()
+    except Exception:
+        # daemon 不能因 admin event 失败而崩；observability 是 best-effort
+        pass
+
 def response_reader():
     """从 stdin 读取 JSON 响应，dispatch 到等待的请求。"""
     for line in sys.stdin:
@@ -649,7 +680,21 @@ class CerelayFuseOps(Operations):
             try:
                 with open(local_path, "rb") as f:
                     f.seek(offset)
-                    return f.read(size)
+                    chunk = f.read(size)
+                # INF-2: shadow file read 完全在 daemon 内部完成，server 端
+                # file-proxy.read.served 4 个出口看不到——通过 sideband emit
+                # 让 e2e 能 honest 断言"shadow 注入端到端可达"。
+                root_name, rel_path = parse_fuse_path(path)
+                emit_event("file-proxy.shadow.served", {
+                    "op": "read",
+                    "root": root_name or "",
+                    "relPath": rel_path,
+                    "shadowPath": local_path,
+                    "bytes": len(chunk),
+                    "offset": offset,
+                    "size": size,
+                })
+                return chunk
             except OSError as e:
                 raise FuseOSError(e.errno or errno.EIO)
 
@@ -704,6 +749,20 @@ class CerelayFuseOps(Operations):
                 finally:
                     os.close(fd)
                 _cache.invalidate(local_path)
+                # INF-6: shadow file write 也在 daemon 内部本地完成，server 端
+                # 不存在 write.served 的 emit 出口；通过 sideband 让 e2e 能
+                # honest 断言"namespace 内写 credentials shadow → server dataDir 文件
+                # 真持久化"。bytes 用 written（os.write 实际成功字节数）。
+                root_name, rel_path = parse_fuse_path(path)
+                emit_event("file-proxy.write.served", {
+                    "op": "write",
+                    "root": root_name or "",
+                    "relPath": rel_path,
+                    "servedTo": local_path,
+                    "bytes": written,
+                    "offset": offset,
+                    "shadow": True,
+                })
                 return written
             except OSError as e:
                 raise FuseOSError(e.errno or errno.EIO)

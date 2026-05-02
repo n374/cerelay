@@ -64,6 +64,11 @@ interface Deferred {
    * 进 buffer + 实时推 daemon control msg.
    */
   opForAccess?: { op: string; path: string };
+  /**
+   * INF-1：FUSE root + relPath + op 上下文，用于 resolveResponse 在 ENOENT 时
+   * emit `file-proxy.client.miss` admin event。silent / 内部请求不设置。
+   */
+  fuseContext?: { op: string; root: string; relPath: string };
 }
 
 type CacheTaskReadGate = Pick<
@@ -1345,6 +1350,19 @@ export class FileProxyManager {
       return;
     }
 
+    // INF-1：穿透 client 后 client 报 ENOENT —— 这是 negative cache 的入口。
+    // server 端会把 negative 推 daemon (deriveAccessEventFromResponse → control msg)，
+    // 之后同 path 在 daemon 本地 _negative_perm 命中、不再回 server，更不再回 client。
+    // emit `file-proxy.client.miss` 让 e2e 能 honest 判断"哪些 path 进了 negative"。
+    if (resp.error?.code === 2 && deferred.fuseContext) {
+      this.adminEvents?.record("file-proxy.client.miss", this.sessionId, {
+        op: deferred.fuseContext.op,
+        root: deferred.fuseContext.root,
+        relPath: deferred.fuseContext.relPath,
+        errorCode: resp.error.code,
+      });
+    }
+
     // Phase 5.2: 派生 access event (含 ENOENT 时实时推 daemon putNegative)
     if (deferred.opForAccess) {
       try {
@@ -1533,10 +1551,36 @@ export class FileProxyManager {
    * 将 FUSE 的虚拟根路径解析为 Client 侧绝对路径，转发给 Client。
    */
   private async handleFuseLine(line: string): Promise<void> {
-    let req: FuseRequest;
+    let parsed: unknown;
     try {
-      req = JSON.parse(line) as FuseRequest;
+      parsed = JSON.parse(line);
     } catch {
+      return;
+    }
+
+    // INF-2/INF-6：daemon sideband admin event。区别于 RPC FuseRequest
+    // (必有 reqId + op)，sideband 行只有 type:"event" + kind + detail。
+    // 用于 daemon 内部直接服务的路径（如 shadow file read/write）告知 server
+    // 这次访问真发生过——这些路径不走 send_request 回 server，server 端
+    // 的 read.served / write.served 出口看不到，必须由 daemon 主动推。
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { type?: string }).type === "event"
+    ) {
+      const evt = parsed as {
+        type: "event";
+        kind?: unknown;
+        detail?: Record<string, unknown>;
+      };
+      if (typeof evt.kind === "string" && evt.kind.length > 0) {
+        this.adminEvents?.record(evt.kind, this.sessionId, evt.detail);
+      }
+      return;
+    }
+
+    const req = parsed as FuseRequest;
+    if (typeof req.op !== "string" || typeof req.reqId !== "string") {
       return;
     }
 
@@ -1652,6 +1696,18 @@ export class FileProxyManager {
       existing.count++;
     }
 
+    // INF-1：每次真要回 client 拿一次 round-trip 之前 emit `file-proxy.client.requested`。
+    // 与 perforatedPaths 不同：perforatedPaths 只记首次出现，admin event 每次穿透都 emit
+    // ——B5-negative-cache 需要按"两次同 path 是否都穿透"做精确计数判断，必须每次都记录。
+    // perforationCount 是同 (op, root, relPath) 已累计的穿透次数（含本次）。
+    this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
+      op: req.op,
+      root,
+      relPath,
+      reason: reasonForPerforation,
+      perforationCount: this.perforatedPaths.get(perforationKey)!.count,
+    });
+
     const mutationTargets = this.collectMutationHintTargets(req);
     let deferred: Deferred | undefined;
 
@@ -1677,6 +1733,10 @@ export class FileProxyManager {
       if (isReadSideOp) {
         deferred.opForAccess = { op: req.op, path: clientPath };
       }
+      // INF-1：把 (op, root, relPath) 带进 deferred，让 resolveResponse 在 ENOENT
+      // (resp.error.code === 2) 时 emit `file-proxy.client.miss` 用——区分
+      // "本次穿透 client 后 client 也没有"与"本次穿透 client 拿到了内容"。
+      deferred.fuseContext = { op: req.op, root, relPath };
       this.pendingRequests.set(reqId, deferred);
       if (this.pendingRequests.size > this.peakPendingRequests) {
         this.peakPendingRequests = this.pendingRequests.size;
@@ -1786,6 +1846,17 @@ export class FileProxyManager {
       // 1. 拉全文 size：优先看 cache manifest（无额外 round-trip）；不可用时 stat
       let fullSize = await this.tryGetSettingsJsonSizeFromCache();
       if (fullSize === null) {
+        // INF-1（Codex 终审 #1）：settings.json 专用 passthrough 也走 client round-trip，
+        // 必须 emit `file-proxy.client.requested` 才能让 B5/E1 类断言看到完整穿透流。
+        // 与主路径不同的是 settings.json 走 silent sendClientRequest，绕过
+        // perforatedPaths 段的 emit；本处显式补 emit + reason 标识区分。
+        this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
+          op: "getattr",
+          root: req.root,
+          relPath: req.relPath,
+          reason: "settings_json_passthrough",
+          perforationCount: 0,
+        });
         const statResp = await this.sendClientRequest({
           op: "getattr",
           path: clientPath,
@@ -1803,7 +1874,14 @@ export class FileProxyManager {
         return;
       }
 
-      // 2. 拉全文内容
+      // 2. 拉全文内容（同 #1，emit client.requested 标记 read 穿透）
+      this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
+        op: "read",
+        root: req.root,
+        relPath: req.relPath,
+        reason: "settings_json_passthrough",
+        perforationCount: 0,
+      });
       const readResp = await this.sendClientRequest({
         op: "read",
         path: clientPath,
