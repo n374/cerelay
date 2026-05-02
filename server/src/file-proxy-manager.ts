@@ -315,13 +315,18 @@ export class FileProxyManager {
   /**
    * 计算内容字节的 SHA-256 hex 字符串。
    * 仅在 CERELAY_ADMIN_EVENTS=true 时计算——生产路径直接返回 undefined，零开销。
-   * 入参可以是 Buffer（直接用）或 string（按 UTF-8 处理，不做 base64 decode）。
-   * 调用方如需对 base64 内容算原始字节 sha256，应先自行 Buffer.from(data, "base64")。
+   *
+   * 入参是 thunk(`() => Buffer | string`)而非直接 bytes ——
+   * thunk 让生产路径完全跳过 bytes 构造(例如 `Buffer.from(data, "base64")`
+   * 这种 base64 decode);call-site 写 `computeContentSha256(() => Buffer.from(...))`,
+   * gate 关闭时 thunk 不被调用,decode 不发生。
+   *
+   * Codex T8 终审 Minor #1: 防止 detail 参数 eager evaluate 浪费生产 CPU。
    * Spec: docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md §5.4
    */
-  private computeContentSha256(bytes: Buffer | string): string | undefined {
+  private computeContentSha256(getBytes: () => Buffer | string): string | undefined {
     if (process.env.CERELAY_ADMIN_EVENTS !== "true") return undefined;
-    return createHash("sha256").update(bytes).digest("hex");
+    return createHash("sha256").update(getBytes()).digest("hex");
   }
 
   /**
@@ -997,7 +1002,8 @@ export class FileProxyManager {
               clientCwd: this.clientCwd,
               clientPath: this.buildClientPath(rootName, relPath),
               contentSha256: entry.data !== undefined
-                ? this.computeContentSha256(Buffer.from(entry.data, "base64"))
+                // ts narrow 在 thunk 内丢失,用 `!` 保持单行;`!` 仅关闭 TS 检查,运行时无效
+                ? this.computeContentSha256(() => Buffer.from(entry.data!, "base64"))
                 : undefined,
             });
           }
@@ -1215,7 +1221,7 @@ export class FileProxyManager {
       clientCwd: this.clientCwd,
       clientPath: this.buildClientPath(root, relPath),
       contentSha256: data !== undefined
-        ? this.computeContentSha256(Buffer.from(data, "base64"))
+        ? this.computeContentSha256(() => Buffer.from(data, "base64"))
         : undefined,
     });
     return {
@@ -1295,7 +1301,7 @@ export class FileProxyManager {
       // 注意:sha256 对全量 buf(未切片)计算,而非 slice。
       // negative-assert(spec §5.4)需要与 fixture 文件完整内容的 sha256 对比,
       // 切片 sha256 因 offset/size 变化而变,对比无意义。
-      contentSha256: this.computeContentSha256(buf),
+      contentSha256: this.computeContentSha256(() => buf),
     });
     return { served: true };
   }
@@ -1975,7 +1981,7 @@ export class FileProxyManager {
         sliceBytes: slice.byteLength,
         clientCwd: this.clientCwd,
         clientPath: this.buildClientPath(req.root, req.relPath),
-        contentSha256: this.computeContentSha256(redacted),
+        contentSha256: this.computeContentSha256(() => redacted),
       });
     } catch (err) {
       log.warn("settings.json passthrough 失败", {

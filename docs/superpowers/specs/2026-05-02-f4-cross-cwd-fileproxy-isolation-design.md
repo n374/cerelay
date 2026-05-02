@@ -375,13 +375,17 @@ scope:
 
 ## 9. 验收标准
 
-PR 1 验收:
-- [ ] e2e 26/26 全绿(P0 16 + P1-A 2 + P1-B 8)
-- [ ] meta 3/3 全绿
-- [ ] server unit 425/425 全绿
-- [ ] client unit 135/135 全绿
-- [ ] typecheck 全绿
-- [ ] Codex 终审通过(0 critical / important 全修)
+PR 1 验收(2026-05-03 闭环):
+- [x] e2e 29/29 全绿(P0 16 + P1-A 2 + P1-B 11;baseline 实际 29 而不是 plan 写的 26)
+- [x] meta 3/3 全绿
+- [x] server unit 425/425 全绿(5 skipped 历史)
+- [x] client unit 135/135 全绿
+- [x] web unit 6/6 全绿
+- [x] typecheck 全绿(server + client + web)
+- [x] Codex 终审 Conditional Approve(0 critical / 0 important / 2 minor 全修):
+  - Minor #1 perf:`computeContentSha256` 改 thunk(`() => Buffer | string`),detail 参数不再 eager evaluate Buffer.from base64 decode,生产路径 zero cost
+  - Minor #2 dump:`assertF4CrossCwdIsolation` 失败时 dump 完整 fileProxy + config-preloader + session.bootstrap probe 摘要
+- [x] e2e runner trap-based cleanup(commit `4292069`,顺手修)
 
 PR 2 验收:
 - [ ] e2e 27/27 全绿(P0 16 + P1-A 2 + P1-B 8 + P2 1)

@@ -858,6 +858,25 @@ export async function assertF4CrossCwdIsolation(opts: {
   }
 
   if (errors.length > 0) {
-    throw new Error(`assertF4CrossCwdIsolation FAIL:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+    // Codex T8 终审 Minor #2:失败时 dump 完整 fileProxy + config-preloader +
+    // session.bootstrap probe 摘要(spec §5.1 / §6 守护意图自查要求"失败时 dump 完整摘要")。
+    const allEvents = await serverEvents.fetch({ since: opts.since });
+    const collectKind = (kind: string) => allEvents.filter((e) => e.kind === kind);
+    const summarizeEvent = (e: AdminEvent) =>
+      `    [${e.kind}] sessionId=${e.sessionId} detail=${JSON.stringify(e.detail)}`;
+    const dump = [
+      "  ── probe 摘要(since baseline)──",
+      `  file-proxy.read.served (${collectKind("file-proxy.read.served").length} 条):`,
+      ...collectKind("file-proxy.read.served").map(summarizeEvent),
+      `  file-proxy.client.requested (${collectKind("file-proxy.client.requested").length} 条):`,
+      ...collectKind("file-proxy.client.requested").map(summarizeEvent),
+      `  config-preloader.plan (${collectKind("config-preloader.plan").length} 条):`,
+      ...collectKind("config-preloader.plan").map(summarizeEvent),
+      `  session.bootstrap.plan (${collectKind("session.bootstrap.plan").length} 条):`,
+      ...collectKind("session.bootstrap.plan").map(summarizeEvent),
+    ].join("\n");
+    throw new Error(
+      `assertF4CrossCwdIsolation FAIL:\n${errors.map((e) => `  - ${e}`).join("\n")}\n${dump}`
+    );
   }
 }
