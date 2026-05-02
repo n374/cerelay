@@ -8,6 +8,12 @@ export interface RunRequest {
   // run 结束后默认 best-effort 删除（不动目录）。详见 agent/index.ts。
   homeFixture?: Record<string, string>;
   homeFixtureKeepAfter?: boolean;
+  // 批量生成 fixture（用于 C1/C2 1k+ 文件 initial sync 压测）。
+  homeFixtureBulk?: {
+    pathPrefix: string;
+    count: number;
+    bytesPerFile: number;
+  };
 }
 
 export interface RunResponse {
@@ -16,6 +22,8 @@ export interface RunResponse {
   stderr: string;
   sessionId: string;
   durationMs: number;
+  /** 容器持久化的 device-id；orchestrator 用它访问 server 的 /admin/cache。 */
+  deviceId: string;
 }
 
 const HOSTS: Record<string, string> = {
@@ -46,5 +54,14 @@ export const clients = {
     } catch {
       return false;
     }
+  },
+
+  async deviceId(label: string): Promise<string> {
+    const base = HOSTS[label];
+    if (!base) throw new Error(`unknown client label: ${label}`);
+    const r = await fetch(`${base}/device`);
+    if (!r.ok) throw new Error(`client ${label} /device → ${r.status}`);
+    const body = await r.json() as { deviceId: string };
+    return body.deviceId;
   },
 };

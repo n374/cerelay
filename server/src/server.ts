@@ -441,6 +441,39 @@ export class CerelayServer {
       return;
     }
 
+    if (url.startsWith("/admin/cache") && req.method === "GET") {
+      // 测试用：按 deviceId 查 ClientCacheStore manifest 摘要（不暴露完整 path 列表，
+      // 避免无意泄漏 fixture 之外的真实路径）。仅给 revision + 每个 scope 的统计。
+      // 用于 P0-B-2 C1/C2 验证 pipeline initial sync 后服务端 manifest revision 正确。
+      const u = new URL(req.url ?? "/admin/cache", "http://x");
+      const deviceId = u.searchParams.get("deviceId");
+      if (!deviceId) {
+        this.sendJson(res, 400, { error: "deviceId required" });
+        return;
+      }
+      void this.cacheStore.loadManifest(deviceId).then((m) => {
+        const scopes: Record<string, { entryCount: number; totalBytes: number; truncated: boolean; skippedCount: number }> = {};
+        for (const [scope, data] of Object.entries(m.scopes)) {
+          let totalBytes = 0;
+          let skippedCount = 0;
+          for (const entry of Object.values(data.entries)) {
+            totalBytes += entry.size;
+            if (entry.skipped) skippedCount += 1;
+          }
+          scopes[scope] = {
+            entryCount: Object.keys(data.entries).length,
+            totalBytes,
+            truncated: data.truncated === true,
+            skippedCount,
+          };
+        }
+        this.sendJson(res, 200, { deviceId, revision: m.revision, scopes });
+      }).catch((err) => {
+        this.sendJson(res, 500, { error: String(err) });
+      });
+      return;
+    }
+
     requestLog.debug("管理后台路由未命中");
     this.sendJson(res, 404, { error: "not_found" });
   }

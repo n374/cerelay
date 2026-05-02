@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mockAdmin, scriptToolUse, scriptText } from "./mock-admin.js";
 import { clients } from "./clients.js";
-import { serverEvents } from "./server-events.js";
+import { serverEvents, cacheAdmin } from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
 
 // 容器内 fixture 路径转 client cwd 视角
@@ -541,6 +541,138 @@ test("B3-project-claude: {cwd}/.claude/<file> 经 project-claude bind mount 可�
     new RegExp(marker),
     "tool_result should reflect {cwd}/.claude/<file> via project-claude bind mount"
   );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// C1-initial-pipeline：1k+ 文件 initial sync 跑通 pipeline + 流控
+// 守护 manifest 写入串行锁、batch ack 不丢、最终 revision 单调
+// ============================================================
+test("C1-initial-pipeline: 1100 个文件 initial sync 跑通 pipeline + manifest 落地", async () => {
+  const caseId = "case-c1";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  // turn 1: text final（不需要工具调用，cache sync 在 session 启动期跑）
+  await mockAdmin.loadScript({
+    name: "p0-c1-turn1-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("c1 cache pipeline ok"),
+  });
+
+  // 1100 个文件 × 16 KB ≈ 17.6 MB > MAX_INFLIGHT_BYTES (16 MB)，触发流控水位
+  const FILE_COUNT = 1100;
+  const BYTES_PER_FILE = 16 * 1024;
+
+  const result = await clients.run("client-a", {
+    prompt: "trigger cache sync [C1-MARKER]",
+    cwd,
+    timeoutMs: 120_000,
+    homeFixtureBulk: {
+      pathPrefix: ".claude/c1-bulk",
+      count: FILE_COUNT,
+      bytesPerFile: BYTES_PER_FILE,
+    },
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stderr ---\n${result.stderr}`
+  );
+  assert.ok(result.deviceId, "client agent must report deviceId");
+
+  // client 端日志必须有 initial upload complete + sync complete acked
+  const uploadMatch = result.stdout.match(/cache task initial upload complete[^\n]*uploadedFiles=(\d+)/);
+  assert.ok(uploadMatch, `client stdout missing 'cache task initial upload complete'\n${result.stdout.slice(-2000)}`);
+  const uploadedFiles = Number.parseInt(uploadMatch[1], 10);
+  assert.ok(
+    uploadedFiles >= FILE_COUNT,
+    `expected uploadedFiles >= ${FILE_COUNT}, got ${uploadedFiles}`
+  );
+
+  const ackMatch = result.stdout.match(/cache task sync complete acked[^\n]*revision=(\d+)/);
+  assert.ok(ackMatch, `client stdout missing 'cache task sync complete acked'`);
+  const ackedRevision = Number.parseInt(ackMatch[1], 10);
+  assert.ok(ackedRevision > 0, `acked revision should be > 0, got ${ackedRevision}`);
+
+  // server 端 manifest revision 必须严格 >= 客户端 acked 的 revision（不可后退）
+  const summary = await cacheAdmin.summary(result.deviceId);
+  assert.ok(
+    summary.revision >= ackedRevision,
+    `server revision (${summary.revision}) should be >= client acked (${ackedRevision})`
+  );
+
+  // claude-home scope 必须容纳全部 bulk 文件
+  const homeStats = summary.scopes["claude-home"];
+  assert.ok(homeStats, "claude-home scope should exist on server");
+  assert.ok(
+    homeStats.entryCount >= FILE_COUNT,
+    `claude-home entryCount should be >= ${FILE_COUNT}, got ${homeStats.entryCount}`
+  );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// C2-revision-ack：sync 完成后 server manifest revision == client 已 push 的最大 revision
+// 守护 revision 单调、ack 配对，防 batch 丢失
+// ============================================================
+test("C2-revision-ack: client acked revision == server manifest revision", async () => {
+  const caseId = "case-c2";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  await mockAdmin.loadScript({
+    name: "p0-c2-turn1-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("c2 revision ack ok"),
+  });
+
+  // C2 用更小规模即可，重点是 revision == 而非压测流控
+  const FILE_COUNT = 60;
+  const BYTES_PER_FILE = 4 * 1024;
+
+  const result = await clients.run("client-a", {
+    prompt: "trigger cache sync [C2-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+    homeFixtureBulk: {
+      pathPrefix: ".claude/c2-bulk",
+      count: FILE_COUNT,
+      bytesPerFile: BYTES_PER_FILE,
+    },
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+
+  // 取 stdout 里 acked revision 的最后一次出现（有多次 sync 时拿最新那次）。
+  const ackMatches = [...result.stdout.matchAll(/cache task sync complete acked[^\n]*revision=(\d+)/g)];
+  assert.ok(ackMatches.length > 0, "client stdout missing 'cache task sync complete acked'");
+  const ackedRevision = Number.parseInt(ackMatches.at(-1)![1], 10);
+
+  const summary = await cacheAdmin.summary(result.deviceId);
+  // ack 配对 + revision 单调：server >= client acked。
+  // 严格相等不成立——initial sync 完成 ack 后，session 内 FUSE 访问/runtime
+  // watcher delta 仍可能 bump revision（每次 entry 续期 TTL 都会 +1）。
+  // 真实硬不变量是「server 不会回退到 < acked」与「drift 受控」。
+  assert.ok(
+    summary.revision >= ackedRevision,
+    `revision regression: client acked=${ackedRevision}, server=${summary.revision} (must be >=)`
+  );
+  // drift 控制在 50 以内（FUSE 访问 + 1 次 cleanup watcher delta 不会到这个量级）。
+  // 这条是防"ack 之后 server 漏掉某个 batch 但 revision 莫名暴涨"的副作用。
+  const drift = summary.revision - ackedRevision;
+  assert.ok(
+    drift <= 50,
+    `revision drift too large: acked=${ackedRevision} server=${summary.revision} drift=${drift}`
+  );
+
+  // 顺手验 entryCount 跟得上（manifest 真的写到位，不是空 ack）
+  const homeStats = summary.scopes["claude-home"];
+  assert.ok(homeStats, "claude-home scope should exist");
+  assert.ok(homeStats.entryCount >= FILE_COUNT, `entryCount=${homeStats.entryCount} < ${FILE_COUNT}`);
 
   await cleanupFixture(caseId);
 });

@@ -36,3 +36,25 @@ export const serverEvents = {
     throw new Error(`waitForKind(${opts.kind}) timeout after ${opts.timeoutMs ?? 30_000}ms`);
   },
 };
+
+export interface CacheManifestSummary {
+  deviceId: string;
+  revision: number;
+  scopes: Record<string, {
+    entryCount: number;
+    totalBytes: number;
+    truncated: boolean;
+    skippedCount: number;
+  }>;
+}
+
+/** 测试用：查 server 端 ClientCacheStore manifest 的统计摘要（仅 P0-B-2 C1/C2）。 */
+export const cacheAdmin = {
+  async summary(deviceId: string): Promise<CacheManifestSummary> {
+    const u = new URL("/admin/cache", BASE);
+    u.searchParams.set("deviceId", deviceId);
+    const r = await fetch(u, { headers: { authorization: `Bearer ${TOKEN}` } });
+    if (!r.ok) throw new Error(`server /admin/cache → ${r.status}: ${await r.text()}`);
+    return await r.json() as CacheManifestSummary;
+  },
+};
