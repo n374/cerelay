@@ -612,6 +612,7 @@ export class CacheTaskManager {
     const syncPlan = computeSyncPlan({
       ledger,
       homedir: this.getHomedirForDevice(task.deviceId),
+      cwd: task.activeClientCwd ?? "",
     });
 
     return {

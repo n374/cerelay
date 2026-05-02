@@ -2,16 +2,24 @@ import path from "node:path";
 import type { AccessLedgerRuntime } from "./access-ledger.js";
 import type { ScopeWalkInstruction, SyncPlan } from "./protocol.js";
 import { SEED_WHITELIST } from "./seed-whitelist.js";
+import { computeAncestorChain, pathStartsWithRoot } from "./path-utils.js";
 
 export interface ComputeSyncPlanArgs {
   ledger: AccessLedgerRuntime;
   homedir: string;
+  cwd: string;
 }
 
-export function computeSyncPlan({ ledger, homedir }: ComputeSyncPlanArgs): SyncPlan {
+export function computeSyncPlan({ ledger, homedir, cwd }: ComputeSyncPlanArgs): SyncPlan {
   const allPaths = ledger.allPathsSortedSnapshot();
+  const ancestorInstruction = buildAncestorInstruction(ledger, homedir, cwd);
   if (allPaths.length === 0) {
-    return SEED_WHITELIST as SyncPlan;
+    return {
+      scopes: {
+        ...SEED_WHITELIST.scopes,
+        "cwd-ancestor-md": ancestorInstruction,
+      },
+    } as SyncPlan;
   }
 
   const homeRoot = path.join(homedir, ".claude");
@@ -26,7 +34,7 @@ export function computeSyncPlan({ ledger, homedir }: ComputeSyncPlanArgs): SyncP
 
   for (const absPath of allPaths) {
     if (absPath === claudeJsonPath) continue;
-    if (absPath !== homeRoot && !absPath.startsWith(homePrefix)) continue;
+    if (absPath !== homeRoot && !pathStartsWithRoot(absPath, homeRoot)) continue;
 
     const entry = entries[absPath];
     if (!entry) continue;
@@ -67,7 +75,34 @@ export function computeSyncPlan({ ledger, homedir }: ComputeSyncPlanArgs): SyncP
         files: [],
         knownMissing: [],
       },
+      "cwd-ancestor-md": ancestorInstruction,
     },
+  };
+}
+
+function buildAncestorInstruction(
+  ledger: AccessLedgerRuntime,
+  homedir: string,
+  cwd: string,
+): ScopeWalkInstruction {
+  const entries = ledger.toJSON().entries;
+  const exactFilesAbs: string[] = [];
+  const knownMissing: string[] = [];
+  for (const dir of computeAncestorChain(cwd, homedir)) {
+    for (const name of ["CLAUDE.md", "CLAUDE.local.md"]) {
+      const abs = path.join(dir, name);
+      if (entries[abs]?.kind === "missing") {
+        knownMissing.push(abs);
+      } else {
+        exactFilesAbs.push(abs);
+      }
+    }
+  }
+  return {
+    subtrees: [],
+    files: [],
+    knownMissing,
+    exactFilesAbs,
   };
 }
 
@@ -78,7 +113,7 @@ function isUnderAnySubtree(
 ): boolean {
   for (const subtree of subtrees) {
     const subtreeAbs = subtree.relPath ? path.join(homeRoot, subtree.relPath) : homeRoot;
-    if (absPath === subtreeAbs || absPath.startsWith(`${subtreeAbs}/`)) {
+    if (pathStartsWithRoot(absPath, subtreeAbs)) {
       return true;
     }
   }
