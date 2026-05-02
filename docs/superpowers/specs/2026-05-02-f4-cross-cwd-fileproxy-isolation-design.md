@@ -116,7 +116,9 @@ Cerelay e2e 综合测试套件 P1-B 阶段落地的 `F4-same-device-multi-cwd` c
 
 `client.requested` emit(`:1699/1703`)同样加 `clientCwd / clientPath`,否则无法证明 session B 没有请求 session A 的 cwd 子树。
 
-`shadow.served` / `write.served` 由 sideband 转录(`:1561-1577`),server 端补 `clientCwd / clientPath`(daemon 不需要改 sessionId 处理)。
+`shadow.served` / `write.served` 由 sideband 转录(`:1561-1577`),server 端**只补 `clientCwd`**,**不补 `clientPath`**——daemon sideband 的原始路径只有 FUSE 物理路径(`fusePath`),与 `read.served` / `client.requested` 的 client 侧物理路径语义不同,不能混用同名字段。消费方若需 FUSE 路径,从 `evt.detail.fusePath` 读取;daemon 不需要改 sessionId 处理。
+
+> **铁律(T1 follow-up f9502ae 显式化)**:sideband 转录代码(`handleFuseLine` `type:"event"` 分支)只注入 `clientCwd`,禁止注入 `clientPath`。后续 implementer 不得在此处"顺手"加 `clientPath`——shadow/write event 的 detail interface(`FileProxyShadowServedDetail` / `FileProxyWriteServedDetail`)也不含 `clientPath` 字段。
 
 **emit 实现约束**:
 - fire-and-forget(同步路径不阻塞)

@@ -538,15 +538,14 @@ this.adminEvents?.record("file-proxy.client.requested", this.sessionId, {
 if (parsed.type === "event") {
   const evt = parsed as { kind: string; detail: Record<string, unknown> };
   // 修改 ↓
+  // clientCwd 由 server 注入(daemon 无此上下文)。
+  // shadow.served / write.served 不补 clientPath——spec §5.1 铁律:
+  // sideband 原始路径只有 FUSE 物理路径(fusePath),与 read.served 的
+  // client 侧物理路径语义不同,不能混用同名字段。fusePath 已经通过
+  // ...evt.detail 展开保留,消费方直接读 evt.detail.fusePath。
   this.adminEvents?.record(evt.kind, this.sessionId, {
     ...evt.detail,
     clientCwd: this.clientCwd,
-    // 若 detail 已有 fusePath(daemon 端 Task 5 后会带),server 不覆盖
-    clientPath: typeof evt.detail.fusePath === "string"
-      ? evt.detail.fusePath  // shadow path 已是绝对路径
-      : (typeof evt.detail.relPath === "string" && typeof evt.detail.root === "string"
-          ? this.buildClientPath(evt.detail.root, evt.detail.relPath)
-          : undefined),
   });
 }
 ```

@@ -1614,22 +1614,16 @@ export class FileProxyManager {
       };
       if (typeof evt.kind === "string" && evt.kind.length > 0) {
         // clientCwd 由 server 注入(daemon 无此上下文)。
-        // clientPath 优先用 daemon 提供的 fusePath(T5 后会携带);
-        //           fallback 用 root + relPath 拼;都无则 undefined。
-        //           ⚠️ 当前 daemon 尚未发 fusePath(T5 前),三元第一分支
-        //              永远 false,fallback 是唯一生效路径。T5 落地后才走第一分支。
-        // ⚠️ ...evt.detail 展开后追加 clientCwd / clientPath 会覆盖 daemon 同名字段。
-        //    daemon 不知道 server 侧 clientCwd,理论上不会发——但若 future
-        //    daemon 误发(比如字段拼错),server 端会硬覆盖,日志/告警会丢。
-        //    这是有意的 prefer-server 设计:daemon 的 cwd/path 无参考价值。
+        // shadow.served / write.served 通过 evt.detail 自带 fusePath(T5 后),
+        // sideband 不补 clientPath——spec §5.1 显式规定:shadow/write detail
+        // 不含 clientPath 字段,以 fusePath 替代(daemon sideband 原始路径只有
+        // FUSE 物理路径,不是 client 侧物理路径,语义不同不能混用同名字段)。
+        // ⚠️ ...evt.detail 展开后追加 clientCwd 会覆盖 daemon 同名字段。
+        //    daemon 不知道 server 侧 clientCwd,理论上不会发——若 future
+        //    daemon 误发(字段拼错),server 端硬覆盖,日志会丢但不影响行为。
         this.adminEvents?.record(evt.kind, this.sessionId, {
           ...evt.detail,
           clientCwd: this.clientCwd,
-          clientPath: typeof evt.detail?.fusePath === "string"
-            ? evt.detail.fusePath
-            : (typeof evt.detail?.root === "string" && typeof evt.detail?.relPath === "string"
-                ? this.buildClientPath(evt.detail.root, evt.detail.relPath)
-                : undefined),
         });
       }
       return;
