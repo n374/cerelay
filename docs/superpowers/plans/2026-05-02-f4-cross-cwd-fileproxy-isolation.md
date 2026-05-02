@@ -141,7 +141,7 @@ export interface FileProxyClientRequestedDetail {
 
 ```typescript
 export interface ConfigPreloaderPlanDetail {
-  sessionId: string;
+  // sessionId 由 AdminEvent 顶层携带，detail 不重复（避免类型契约不一致与冗余）
   clientCwd: string;
   homeDir: string;
   ancestorDirs: string[];

@@ -182,7 +182,6 @@ export interface FileProxyClientMissDetail {
  * 用于断言"预热只覆盖当前 session cwd，不泄露跨 session 路径"。
  */
 export interface ConfigPreloaderPlanDetail {
-  sessionId: string;
   clientCwd: string;
   homeDir: string;
   ancestorDirs: string[];

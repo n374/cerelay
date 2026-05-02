@@ -146,13 +146,17 @@ export class ConfigPreloader {
     // F4 P2 不变量 (c) probe — config-preloader.plan
     // 把 ancestor chain 和 prefetch items 暴露给 admin events，e2e 用此守
     // "session A 的预热计划不串到 session B 的 cwd 子树"。
-    this.adminEvents?.record("config-preloader.plan", this.sessionId ?? null, {
-      sessionId: this.sessionId ?? null,
-      clientCwd: this.cwd,
-      homeDir: this.homeDir,
-      ancestorDirs: ancestorChain.slice(),
-      prefetchAbsPaths: items.map((it) => it.absPath),
-    });
+    // preheat() 内只调一次，不重复 emit。
+    // 仅在 adminEvents 与 sessionId 都注入时 emit——否则顶层 sessionId 为 null，
+    // e2e findPlan({sessionId}) 过滤失效，event 写出去也无消费方。
+    if (this.adminEvents && this.sessionId) {
+      this.adminEvents.record("config-preloader.plan", this.sessionId, {
+        clientCwd: this.cwd,
+        homeDir: this.homeDir,
+        ancestorDirs: ancestorChain.slice(),
+        prefetchAbsPaths: items.map((it) => it.absPath),
+      });
+    }
 
     return items;
   }

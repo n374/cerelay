@@ -134,13 +134,16 @@ emit 位置:`buildPrefetchItems` 完成后(`:116/131` 附近)
 detail:
 ```typescript
 {
-  sessionId: string;
   clientCwd: string;
   homeDir: string;
   ancestorDirs: string[];
   prefetchAbsPaths: string[];
 }
 ```
+
+注：顶层 `sessionId` 已由 `AdminEvent.record` 第二参数携带，detail 不再重复。
+emit 仅在 `adminEvents` 与 `sessionId` 均注入时触发（guard: `if (adminEvents && sessionId)`），
+避免 `sessionId=null` 写入导致 `findPlan({sessionId})` 过滤失效。
 
 #### server/src/server.ts
 
