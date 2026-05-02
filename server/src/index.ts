@@ -27,12 +27,16 @@ async function main(): Promise<void> {
   const log = createLogger("main");
 
   const cerelayKey = process.env.CERELAY_KEY?.trim() || undefined;
+  // CERELAY_ADMIN_TOKEN：允许外部（e.g. e2e 测试容器）指定一个固定初始管理 token，
+  // 而不是每次启动随机生成。healthcheck 或自动化脚本可以直接使用该固定 token。
+  const adminToken = process.env.CERELAY_ADMIN_TOKEN?.trim() || undefined;
 
   const server = new CerelayServer({
     port: opts.port,
     model: opts.model,
     authEnabled: opts.auth,
     cerelayKey,
+    initialToken: adminToken,
   });
 
   const shutdown = async (): Promise<void> => {
