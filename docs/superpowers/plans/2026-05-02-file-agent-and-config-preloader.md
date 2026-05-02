@@ -280,29 +280,43 @@ type InflightResolution =
 
 ### 3.6 双路数据流入 / Bidirectional Manifest Updates
 
+> **实施记要（2026-05-02 wiring 闭环后）**：原设计图（v1，下方"理想路径 B"）写"server 收到 → sync-coordinator → apply"；实际落地（v2）让 cache-task-manager 仍负责落 store（保留协议 ack 语义），完成后通过 `onDeltaApplied` 回调通知 FileAgent。两者效果等价（同一 store）但**写入路径不经过 SyncCoordinator**——这是务实选择，避免重写 cache-task-manager 的 ack 流程。下图更新为实际实现。
+
 ```
-                               ┌──────────────────────┐
-                               │  FileAgent.manifest  │
-                               └──────────────────────┘
-                                       ▲       ▲
-       ┌───────────────────────────────┘       └────────────────────────────┐
-       │ 路径 A: 调用方拉取                                                    │ 路径 B: watcher 推送
-       │ (read/stat/readdir/prefetch miss)                                    │ (client cache-watcher → cache_task_delta)
-       │                                                                      │
-       │  调用方 → FileAgent.read("/h/u/.claude/foo")                          │  client 本地 fs.watch 检测到
-       │  → cache miss → in-flight 去重                                       │  /h/u/.claude/bar 修改
-       │  → sync-coordinator.fetchPath()                                      │  → cache-sync 发 cache_task_delta
-       │  → 经 client-protocol-v1 → active client                             │  → server 收到 → sync-coordinator
-       │  → client 推单条 entry → server 落 manifest                          │  → apply 到 manifest（更新 sha256）
-       │  → 返回调用方                                                        │  → 同时清掉对应 in-flight（如有）
-       │                                                                      │
-       │  特点：阻塞、按需、低频（仅 miss 时触发）                              │  特点：异步、自动、运行时持续触发
-       └──────────────────────────────────────────────────────────────────────┘
+                            ┌──────────────────────┐
+                            │  ClientCacheStore    │（per-device manifest + blob 池）
+                            └──────────────────────┘
+                                    ▲       ▲
+       ┌────────────────────────────┘       └─────────────────────────────────┐
+       │ 路径 A: 调用方拉取                                                     │ 路径 B: watcher 推送
+       │ (FileAgent.read/stat/readdir/prefetch miss)                            │ (client cache-watcher → cache_task_delta)
+       │                                                                        │
+       │  调用方 → FileAgent.read(absPath, ttl)                                  │  client 本地 fs.watch 检测到 path 修改
+       │   → store hit? 命中即返回（多数情况）                                  │   → cache-sync 发 cache_task_delta
+       │   → miss → SyncCoordinator.fetchFile                                  │   → server.handleMessage 转给
+       │   → ClientFetchDispatcher.dispatchSinglePathFetch                      │     cache-task-manager.applyDelta
+       │   → store.lookupEntry（被动 lookup; v1.0 dispatcher）                 │   → store.applyDelta（落 manifest + blob）
+       │   → null = missing / change = file                                     │   → onDeltaApplied 回调
+       │   → bump TTL                                                          │   → FileAgent.notifyWatcherDeltaApplied
+       │                                                                        │   → 续期 TTL + inflight telemetry
+       │  特点：阻塞、按需；当前 v1.0 dispatcher 仅查同一 store                  │  特点：异步、自动、运行时持续触发；
+       │       （未来可扩展为派发单 path SyncPlan 主动 fetch）                   │       FileAgent 不重复 apply
+       └────────────────────────────────────────────────────────────────────────┘
+
+   FUSE IPC 命中（独立通道，与上述两路并存）：
+     CC → FUSE daemon → file-proxy-manager.tryServeReadFromCache（共享 store 命中）
+     → FileAgent.bumpTtlForExternalHit（保活钩子，让 GC 不清正在被读的 path）
 ```
 
-**两路对 manifest 写入的并发安全**由 `store.withManifestLock(deviceId, fn)` 串行保证（已在保留 commit 70c3ad8 实现）。
+**两路对 store 写入的并发安全**：由 `store.withManifestLock(deviceId, fn)` 串行保证（per-device 锁，路径 A 命中无 store 写入；路径 B 落 manifest 时获取锁）。
 
-**最终一致性窗口**：client watcher debounce 默认 200ms + ws 推送 + server apply ≈ 总 RTT 范围。如果 client 离线则 manifest 进入"stale"状态——下次 client 重连时会触发 SyncPlan 重对账（已有机制）。
+**最终一致性窗口**：client watcher debounce 默认 200ms + ws 推送 + cache-task-manager.applyDelta ≈ 总 RTT 范围。如果 client 离线则 manifest 进入"stale"状态——下次 client 重连时会触发 SyncPlan 重对账（已有机制）。
+
+**理想路径 B（v2 plan 设想）vs 实际路径 B（v1.0 wiring）**：
+- v2 plan 设想：cache-task-manager → SyncCoordinator.applyWatcherDelta → store
+- v1.0 实际：cache-task-manager → store + onDeltaApplied → FileAgent.notifyWatcherDeltaApplied
+
+务实差异：v1.0 让 cache-task-manager 仍是 manifest 写入的入口（不动协议 ack），FileAgent 收到通知做副作用（TTL + telemetry）。如果未来要让 SyncCoordinator 真正成为唯一 manifest 写入入口，需要把 cache-task-manager 的 store.applyDelta 替换为调用 SyncCoordinator.applyWatcherDelta；当前未做。
 
 ---
 
@@ -759,21 +773,28 @@ E2E 覆盖：
 
 ### 9.1 wiring 闭环 / Wiring Closure（Codex review 反馈 + 后续 follow-up 一并完成）
 
-> **Status: 三处全部接通（commits bbeb651 + 46ff2e0 + wiring-integration.test.ts，2026-05-02）**
+> **Status: 三处全部"有线接通"，但接通深度不一（Codex 终审评分 #1=35% / #2=75% / #3=70%；commits bbeb651 + 46ff2e0 + 97e5c25，2026-05-02）**
+>
+> 务实选择：本期完成"线接上 + 不抛错 + GC 不误清正在用的 path"的 wiring 深度；plan §3.6 设想的"FileAgent / SyncCoordinator 是唯一 manifest 写入入口"未实现——cache-task-manager 仍直接 store.applyDelta。这一架构承诺的兑现作为 follow-up，零件已就位。
 
-| # | 接通方式 | 生产路径 |
-|---|---|---|
-| **#1 FileAgent fetcher 接通** | `CacheTaskClientDispatcher`（`file-agent/cache-task-dispatcher.ts`）实现 `ClientFetchDispatcher` 接口；`server.ts: getOrCreateFileAgent` 装配 ScopeAdapter + InflightMap + Dispatcher → SyncCoordinator → FileAgent。当前 dispatcher 实现策略是"被动 lookup"：查 store manifest（active client 之前推过的能命中），miss 返 null。**未来扩展**（仍属 plan §9 Out of Scope）：dispatchSinglePathFetch 替换为派发单 path SyncPlan 主动 fetch。 | FileAgent.read miss → SyncCoordinator.fetchFile → dispatcher.dispatchSinglePathFetch → 命中返 change / miss 返 null（不抛 unavailable） |
-| **#2 FUSE IPC 命中通知 FileAgent** | `FileAgent.bumpTtlForExternalHit(absPath, ttlMs)` 公开方法（非法 ttlMs / 不在 scope 内静默忽略）。`file-proxy-manager.ts: tryServeReadFromCache` 命中分支调 `fileAgent?.bumpTtlForExternalHit(handPath, 10*60*1000)`。**保守策略**：不强制让 FUSE IPC 完全替换为 `FileAgent.read`（避免与 redaction / mutation hint / pendingReadBypass 等多分支耦合）；改为命中后通知 FileAgent，让 GC 不会清掉正在被 FUSE 读的 path。 | FUSE → file-proxy-manager.tryServeReadFromCache 命中 → fileAgent.bumpTtlForExternalHit → TTL 续期 → FileAgent.runGcOnce 不 evict |
-| **#3 watcher delta 接 FileAgent** | `cache-task-manager.ts: CacheTaskManagerOptions` 增加 `onDeltaApplied` 回调；applyDelta 应用到 store 后调它（错误不影响 ack）。`server.ts` 注册回调：找对应 deviceId 的 FileAgent → `notifyWatcherDeltaApplied(changes)` → 续期 TTL + inflight telemetry。FileAgent **不重复 apply**（store 已写入）。 | client watcher → cache_task_delta → cache-task-manager.applyDelta → store.applyDelta → onDeltaApplied → FileAgent.notifyWatcherDeltaApplied → TTL 续期 |
+| # | 接通方式 | 接通深度 | 生产路径 |
+|---|---|---|---|
+| **#1 FileAgent fetcher** | `CacheTaskClientDispatcher`（`file-agent/cache-task-dispatcher.ts`）实现 `ClientFetchDispatcher`。当前实现是"**被动 lookup**"：查 store manifest（active client 之前 push 过的能命中），miss 返 null。**这接近 stub**——FileAgent.read 自身已先查 store hit；dispatcher 第二次查同一 store 仅覆盖竞态间隙。语义上"miss 不抛 unavailable 而是返 missing"——避免 ConfigPreloader 失败但不是真正主动 fetch。**未来扩展**：dispatchSinglePathFetch 替换为派发单 path SyncPlan 主动 fetch（plan §9 Out of Scope）。 | 35% — 不抛错的兜底，非主动 fetch | FileAgent.read miss → SyncCoordinator.fetchFile → dispatcher.dispatchSinglePathFetch → store hit 返 change / miss 返 null |
+| **#2 FUSE IPC 命中通知 FileAgent** | `FileAgent.bumpTtlForExternalHit(absPath, ttlMs)` 公开方法。`file-proxy-manager.ts: tryServeReadFromCache` 命中分支调它续期 TTL。**保守策略**：不强行让 FUSE IPC 走 FileAgent.read（避免与 redaction / mutation hint / pendingReadBypass 多分支耦合）；改为"命中通知"——FileAgent 知道哪些 path 正在被 FUSE 读，GC 不清这些 path。**不承载 read/stat/readdir 数据流**——仅是保活钩子。 | 75% — 保活钩子，未承载 op | FUSE → file-proxy-manager.tryServeReadFromCache 命中 → fileAgent.bumpTtlForExternalHit → TTL 续期 → GC 不 evict |
+| **#3 watcher delta 接 FileAgent** | `cache-task-manager: CacheTaskManagerOptions.onDeltaApplied` 回调；`applyDelta` 在 store.applyDelta 后调它。server.ts 注册回调：→ FileAgent.notifyWatcherDeltaApplied → 续期 TTL + inflight telemetry。FileAgent **不重复 apply**。**实际路径与 plan §3.6 v2 设想不同**：cache-task-manager 仍是 manifest 写入入口；FileAgent 是被通知的副作用方。 | 70% — TTL/telemetry 接入，写入未过 SyncCoordinator | client watcher → cache_task_delta → cache-task-manager.applyDelta → store.applyDelta → onDeltaApplied → FileAgent.notifyWatcherDeltaApplied |
+
+**已知未做完的部分**（明确属于 follow-up，对 ship 当前架构不阻塞）：
+- #1 dispatcher 主动派发单 path SyncPlan：未来要让 ConfigPreloader 冷缓存真正预热 ancestor 文件需要这一项
+- #2 FUSE IPC 完全走 FileAgent.read：现在 redaction / mutation 流程仍在 FileProxyManager 内部，要替换需重构 FileProxyManager
+- #3 cache-task-manager 改用 SyncCoordinator.applyWatcherDelta 落 manifest：让 FileAgent / SyncCoordinator 成为 plan §3.6 设想的唯一写入入口
 
 **测试覆盖**：`server/test/wiring-integration.test.ts` 共 10 个 case 覆盖三处接通的端到端契约。
 
 **累计代码统计**：
-- 新增模块：`file-agent/` 9 个文件 + `config-preloader.ts` + `cache-task-dispatcher.ts`
+- 新增模块：`file-agent/` 子目录 9 个文件 + `config-preloader.ts` + `cache-task-dispatcher.ts`
 - 新增测试：8 个 `file-agent-*.test.ts` + `config-preloader.test.ts` + `wiring-integration.test.ts` + `e2e-file-agent.test.ts`
 - 修改既有：`cache-task-manager.ts` / `file-proxy-manager.ts` / `server.ts` / 相关测试
-- 总测试通过：server 411 / client 135 / web 6 / smoke 23（典型场景）
+- 总测试通过：server 421 / client 135 / web 6 / smoke 23（典型场景）
 
 ---
 

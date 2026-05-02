@@ -223,6 +223,10 @@ export class CacheTaskManager {
       return;
     }
 
+    // 收集 lock 内 apply 成功的 changes，待 lock 释放后调 onDeltaApplied（Codex review
+    // 反馈：避免回调阻塞 lock 释放，拖慢 cache_task_delta_ack）
+    let appliedChangesForCallback: CacheTaskChange[] | null = null;
+
     const ack = await this.withTaskLock(task.deviceId, task.cwd, async () => {
       if (task.activeClientId !== clientId) {
         return this.rejectAck(delta, "NOT_ACTIVE", "当前连接不是 active executor");
@@ -251,18 +255,8 @@ export class CacheTaskManager {
         this.rememberMutationIds(task, changesToApply);
         this.clearReadBypass(task, changesToApply);
 
-        // Plan §3.6 路径 B wiring：通知 onDeltaApplied 让 FileAgent 处理 inflight 清理 +
-        // telemetry。失败不影响 ack（changes 已落盘成功）。
-        if (this.onDeltaApplied) {
-          try {
-            await this.onDeltaApplied(task.deviceId, changesToApply);
-          } catch (err) {
-            log.warn("onDeltaApplied 回调出错（不影响 delta_ack）", {
-              deviceId: task.deviceId,
-              err: err instanceof Error ? err.message : String(err),
-            } as Record<string, unknown>);
-          }
-        }
+        // 标记本批 changes，等 lock 释放后再调 onDeltaApplied
+        appliedChangesForCallback = changesToApply;
 
         return {
           type: "cache_task_delta_ack",
@@ -281,6 +275,19 @@ export class CacheTaskManager {
         );
       }
     });
+
+    // Plan §3.6 路径 B wiring：lock 外调 onDeltaApplied 让 FileAgent 处理 TTL/telemetry。
+    // 失败不影响 ack（changes 已落盘成功；ack 也已构造完毕）。
+    if (this.onDeltaApplied && appliedChangesForCallback) {
+      try {
+        await this.onDeltaApplied(task.deviceId, appliedChangesForCallback);
+      } catch (err) {
+        log.warn("onDeltaApplied 回调出错（不影响 delta_ack）", {
+          deviceId: task.deviceId,
+          err: err instanceof Error ? err.message : String(err),
+        } as Record<string, unknown>);
+      }
+    }
 
     await this.sendAck(clientId, ack);
   }
