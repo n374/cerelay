@@ -86,7 +86,7 @@
 |---|---|---|---|
 | F | F2-multi-session | ⏳ Backlog | 需要 Hand 端支持"同一 ws 一次连接起多 PTY session"。当前 Hand main 入口是单 prompt → 单 session，扩 Hand multi-prompt 能力超出基础设施 PR 范围 |
 | F | F4-same-device-multi-cwd | ⏳ Backlog | 同 F2，受 Hand 当前架构限制 |
-| C | C4-large-truncated 半段 | ⏳ Backlog | INF-7 已加 env override 能力，但 docker-compose 给 client-a 设低 budget 会让 P0 C1 (1100 文件 17MB) 假阳性。需新增 client-c 专用容器 + per-case CERELAY_E2E_MAX_SCOPE_BYTES，超出基础设施 PR 范围 |
+| C | C4-large-truncated 半段 | ✅ `phase-p1.test.ts` | P1-B 收尾测试 PR 5：client-c 专用容器（`CERELAY_E2E_MAX_SCOPE_BYTES=262144` = 256KB）+ 10 × 50KB fixture（500KB > 256KB）触发 `applyScopeBudget` 截断；主断言 `cacheAdmin.summary` 中 `claude-home.truncated === true` + `lookupEntry` 抽样验 preservedCount < FILE_COUNT |
 | (meta) | INF-10 A5 meta-test | ⏳ Backlog | A5 deny 文案有 CC `--disallowedTools` + cerelay `buildShadowFallbackReason` 两条防线；本仓库只能 stub 后者，CC SDK 自带文案无法 override → meta 测无法稳定证明"假绿不可达" |
 
 #### 2.3 P2：可后续补 / P2: Nice-to-Have (Phase 3)
@@ -457,8 +457,8 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | 2026-05-02 | P1 阶段切分（Claude × Codex 方案对齐）：原 P1 10 case + 原 P2 2 case 重新切成 **P1-A**（A5 / C4-skipped，无基础设施改动）+ **P1-B**（其余 10 case + 8 项基础设施改动）。**P1-A 落地**：`phase-p1.test.ts` 加 2 case；npm test 入口扩到 `phase-p0.test.ts phase-p1.test.ts`，本地 `bash test/run-e2e-comprehensive.sh` 18/18 全绿；P1-B 范围登记在 §12 |
 | 2026-05-02 | §2.3 P2 需求池开张：补 H1-ws-reconnect / H2-server-restart 两条需求池条目（产品功能未实现，case 同步搁置；功能落地时本表是开 case 的锚点）。e2e coverage: N/A — 文档变更不引入新协议字段 / 工具 / 拓扑 / 隔离边界 / cache 维度 |
 | 2026-05-02 | **P1-B backlog 收尾 PR 6 (client-c 容器拓扑)**：docker-compose.e2e.yml 加 client-c service 携带 `CERELAY_E2E_MAX_SCOPE_BYTES=262144` (256KB)，专用于 C4-truncated case；orchestrator 加 CLIENT_C_URL + depends_on；clients.ts HOSTS 加 client-c。**严禁**把低 budget env 加到 client-a/client-b（会让 P0 C1 假阳性）。e2e coverage: 新增 client 容器拓扑维度 — 测试 case 在后续 PR 落地 |
-
----
+| 2026-05-02 | **truncated 协议 gap 补完 (INF-7 配套)**：Codex 评审 C4-truncated case 时发现 client cache-sync 算出的 truncated 标记从未通过协议上报到 server。修复:`CacheTaskSyncComplete` 加 optional `scopeTruncated?: Partial<Record<CacheScope, boolean>>` 字段(client/server 镜像);client state-machine 在 sync_complete 时填充;server cache-task-manager 调 `store.updateScopeTruncated` 落地;放 `withManifestLock` 串行保证。typecheck + server 425/425 + client 135/135 全过 |
+| 2026-05-02 | **P1-B backlog 收尾 测试 PR 5 (C4-truncated 半段)**：phase-p1.test.ts 加 C4-large-truncated case，走 client-c 容器 + 10 × 50KB fixture (500KB > 256KB) 触发 `applyScopeBudget` 截断；主断言 `cacheAdmin.summary` 中 `claude-home.truncated === true` + `lookupEntry` 抽样验 preservedCount < FILE_COUNT。**关键陷阱**: client-c 是 fresh device 首次连接,SyncPlan 走 SEED_WHITELIST 限定 walk,fixture 必须落到 SEED_WHITELIST 内的 subtree(本 case 选 `.claude/plugins/c4-truncated/`),否则 ad-hoc 路径会被过滤导致 plans 为空。e2e: 26→27/27 |
 
 ### 11. Codex 终审遗留事项（已闭环 / Closed） / Codex Review Outstanding Items (Closed)
 
@@ -574,7 +574,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 | B5-negative-cache ✅ | INF-1 + INF-3 + INF-11 | INF-11 提供 namespace 内连续 cat 触发能力(测试 PR1 落地) |
 | B6-settings-local-shadow ✅ | INF-2 + INF-3 + INF-11 | 测试 PR1 落地 |
 | C3-runtime-delta | INF-3 + INF-4 + (可选 INF-11 验 namespace 内读到新值) | |
-| C4-truncated 半段 | INF-7 | skipped 半段已在 P1-A 落地 |
+| C4-truncated 半段 ✅ | INF-7 + client-c 容器 | P1-B 收尾测试 PR 5 落地 |
 | D4-credentials-shadow ✅ | INF-2 + INF-3 + INF-5 + INF-11 | 测试 PR1 落地 |
 | E2-credentials-rw ✅ | INF-3 + INF-5 + INF-6 + INF-11 | 测试 PR1 落地 |
 | F2-multi-session | INF-3 | |

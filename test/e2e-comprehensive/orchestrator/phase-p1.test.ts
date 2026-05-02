@@ -549,14 +549,12 @@ test("E2-credentials-rw: namespace 内 write credentials shadow 落到 server da
 // ============================================================
 // P1-B 测试 PR 2 / 3 (合并实施): C3 / G1 / G2 / G3 + INF-10 A5 meta
 //
-// F2-multi-session / F4-same-device-multi-cwd / C4-truncated 留 todo 占位:
+// F2-multi-session / F4-same-device-multi-cwd 留 backlog:
 //   - F2/F4 需要 Hand 端支持"同一 ws 一次连接起多 PTY session"(查 client.ts
 //     CreatePtySession 流程, 当前 Hand 的 main 入口是单 prompt → 单 session,
 //     需要扩 Hand multi-prompt 能力,工作量超出基础设施 PR 范围)
-//   - C4-truncated 需要 docker-compose 给 client 容器加 CERELAY_E2E_MAX_SCOPE_BYTES
-//     env, 但同一 client 容器跑所有 case 会影响 P0 (C1 17MB > 任何低于 17MB 的
-//     budget 都会假阳性), 需要新增 client-c 专用容器或 per-case env 注入,
-//     基础设施改动外溢, 暂留作未来 backlog
+//   - C4-truncated 半段已在文件末尾 P1-B backlog 收尾测试 PR 5 落地(走 client-c
+//     专用容器 + CERELAY_E2E_MAX_SCOPE_BYTES=262144)
 // ============================================================
 
 // ============================================================
@@ -837,4 +835,112 @@ test("G3-mock-5xx: mock 返回 503 → 不挂死并记录首请求 (CC SDK exit 
   } finally {
     await cleanupFixture(caseId);
   }
+});
+
+// ============================================================
+// P1-B backlog 收尾 测试 PR 5: C4-truncated 半段
+//
+// 守护的不变量(cache-sync.ts applyScopeBudget + server manifest truncated 标记):
+//   1. client cache-sync 在某 scope 累计字节超过 MAX_SCOPE_BYTES 时,按 mtime 倒序
+//      丢弃多余 entry(skipped 的不参与累计 / 不被丢弃)
+//   2. ScopePlan.truncated = true 上报到 manifest
+//   3. server 落地后 cache summary scopes[*].truncated === true 暴露这一事实
+//   4. entryCount < 投递的源文件总数(确实有 entry 被丢)
+//
+// 触发条件: client-c 的 CERELAY_E2E_MAX_SCOPE_BYTES=262144 (256KB)
+// fixture: 10 文件 × 50KB = 500KB > 256KB
+//   - 单文件 50KB < MAX_FILE_BYTES=1MB → 不会被 skipped(走 truncated 路径,非 skipped)
+//   - 累计 500KB > 256KB → applyScopeBudget 丢弃约半数 entry,truncated=true
+//
+// 必须用 client-c(不是 client-a/b)——见 docker-compose.e2e.yml 注释:同 env 加到
+// client-a/b 会让 P0 C1 (1100 文件 17MB initial sync) 假阳性。
+//
+// 关键细节: client-c 是 fresh device 首次连接,server 端 ledger 为空 → SyncPlan
+// 走 SEED_WHITELIST(server/src/seed-whitelist.ts) 的限定 walk。fixture 必须落到
+// SEED_WHITELIST 列出的 subtree(plugins/projects/backups/statsig 等 maxDepth=-1
+// 全树) 内才会被 client cache-sync 扫到。这里选 plugins/c4-truncated/(plugins
+// 是 client 自己持有的 user-level CC 插件目录,e2e 容器是 fresh 通常空)。
+// 写到 .claude/c4-truncated/ 这种 ad-hoc 路径会被 SEED_WHITELIST 过滤,plans 里
+// 拿不到任何 entry,truncated 永远 false——这是 fresh device 的硬约束,不是测试
+// 框架可以改的;前面 case 的 client-a 能用 .claude/c4-large/ 是因为 P0 已写过
+// ledger,后续 SyncPlan 给 WHOLE_SCOPE_INSTRUCTION。
+// ============================================================
+test("C4-large-truncated(truncated 半段): scope > MAX_SCOPE_BYTES → 截断 + manifest.truncated=true", async () => {
+  const caseId = "case-c4-truncated";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  // 单 turn final——cache sync 在 session 启动期完成,不需要工具调用
+  await mockAdmin.loadScript({
+    name: "p1-c4-truncated-turn1-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("c4 truncated ok"),
+  });
+
+  // client-c 的 budget=256KB;10 × 50KB = 500KB,触发约半数文件被截断
+  const FILE_COUNT = 10;
+  const BYTES_PER_FILE = 50_000;
+  const TOTAL_BYTES = FILE_COUNT * BYTES_PER_FILE; // 500KB
+
+  const result = await clients.run("client-c", {
+    prompt: "trigger cache sync exceeding scope budget [C4-TRUNCATED-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+    homeFixtureBulk: {
+      // 落到 SEED_WHITELIST 内的 plugins 子树(详见上方 case 注释)
+      pathPrefix: ".claude/plugins/c4-truncated",
+      count: FILE_COUNT,
+      bytesPerFile: BYTES_PER_FILE,
+    },
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `client exit ${result.exitCode}\n--- stderr ---\n${result.stderr}`,
+  );
+  assert.ok(result.deviceId, "client agent must report deviceId");
+
+  // 旁证:client 端 stdout 应显示 cache sync 完成(truncated 不阻断 sync,继续上报)
+  assert.match(
+    result.stdout,
+    /cache task initial upload complete/,
+    "client should complete initial cache sync even when truncated",
+  );
+
+  // 主断言 #1: scope.truncated === true
+  const summary = await cacheAdmin.summary(result.deviceId);
+  const homeStats = summary.scopes["claude-home"];
+  assert.ok(homeStats, "claude-home scope should exist on server");
+  assert.equal(
+    homeStats.truncated,
+    true,
+    `claude-home.truncated should be true (total ${TOTAL_BYTES}B > budget 262144B), got ${homeStats.truncated}`,
+  );
+
+  // 主断言 #2: entryCount < FILE_COUNT(确实有 entry 被丢,不是只标记没动手)
+  // 注意:cache 还可能含 .claude.json 等其它已有 entry,所以不能直接用全 entryCount;
+  // 用 lookupEntry 抽样验证至少一个源文件 entry 不存在(被截断丢了)。
+  // applyScopeBudget 按 mtime 倒序保留,bulk 写入 mtime 接近,落到截断窗口的 idx 不确定;
+  // 改用计数:数 c4-truncated/bulk_*.txt 在 manifest 里几个,< FILE_COUNT 即证明被丢。
+  let preservedCount = 0;
+  for (let i = 0; i < FILE_COUNT; i += 1) {
+    const idxStr = String(i).padStart(6, "0");
+    const entry = await cacheAdmin.lookupEntry({
+      deviceId: result.deviceId,
+      scope: "claude-home",
+      relPath: `plugins/c4-truncated/bulk_${idxStr}.txt`,
+    });
+    if (entry) preservedCount += 1;
+  }
+  assert.ok(
+    preservedCount < FILE_COUNT,
+    `expected some files truncated (preserved < ${FILE_COUNT}), got preservedCount=${preservedCount}`,
+  );
+  assert.ok(
+    preservedCount >= 1,
+    `expected at least 1 file preserved (budget allows ~5), got preservedCount=${preservedCount} — sanity check`,
+  );
+
+  await cleanupFixture(caseId);
 });
