@@ -35,6 +35,8 @@ import type {
   ToolResult,
 } from "./protocol.js";
 import { ClientCacheStore } from "./file-agent/store.js";
+import { FileAgent } from "./file-agent/index.js";
+import { ConfigPreloader } from "./config-preloader.js";
 import { AccessLedgerStore } from "./access-ledger.js";
 import { TokenStore, extractBearerToken, extractQueryToken } from "./auth.js";
 import { ClientRegistry } from "./client-registry.js";
@@ -96,6 +98,12 @@ export class CerelayServer {
   });
   private readonly cacheTaskManager: CacheTaskManager;
   private readonly cacheTaskSweepTimer: NodeJS.Timeout;
+
+  /**
+   * Per-device FileAgent 单例池（plan §2 P6）。
+   * Session 创建时 lazy 实例化；server 关闭时关闭所有 GC 定时器。
+   */
+  private readonly fileAgents = new Map<string, import("./file-agent/index.js").FileAgent>();
 
   // HTTP/WS 基础设施
   private readonly httpServer = createServer(this.handleHttpRequest.bind(this));
@@ -242,6 +250,11 @@ export class CerelayServer {
     log.info("开始优雅关闭...");
     clearInterval(this.tokenCleanupTimer);
     clearInterval(this.cacheTaskSweepTimer);
+    // 关闭所有 per-device FileAgent（停止周期 GC）
+    for (const agent of this.fileAgents.values()) {
+      await agent.close().catch(() => undefined);
+    }
+    this.fileAgents.clear();
     for (const [sessionId, entry] of Array.from(this.ptySessions.entries())) {
       this.destroyPtySession(sessionId, entry, "服务器关闭");
     }
@@ -532,6 +545,25 @@ export class CerelayServer {
     });
   }
 
+  /**
+   * 获取或创建 per-device FileAgent 单例（plan §2 P6 + Task 10）。
+   * 同 deviceId 多 session 共享同一 FileAgent；shutdown() 时统一关闭。
+   */
+  private getOrCreateFileAgent(deviceId: string, homeDir: string): FileAgent {
+    let agent = this.fileAgents.get(deviceId);
+    if (!agent) {
+      agent = new FileAgent({
+        deviceId,
+        homeDir,
+        store: this.cacheStore,
+        // 默认周期 GC 60s（DEFAULT_GC_INTERVAL_MS）
+      });
+      this.fileAgents.set(deviceId, agent);
+      log.debug("创建 FileAgent 单例", { deviceId, homeDir });
+    }
+    return agent;
+  }
+
   // ============================================================
   // Client 连接处理
   // ============================================================
@@ -748,6 +780,12 @@ export class CerelayServer {
       const credentialsDir = path.join(dataDir, "credentials", "default");
       mkdirSync(credentialsDir, { recursive: true });
       shadowFiles["home-claude/.credentials.json"] = path.join(credentialsDir, ".credentials.json");
+      // Per-device FileAgent 单例（plan §2 P6 + Task 10）；同一 deviceId 多 session 共享
+      const fileAgent = message.deviceId ? this.getOrCreateFileAgent(
+        message.deviceId,
+        message.homeDir || process.env.HOME || "/home/node",
+      ) : undefined;
+
       fileProxy = new FileProxyManager({
         runtimeRoot,
         clientHomeDir: message.homeDir || process.env.HOME || "/home/node",
@@ -764,12 +802,41 @@ export class CerelayServer {
         cacheTaskManager: message.deviceId ? this.cacheTaskManager : undefined,
         // Phase 4.2 / 5: 注入 AccessLedger - 启动期 missing 投影 + 运行期 access tracking flush
         accessLedgerStore: message.deviceId ? this.accessLedgerStore : undefined,
+        fileAgent,
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
       // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，
       // handleFileProxyResponse 找不到 FileProxyManager，响应被丢弃导致 FUSE 请求超时。
       this.fileProxies.set(sessionId, fileProxy);
       await fileProxy.start();
+
+      // Task 10：session 启动期 ConfigPreloader 预热配置文件（同步阻塞）。
+      // 当前 FileAgent 还没接 dispatcher（cache-task-manager 单 path fetch 入口属于
+      // plan §9 渐进事项），prefetch 在 cache miss 时会 fail；这里 catch 不阻塞 session
+      // 启动——日志记录后继续，运行期 FUSE 仍能从 file-proxy-manager 命中已有 cache。
+      if (fileAgent && message.deviceId) {
+        try {
+          const preloader = new ConfigPreloader({
+            homeDir: message.homeDir || process.env.HOME || "/home/node",
+            cwd: message.cwd || ".",
+            fileAgent,
+            ttlMs: 7 * 24 * 60 * 60 * 1000, // 7 天（plan §10.2 决策）
+            totalTimeoutMs: 10_000, // 10s（preheat 是预热而非阻塞 session 的硬约束）
+          });
+          const preheatResult = await preloader.preheat();
+          log.info("ConfigPreloader 预热完成", {
+            sessionId,
+            deviceId: message.deviceId,
+            ...preheatResult,
+          } as Record<string, unknown>);
+        } catch (err) {
+          log.warn("ConfigPreloader 预热失败（不阻塞 session 启动）", {
+            sessionId,
+            deviceId: message.deviceId,
+            err: err instanceof Error ? err.message : String(err),
+          } as Record<string, unknown>);
+        }
+      }
     }
     phaseAt = markPhase("fileProxyStart", phaseAt);
 
