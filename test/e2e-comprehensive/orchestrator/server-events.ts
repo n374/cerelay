@@ -100,6 +100,10 @@ export interface FileProxyReadServedDetail {
   hasData?: boolean;
   size?: number;
   sliceBytes?: number;
+  // 新增：cross-cwd 隔离断言字段（F4 P2 PR1.1）
+  clientCwd?: string;
+  clientPath?: string;
+  contentSha256?: string;
 }
 
 /**
@@ -116,6 +120,9 @@ export interface FileProxyShadowServedDetail {
   bytes: number;
   offset: number;
   size: number;
+  // 新增：cross-cwd 隔离断言字段（F4 P2 PR1.1）
+  clientCwd?: string;
+  fusePath?: string;
 }
 
 /**
@@ -129,6 +136,9 @@ export interface FileProxyWriteServedDetail {
   bytes: number;
   offset: number;
   shadow: boolean;   // true = 经 daemon shadow 写本地；false 预留给未来 server 端 write 出口
+  // 新增：cross-cwd 隔离断言字段（F4 P2 PR1.1）
+  clientCwd?: string;
+  fusePath?: string;
 }
 
 /**
@@ -142,6 +152,9 @@ export interface FileProxyClientRequestedDetail {
   relPath: string;
   reason: string;
   perforationCount: number;
+  // 新增：cross-cwd 隔离断言字段（F4 P2 PR1.1）
+  clientCwd?: string;
+  clientPath?: string;
 }
 
 /**
@@ -153,6 +166,31 @@ export interface FileProxyClientMissDetail {
   root: string;
   relPath: string;
   errorCode: number;  // 应当是 2 (ENOENT)
+}
+
+/**
+ * F4 P2: ConfigPreloader 启动期预热计划事件，携带 session 上下文与预热路径列表。
+ * 用于断言"预热只覆盖当前 session cwd，不泄露跨 session 路径"。
+ */
+export interface ConfigPreloaderPlanDetail {
+  sessionId: string;
+  clientCwd: string;
+  homeDir: string;
+  ancestorDirs: string[];
+  prefetchAbsPaths: string[];
+}
+
+/**
+ * F4 P2: SessionBootstrap 启动计划事件，携带 session 初始化关键路径。
+ * 用于断言"每个 session 有独立的 runtimeRoot / mountPoint，彼此不共享"。
+ */
+export interface SessionBootstrapPlanDetail {
+  sessionId: string;
+  deviceId: string;
+  clientCwd: string;
+  runtimeRoot: string;
+  fileProxyMountPoint: string;
+  projectClaudeBindTarget: string;
 }
 
 export const fileProxyEvents = {
