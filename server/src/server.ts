@@ -896,6 +896,9 @@ export class CerelayServer {
         // Phase 4.2 / 5: 注入 AccessLedger - 启动期 missing 投影 + 运行期 access tracking flush
         accessLedgerStore: message.deviceId ? this.accessLedgerStore : undefined,
         fileAgent,
+        // CERELAY_ADMIN_EVENTS=true 时往 ring buffer 上报 settings.json redact 事件，
+        // 供 e2e（E1）观察。生产路径 buffer 是 disabled no-op，零开销。
+        adminEvents: this.adminEvents,
       });
       // 必须在 start() 之前注册到 fileProxies，否则 start() 内部的 FUSE 缓存预热
       // 发出的 file_proxy_request → Client 响应 file_proxy_response 时，

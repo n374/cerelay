@@ -101,6 +101,12 @@ export interface FileProxyManagerOptions {
    * 运行期 FUSE 读到的 cache 数据即是 ConfigPreloader 预热的产物。
    */
   fileAgent?: import("./file-agent/index.js").FileAgent;
+  /**
+   * 测试用结构化事件 buffer。注入后，~/.claude/settings.json 出口处的 redact 行为会以
+   * `file-proxy.settings.redacted` 事件落入 admin events ring buffer，供 e2e（E1）观察。
+   * 不注入则 redact 仍然生效，只是没有可观测信号——生产路径默认不依赖。
+   */
+  adminEvents?: import("./admin-events.js").AdminEventBuffer;
   /** Cache task ready gate / mutation hint 协调器 */
   cacheTaskManager?: CacheTaskReadGate;
   /**
@@ -188,6 +194,8 @@ export class FileProxyManager {
    * 当前不强制走 FileAgent.read（保留现有 redaction / mutation 路径行为）。
    */
   private readonly fileAgent: import("./file-agent/index.js").FileAgent | undefined;
+  /** 测试用 admin event buffer，非必须；详见 FileProxyManagerOptions.adminEvents 注释。 */
+  private readonly adminEvents: import("./admin-events.js").AdminEventBuffer | undefined;
   /**
    * 当前 session 的访问事件 buffer (Phase 5.1). flush 由 file-proxy-manager 在
    * shutdown / 5s timer / sync_complete 时驱动 (Phase 5.3 集成).
@@ -237,6 +245,7 @@ export class FileProxyManager {
     this.cacheTaskManager = options.cacheTaskManager;
     this.accessLedgerStore = options.accessLedgerStore;
     this.fileAgent = options.fileAgent;
+    this.adminEvents = options.adminEvents;
     // Phase 6: capture mode 由 env 触发 (dev-only)
     this.captureSeedPath = process.env.CERELAY_CAPTURE_SEED;
 
@@ -259,6 +268,32 @@ export class FileProxyManager {
     return this.cacheTaskManager
       ? this.cacheTaskManager.shouldUseCacheSnapshot(this.deviceId!, this.clientCwd)
       : true;
+  }
+
+  /**
+   * 包装 redactClaudeSettingsLoginState：在 buffer 实际被改写时往 admin event buffer
+   * 上报一条 `file-proxy.settings.redacted` 事件，供 e2e（E1）观察 redact 是否生效。
+   * 函数不做改动时直接返回原 buf 引用（reference equality 即可判定是否触发）。
+   *
+   * 注意：redactClaudeSettingsLoginState 在已无登录态字段时返回原引用、有则返回新
+   * Buffer。我们用 `redacted !== buf` 来判断是否真发生改写，避免给"原本就干净"的
+   * settings.json 误报事件。
+   */
+  private redactSettingsAndReport(
+    site: "snapshot" | "cache-hit" | "passthrough",
+    relPath: string,
+    buf: Buffer,
+  ): Buffer {
+    const redacted = redactClaudeSettingsLoginState(buf);
+    if (redacted !== buf) {
+      this.adminEvents?.record("file-proxy.settings.redacted", this.sessionId, {
+        site,
+        relPath,
+        beforeBytes: buf.byteLength,
+        afterBytes: redacted.byteLength,
+      });
+    }
+    return redacted;
   }
 
   /**
@@ -1098,7 +1133,7 @@ export class FileProxyManager {
         // 出口 #1：~/.claude/settings.json 灌进 Python 启动 snapshot 缓存前 redact 登录态字段。
         // size-preserving padding 保证 stat.size（取自 entry.size）与实际 data 一致。
         const out = isClaudeHomeSettingsJson(scope, relPath)
-          ? redactClaudeSettingsLoginState(buf)
+          ? this.redactSettingsAndReport("snapshot", relPath, buf)
           : buf;
         data = out.toString("base64");
       }
@@ -1159,7 +1194,7 @@ export class FileProxyManager {
     // size-preserving padding 保证 buf.byteLength 与 entry.size / stat.size 一致，
     // offset/size 切片语义不变。
     if (isClaudeHomeSettingsJson(scope, cacheRelPath)) {
-      buf = redactClaudeSettingsLoginState(buf);
+      buf = this.redactSettingsAndReport("cache-hit", cacheRelPath, buf);
     }
 
     const offset = req.offset ?? 0;
@@ -1732,7 +1767,11 @@ export class FileProxyManager {
       const fullBuf = Buffer.from(readResp.data ?? "", "base64");
 
       // 3. redact（size-preserving，输出长度 ≤ fullSize）
-      const redacted = redactClaudeSettingsLoginState(fullBuf);
+      const redacted = this.redactSettingsAndReport(
+        "passthrough",
+        req.relPath ?? "settings.json",
+        fullBuf,
+      );
 
       // 4. 按 Python 原始 (offsetOrig, sizeOrig) 切片回 Python
       const end = Math.min(offsetOrig + sizeOrig, redacted.byteLength);

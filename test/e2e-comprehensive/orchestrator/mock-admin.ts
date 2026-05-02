@@ -68,6 +68,31 @@ export function scriptToolUse(opts: { toolName: string; toolUseId: string; input
   };
 }
 
+/**
+ * 单条 assistant message 内多 tool_use 块（并发工具调用）。
+ * 用于 F1：模型一次返回 N 个 tool_use，CC 应并发执行。
+ * 索引从 0 起；每个 block 独立的 content_block_start/delta/stop。
+ */
+export function scriptParallelToolUse(
+  tools: Array<{ toolName: string; toolUseId: string; input: Record<string, unknown> }>,
+): ScriptDef["respond"] {
+  const events: Array<Record<string, unknown>> = [
+    { type: "message_start", message: { id: `msg_par_${tools[0]?.toolUseId ?? "x"}`, type: "message", role: "assistant", model: "claude-mock", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } },
+  ];
+  tools.forEach((t, i) => {
+    events.push(
+      { type: "content_block_start", index: i, content_block: { type: "tool_use", id: t.toolUseId, name: t.toolName, input: {} } },
+      { type: "content_block_delta", index: i, delta: { type: "input_json_delta", partial_json: JSON.stringify(t.input) } },
+      { type: "content_block_stop", index: i },
+    );
+  });
+  events.push(
+    { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: tools.length } },
+    { type: "message_stop" },
+  );
+  return { type: "stream", events };
+}
+
 export function scriptText(text: string): ScriptDef["respond"] {
   return {
     type: "stream",

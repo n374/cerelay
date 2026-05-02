@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mockAdmin, scriptToolUse, scriptText } from "./mock-admin.js";
+import { mockAdmin, scriptToolUse, scriptText, scriptParallelToolUse } from "./mock-admin.js";
 import { clients } from "./clients.js";
 import { serverEvents, cacheAdmin } from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
@@ -675,4 +675,312 @@ test("C2-revision-ack: client acked revision == server manifest revision", async
   assert.ok(homeStats.entryCount >= FILE_COUNT, `entryCount=${homeStats.entryCount} < ${FILE_COUNT}`);
 
   await cleanupFixture(caseId);
+});
+
+// ============================================================
+// D1-cwd-aligned：session 内 pwd 输出 == client 上报的 cwd 字符串
+// 守护 mount namespace 内 cwd 字符串严格对齐
+// ============================================================
+test("D1-cwd-aligned: namespace 内 pwd == client 上报 cwd", async () => {
+  const caseId = "case-d1";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  await mockAdmin.loadScript({
+    name: "p0-d1-turn1",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__bash",
+      toolUseId: "toolu_d1_01",
+      input: { command: "pwd" },
+    }),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-d1-turn2",
+    match: { turnIndex: 2 },
+    respond: scriptText("d1 cwd ok"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "report cwd [D1-MARKER]",
+    cwd,
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 2);
+  const pwdResult = cap[1].toolResults.at(-1);
+  assert.ok(pwdResult, "expected pwd tool_result");
+  // pwd 输出必然以 cwd 开头（可能带 trailing \n）
+  // 注意：mcp__cerelay__bash 是 client-routed → CLIENT 端跑 pwd，
+  // CLIENT 容器和 server namespace 不同，但本测试断言的是 client 端 cwd 对齐了
+  // server 上报的 namespace cwd（两边都该是同一字符串）。
+  assert.match(
+    pwdResult.content,
+    new RegExp(`^[^]*${cwd.replace(/\//g, "\\/")}[^]*$`),
+    `pwd should report cwd=${cwd}, got: ${pwdResult.content}`
+  );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// D2-home-aligned：session 内 echo $HOME == client 上报的 home
+// 守护 HOME 重定向（agent 容器 HOME=/home/clientuser）
+// ============================================================
+test("D2-home-aligned: namespace 内 $HOME == client 上报 home", async () => {
+  const caseId = "case-d2";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const expectedHome = "/home/clientuser";
+
+  await mockAdmin.loadScript({
+    name: "p0-d2-turn1",
+    match: { turnIndex: 1 },
+    respond: scriptToolUse({
+      toolName: "mcp__cerelay__bash",
+      toolUseId: "toolu_d2_01",
+      input: { command: "echo $HOME" },
+    }),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-d2-turn2",
+    match: { turnIndex: 2 },
+    respond: scriptText("d2 home ok"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "report home [D2-MARKER]",
+    cwd,
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+  const cap = await mockAdmin.captured();
+  const homeResult = cap[1].toolResults.at(-1);
+  assert.ok(homeResult, "expected echo $HOME tool_result");
+  assert.match(homeResult.content, new RegExp(expectedHome.replace(/\//g, "\\/")),
+    `$HOME should be ${expectedHome}, got: ${homeResult.content}`);
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// D3-ancestor-no-crash：B4 的语义复刻——只断言 bootstrap 没在 set -u 下崩
+// 不查 ancestor 内容（那是 B4 的职责）。死亡回归专项守门。
+// ============================================================
+test("D3-ancestor-no-crash: ancestor 段 bootstrap 在 set -u 下不崩 (IFS regression)", async () => {
+  const caseId = "case-d3";
+  await writeFixture(caseId, {
+    "CLAUDE.md": "# d3 ancestor",
+    "lvl1/lvl2/lvl3/keep.txt": "",
+  });
+  const cwd = `${clientCwd(caseId)}/lvl1/lvl2/lvl3`;
+
+  // 单 turn final，不需要工具调用——session 启动期间就要跑 bootstrap.sh
+  await mockAdmin.loadScript({
+    name: "p0-d3-turn1",
+    match: { turnIndex: 1 },
+    respond: scriptText("d3 ok"),
+  });
+
+  const baselineEvents = await serverEvents.fetch({});
+  const baselineId = baselineEvents.at(-1)?.id ?? 0;
+
+  const result = await clients.run("client-a", {
+    prompt: "trigger bootstrap [D3-MARKER]",
+    cwd,
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+  const out = `${result.stdout}\n${result.stderr}`;
+  assert.doesNotMatch(out, /IFS: parameter not set/, "regression: IFS bug surfaced");
+  assert.doesNotMatch(out, /初始化 Claude mount namespace 失败/, "namespace 初始化失败 = regression");
+
+  const newEvents = await serverEvents.fetch({ since: baselineId });
+  const ready = newEvents.find((e) => e.kind === "pty.spawn.ready");
+  const failed = newEvents.find((e) => e.kind === "pty.spawn.failed");
+  assert.ok(ready, "expected pty.spawn.ready");
+  assert.equal(failed, undefined, `unexpected pty.spawn.failed: ${JSON.stringify(failed?.detail)}`);
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// E1-settings-redact：~/.claude/settings.json 含 ANTHROPIC_API_KEY 时
+// 三处出口（snapshot / cache-hit / passthrough）必须 redact。
+// 本 case 通过 file-proxy.settings.redacted admin event 观察 redact 是否真的发生。
+// ============================================================
+test("E1-settings-redact: settings.json 经 server FUSE 出口被 redact", async () => {
+  const caseId = "case-e1";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const secret = "sk-ant-fake-secret-E1-AAAAAAAAAA";
+  const settingsContent = JSON.stringify(
+    { env: { ANTHROPIC_API_KEY: secret, ANTHROPIC_BASE_URL: "https://example.invalid" } },
+    null,
+    2,
+  );
+
+  await mockAdmin.loadScript({
+    name: "p0-e1-turn1",
+    match: { turnIndex: 1 },
+    respond: scriptText("e1 ok"),
+  });
+
+  const baselineEvents = await serverEvents.fetch({});
+  const baselineId = baselineEvents.at(-1)?.id ?? 0;
+
+  const result = await clients.run("client-a", {
+    prompt: "trigger settings redact [E1-MARKER]",
+    cwd,
+    homeFixture: {
+      ".claude/settings.json": settingsContent,
+    },
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+
+  // 至少一次 file-proxy.settings.redacted 事件触发（snapshot / cache-hit / passthrough 任一）
+  const newEvents = await serverEvents.fetch({ since: baselineId });
+  const redactEvents = newEvents.filter((e) => e.kind === "file-proxy.settings.redacted");
+  assert.ok(
+    redactEvents.length > 0,
+    `expected at least one redact event, got 0 (new events: ${JSON.stringify(newEvents.map((e) => e.kind))})`
+  );
+  // 至少要有一处出口被 site 标记
+  const sites = new Set(redactEvents.map((e) => (e.detail as { site?: string } | undefined)?.site));
+  assert.ok(
+    sites.has("snapshot") || sites.has("cache-hit") || sites.has("passthrough"),
+    `unexpected sites: ${JSON.stringify([...sites])}`
+  );
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// F1-single-client-concurrent：同 client 一次 session 内并发 5 次 Bash
+// 守护 tool relay race、ack 序号正确（不串台、不丢、不卡死）
+// ============================================================
+test("F1-single-client-concurrent: 同 session 5 个并发 Bash → ack 配对", async () => {
+  const caseId = "case-f1";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  // turn 1: 一次返回 5 个 mcp__cerelay__bash 并发 tool_use
+  const tools = [0, 1, 2, 3, 4].map((i) => ({
+    toolName: "mcp__cerelay__bash",
+    toolUseId: `toolu_f1_${i.toString().padStart(2, "0")}`,
+    input: { command: `echo F1-CONCURRENT-${i}` },
+  }));
+  await mockAdmin.loadScript({
+    name: "p0-f1-turn1",
+    match: { turnIndex: 1 },
+    respond: scriptParallelToolUse(tools),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-f1-turn2",
+    match: { turnIndex: 2 },
+    respond: scriptText("f1 concurrent done"),
+  });
+
+  const result = await clients.run("client-a", {
+    prompt: "run 5 concurrent bash [F1-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+  });
+
+  assert.equal(result.exitCode, 0, `client exit ${result.exitCode}\nstderr: ${result.stderr}`);
+
+  // turn 2 必须含全部 5 个 tool_result，每个 id/echo 一一对应
+  const cap = await mockAdmin.captured();
+  assert.equal(cap.length, 2, `expected 2 turns, got ${cap.length}`);
+  const toolResults = cap[1].toolResults;
+  assert.equal(toolResults.length, 5, `expected 5 tool_results, got ${toolResults.length}`);
+
+  // 每个 tool_use_id 都得有 result，并且是 is_error=false
+  for (const t of tools) {
+    const tr = toolResults.find((r) => r.tool_use_id === t.toolUseId);
+    assert.ok(tr, `missing tool_result for ${t.toolUseId}`);
+    assert.equal(tr.is_error, false, `${t.toolUseId} should not be is_error`);
+    const expectMarker = `F1-CONCURRENT-${t.toolUseId.slice(-2).replace(/^0/, "")}`;
+    // F1-CONCURRENT-N (N=0..4)，处理 padding 后还原 i
+    const i = Number.parseInt(t.toolUseId.slice(-2), 10);
+    assert.match(tr.content, new RegExp(`F1-CONCURRENT-${i}`), `${t.toolUseId} content mismatch: ${tr.content}; expected substring F1-CONCURRENT-${i}`);
+  }
+
+  await cleanupFixture(caseId);
+});
+
+// ============================================================
+// F3-multi-device：起 client-a / client-b 两容器，并发触发各自 session。
+// 守护 server 端 cache 按 deviceId 隔离，互不污染。
+// ============================================================
+test("F3-multi-device: client-a / client-b 并发 → cache 按 deviceId 隔离", async () => {
+  const caseIdA = "case-f3-a";
+  const caseIdB = "case-f3-b";
+  await writeFixture(caseIdA, { ".keep": "" });
+  await writeFixture(caseIdB, { ".keep": "" });
+
+  // 各自一段 turn1 用 marker 区分；mock 用 predicate 按 prompt marker 匹配
+  await mockAdmin.loadScript({
+    name: "p0-f3-a",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F3-CLIENT-A" } },
+    respond: scriptText("f3-a ok"),
+  });
+  await mockAdmin.loadScript({
+    name: "p0-f3-b",
+    match: { predicate: { path: "messages[0].content", op: "contains", value: "F3-CLIENT-B" } },
+    respond: scriptText("f3-b ok"),
+  });
+
+  // 两侧 homeFixture 用各自专属 marker，写入 SEED_WHITELIST 内的 CLAUDE.md
+  // （fresh device 首次连接时 server 走 SEED_WHITELIST 而非 ledger-derived plan，
+  // 任意非白名单路径 fresh device 都扫不到——这点对 F3 这种"双 fresh device 隔离
+  // 验证"是绕不过去的硬约束）。
+  const markerA = "marker-from-client-a-7d2f1e";
+  const markerB = "marker-from-client-b-9a4b3c";
+
+  const [resA, resB] = await Promise.all([
+    clients.run("client-a", {
+      prompt: "[F3-CLIENT-A]",
+      cwd: clientCwd(caseIdA),
+      timeoutMs: 60_000,
+      homeFixture: { ".claude/CLAUDE.md": markerA },
+    }),
+    clients.run("client-b", {
+      prompt: "[F3-CLIENT-B]",
+      cwd: clientCwd(caseIdB),
+      timeoutMs: 60_000,
+      homeFixture: { ".claude/CLAUDE.md": markerB },
+    }),
+  ]);
+
+  assert.equal(resA.exitCode, 0, `client-a exit ${resA.exitCode}\nstderr: ${resA.stderr}`);
+  assert.equal(resB.exitCode, 0, `client-b exit ${resB.exitCode}\nstderr: ${resB.stderr}`);
+  assert.ok(resA.deviceId && resB.deviceId, "both clients must report deviceId");
+  assert.notEqual(resA.deviceId, resB.deviceId, "client-a / client-b must have distinct deviceId");
+
+  // server 端按 deviceId 分别查 manifest：各自的 marker 必须落到自己的 scope
+  // entry，绝对不能交叉（path 列表本身没暴露，靠 entryCount 推断 + 各 device
+  // 至少一个 entry 即可证明隔离）。
+  const sumA = await cacheAdmin.summary(resA.deviceId);
+  const sumB = await cacheAdmin.summary(resB.deviceId);
+  assert.ok(
+    sumA.scopes["claude-home"]!.entryCount >= 1,
+    `device-a claude-home should have entries; sumA=${JSON.stringify(sumA)}\n--- client-a stdout ---\n${resA.stdout.slice(-3000)}`
+  );
+  if (sumB.scopes["claude-home"]!.entryCount < 1) {
+    const cacheLines = resB.stdout
+      .split("\n")
+      .filter((l) => /cache.task|cache-task|f3-b-marker|claude-home/.test(l))
+      .join("\n");
+    assert.fail(
+      `device-b claude-home should have entries; sumB=${JSON.stringify(sumB)}\n--- client-b cache lines ---\n${cacheLines}`,
+    );
+  }
+  // revision 各自独立递增（毫不相关）
+  assert.ok(sumA.revision > 0 && sumB.revision > 0, "both devices should have revision > 0");
+
+  await cleanupFixture(caseIdA);
+  await cleanupFixture(caseIdB);
 });

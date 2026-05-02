@@ -72,9 +72,16 @@ function pickScript(req: CapturedRequest): ScriptDef | null {
     }
     if (s.match.predicate) {
       const v = getByPath(req.body, s.match.predicate.path);
-      if (typeof v !== "string") continue;
-      if (s.match.predicate.op === "contains" && !v.includes(s.match.predicate.value)) continue;
-      if (s.match.predicate.op === "equals" && v !== s.match.predicate.value) continue;
+      // 兼容 string 与 array/object：CC 发的 user 消息 content 是 [{type,text,...}]
+      // 数组而不是裸字符串，因此先尝试 JSON 序列化再做 contains/equals 比较。
+      // equals 仍然要求精确匹配；contains 在序列化后的 JSON 文本里搜子串足够稳妥
+      // （F3 这种用 marker tag 的场景不会误命中）。
+      const stringV =
+        typeof v === "string" ? v :
+        v === undefined || v === null ? "" :
+        JSON.stringify(v);
+      if (s.match.predicate.op === "contains" && !stringV.includes(s.match.predicate.value)) continue;
+      if (s.match.predicate.op === "equals" && stringV !== s.match.predicate.value) continue;
     }
     return s;
   }

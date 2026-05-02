@@ -78,6 +78,8 @@ async function applyHomeFixture(files: Record<string, string>): Promise<string[]
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, content, "utf8");
     written.push(abs);
+    // eslint-disable-next-line no-console
+    console.log(`[client-agent] homeFixture wrote ${abs} (${content.length} bytes)`);
   }
   return written;
 }
@@ -143,6 +145,22 @@ async function runClient(req: RunRequest): Promise<RunResponse> {
     ? await applyHomeFixtureBulk(req.homeFixtureBulk)
     : null;
   const deviceId = await readDeviceId();
+
+  // 诊断：spawn 前列出 ~/.claude 内容
+  if (req.homeFixture || req.homeFixtureBulk) {
+    try {
+      const { readdir } = await import("node:fs/promises");
+      const claudeDir = path.join(HOME_DIR, ".claude");
+      const entries = await readdir(claudeDir, { withFileTypes: true });
+      // eslint-disable-next-line no-console
+      console.log(
+        `[client-agent] pre-spawn ${claudeDir} contains: ${entries.map((e) => e.name + (e.isDirectory() ? "/" : "")).join(", ") || "(empty)"}`,
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.log(`[client-agent] pre-spawn readdir failed: ${err}`);
+    }
+  }
 
   return await new Promise<RunResponse>((resolve, reject) => {
     const child = spawn("node", args, {
