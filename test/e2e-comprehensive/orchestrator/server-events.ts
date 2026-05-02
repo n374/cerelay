@@ -380,17 +380,15 @@ export const fileProxyEvents = {
     relPath: string;
     op?: string;
     sessionId?: string;
-    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyClientMissDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
     return events
       .filter((e) => e.kind === "file-proxy.client.miss")
       .filter((e) => {
-        const d = e.detail as Partial<FileProxyClientMissDetail & { clientCwd?: string }> | undefined;
+        const d = e.detail as Partial<FileProxyClientMissDetail> | undefined;
         if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
         if (opts.op !== undefined && d?.op !== opts.op) return false;
-        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
         return true;
       }) as Array<AdminEvent & { detail: FileProxyClientMissDetail }>;
   },
