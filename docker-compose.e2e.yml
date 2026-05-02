@@ -33,6 +33,9 @@ services:
       - CERELAY_ADMIN_TOKEN=cerelay_e2e-admin-token
       - CERELAY_DATA_DIR=/var/lib/cerelay
       - LOG_LEVEL=debug
+      # CC CLI e2e 必要 env：跳过模型验证向 Anthropic 真实 API 的非必要流量
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+      - IS_SANDBOX=1
     tmpfs:
       - /var/lib/cerelay:exec,size=512M
       - /opt/cerelay-runtime:exec,size=512M

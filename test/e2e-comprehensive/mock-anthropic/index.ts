@@ -124,32 +124,40 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function streamScript(res: ServerResponse, script: ScriptDef): void {
+function streamScript(res: ServerResponse, script: ScriptDef, requestedModel?: string): void {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     "connection": "keep-alive",
   });
   // 简化：每个 event 输出 `event: <type>\ndata: <json>\n\n`
+  // 如果请求了特定模型，将 message_start 中的 model 字段替换为请求的模型名，
+  // 否则 CC 会校验模型名不匹配而退出 1。
   for (const ev of script.respond.events) {
+    let out: Record<string, unknown> = { ...ev };
+    if (ev.kind === "message_start" && requestedModel && ev.message) {
+      const msg = ev.message as Record<string, unknown>;
+      out = { ...ev, message: { ...msg, model: requestedModel } };
+    }
     res.write(`event: ${ev.kind}\n`);
-    res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    res.write(`data: ${JSON.stringify(out)}\n\n`);
   }
   res.end();
 }
 
-function streamFallbackText(res: ServerResponse, text: string): void {
+function streamFallbackText(res: ServerResponse, text: string, requestedModel?: string): void {
   // 没匹配到剧本时的兜底：返回一段普通文本
   const id = `msg_${randomUUID()}`;
+  const model = requestedModel ?? "claude-mock";
   const events: ScriptStreamEvent[] = [
-    { kind: "message_start", message: { id, role: "assistant", model: "claude-mock", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } },
+    { kind: "message_start", message: { id, role: "assistant", model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } },
     { kind: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
     { kind: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
     { kind: "content_block_stop", index: 0 },
     { kind: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
     { kind: "message_stop" },
   ];
-  streamScript(res, { name: "<fallback>", match: {}, respond: { type: "stream", events } });
+  streamScript(res, { name: "<fallback>", match: {}, respond: { type: "stream", events } }, requestedModel);
 }
 
 const server = createServer(async (req, res) => {
@@ -167,7 +175,7 @@ const server = createServer(async (req, res) => {
     if (url === "/admin/captured" && req.method === "GET") {
       return sendJson(res, 200, captured);
     }
-    if (url === "/v1/messages" && req.method === "POST") {
+    if (url.startsWith("/v1/messages") && (url === "/v1/messages" || url.startsWith("/v1/messages?")) && req.method === "POST") {
       counter += 1;
       const raw = await readBody(req);
       const body = JSON.parse(raw);
@@ -189,10 +197,11 @@ const server = createServer(async (req, res) => {
       const script = pickScript(cap);
       cap.matchedScript = script?.name ?? null;
       captured.push(cap);
+      const requestedModel = typeof body.model === "string" ? body.model : undefined;
       if (script) {
-        streamScript(res, script);
+        streamScript(res, script, requestedModel);
       } else {
-        streamFallbackText(res, "[mock fallback] no script matched");
+        streamFallbackText(res, "[mock fallback] no script matched", requestedModel);
       }
       return;
     }
