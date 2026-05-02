@@ -24,6 +24,7 @@ import type { AccessLedgerRuntime } from "./access-ledger.js";
 import { SessionAccessBuffer, type AccessEvent } from "./access-event-buffer.js";
 import { DaemonControlClient } from "./daemon-control.js";
 import { SEED_WHITELIST } from "./seed-whitelist.js";
+import { computeAncestorChain, pathStartsWithRoot } from "./path-utils.js";
 
 const log = createLogger("file-proxy-manager");
 
@@ -228,6 +229,10 @@ export class FileProxyManager {
       "home-claude-json": path.join(this.clientHomeDir, ".claude.json"),
       "project-claude": path.join(this.clientCwd, ".claude"),
     };
+    const ancestorChain = computeAncestorChain(this.clientCwd, this.clientHomeDir);
+    for (let i = 0; i < ancestorChain.length; i += 1) {
+      this.roots[`cwd-ancestor-${i}`] = ancestorChain[i];
+    }
   }
 
   /** 判断是否启用了 cache 读优先路径。二者同时存在才算启用。 */
@@ -499,9 +504,7 @@ export class FileProxyManager {
   ): string | null {
     const candidate = ancestor && ancestor.length > 0 ? ancestor : fallbackPath;
     const sessionRoots = Object.values(this.roots);
-    const inRoots = sessionRoots.some(
-      (root) => candidate === root || candidate.startsWith(root + "/"),
-    );
+    const inRoots = sessionRoots.some((root) => pathStartsWithRoot(candidate, root));
     if (!inRoots) {
       log.warn("shallowestMissingAncestor 越界 root, 降级丢弃", {
         sessionId: this.sessionId,
@@ -808,7 +811,7 @@ export class FileProxyManager {
     const shouldUseCacheSnapshot = this.shouldUseCacheSnapshot();
 
     if (shouldUseCacheSnapshot) {
-      const manifest = await this.cacheStore!.loadManifest(this.deviceId!, this.clientCwd);
+      const manifest = await this.cacheStore!.loadManifest(this.deviceId!);
       const built = this.buildSnapshotFromManifest(manifest);
       cachedEntries.push(...built);
       cachedEntryCount = built.length;
@@ -820,6 +823,9 @@ export class FileProxyManager {
     }
 
     for (const [rootName, clientPath] of Object.entries(this.roots)) {
+      if (isAncestorRootName(rootName)) {
+        continue;
+      }
       if (cacheCoveredRoots.has(rootName) && shouldUseCacheSnapshot) {
         continue;
       }
@@ -908,9 +914,7 @@ export class FileProxyManager {
         const allMissing = await this.accessLedgerStore.loadMissingForDevice(this.deviceId);
         const sessionRoots = Object.values(this.roots);
         for (const missingPath of allMissing) {
-          const inRoots = sessionRoots.some(
-            (root) => missingPath === root || missingPath.startsWith(root + "/"),
-          );
+          const inRoots = sessionRoots.some((root) => pathStartsWithRoot(missingPath, root));
           if (inRoots && !negativesSeen.has(missingPath)) {
             snapshot.negatives.push(missingPath);
             negativesSeen.add(missingPath);
@@ -957,9 +961,7 @@ export class FileProxyManager {
         const sessionRoots = Object.values(this.roots);
         const statsSeen = new Set(Object.keys(snapshot.stats));
         for (const dirPath of allDirs) {
-          const inRoots = sessionRoots.some(
-            (root) => dirPath === root || dirPath.startsWith(root + "/"),
-          );
+          const inRoots = sessionRoots.some((root) => pathStartsWithRoot(dirPath, root));
           if (!inRoots) continue;
           if (statsSeen.has(dirPath)) continue;
           // 合成 dir stat (跟 buildSnapshotFromManifest 派生父 dir 时用同一 makeDirStat)
@@ -1065,6 +1067,18 @@ export class FileProxyManager {
       }
     }
 
+    const ancestorEntries = manifest.scopes["cwd-ancestor-md"]?.entries ?? {};
+    const sessionAncestorFiles = new Set(
+      computeAncestorChain(this.clientCwd, this.clientHomeDir).flatMap((dir) => [
+        path.join(dir, "CLAUDE.md"),
+        path.join(dir, "CLAUDE.local.md"),
+      ]),
+    );
+    for (const [absPath, entry] of Object.entries(ancestorEntries)) {
+      if (!sessionAncestorFiles.has(absPath)) continue;
+      entries.push(this.cacheEntryToSnapshot(absPath, entry, "cwd-ancestor-md", absPath));
+    }
+
     return entries;
   }
 
@@ -1076,7 +1090,7 @@ export class FileProxyManager {
   ): FileProxySnapshotEntry {
     let data: string | undefined;
     if (!entry.skipped && entry.sha256 && this.cacheAvailable()) {
-      const buf = this.cacheStore!.readBlobSync(this.deviceId!, this.clientCwd, entry.sha256);
+      const buf = this.cacheStore!.readBlobSync(this.deviceId!, entry.sha256);
       if (buf) {
         // 出口 #1：~/.claude/settings.json 灌进 Python 启动 snapshot 缓存前 redact 登录态字段。
         // size-preserving padding 保证 stat.size（取自 entry.size）与实际 data 一致。
@@ -1114,7 +1128,9 @@ export class FileProxyManager {
       return { served: false, reason: state.phase ? `phase_${state.phase}` : "task_state_missing" };
     }
 
-    const cacheRelPath = toCacheRelPath(scope, req.relPath);
+    const cacheRelPath = scope === "cwd-ancestor-md"
+      ? path.join(this.roots[req.root], req.relPath)
+      : toCacheRelPath(scope, req.relPath);
     if (
       this.cacheTaskManager &&
       this.cacheTaskManager.shouldBypassCacheRead(
@@ -1128,7 +1144,6 @@ export class FileProxyManager {
     }
     const entry = await this.cacheStore.lookupEntry(
       this.deviceId,
-      this.clientCwd,
       scope,
       cacheRelPath,
     );
@@ -1136,7 +1151,7 @@ export class FileProxyManager {
     if (entry.skipped) return { served: false, reason: "entry_skipped" };
     if (!entry.sha256) return { served: false, reason: "entry_no_sha256" };
 
-    let buf = this.cacheStore.readBlobSync(this.deviceId, this.clientCwd, entry.sha256);
+    let buf = this.cacheStore.readBlobSync(this.deviceId, entry.sha256);
     if (!buf) return { served: false, reason: "blob_missing" };
 
     // 出口 #2：~/.claude/settings.json 命中 cache 后、切片前 redact 登录态字段。
@@ -1167,13 +1182,17 @@ export class FileProxyManager {
 
     for (const other of allDirs) {
       if (other === dir) continue;
-      if (!other.startsWith(prefix)) continue;
-      const remainder = other.slice(prefix.length);
+      const remainder = dir
+        ? pathStartsWithRoot(other, dir) ? other.slice(prefix.length) : ""
+        : other;
+      if (!remainder) continue;
       if (remainder && !remainder.includes("/")) children.add(remainder);
     }
     for (const filePath of filePaths) {
-      if (!filePath.startsWith(prefix)) continue;
-      const remainder = filePath.slice(prefix.length);
+      const remainder = dir
+        ? pathStartsWithRoot(filePath, dir) ? filePath.slice(prefix.length) : ""
+        : filePath;
+      if (!remainder) continue;
       if (remainder && !remainder.includes("/")) children.add(remainder);
     }
     return children;
@@ -1499,7 +1518,11 @@ export class FileProxyManager {
     // 就无法判断哪些字节属于登录态字段。专用分支：拉全文 → redact → 本地切片。
     {
       const scope = rootToCacheScope(root);
-      const cacheRelPath = scope ? toCacheRelPath(scope, relPath) : "";
+      const cacheRelPath = scope
+        ? scope === "cwd-ancestor-md"
+          ? path.join(this.roots[root] ?? clientRoot, relPath)
+          : toCacheRelPath(scope, relPath)
+        : "";
       if (
         req.op === "read" &&
         scope !== null &&
@@ -1743,7 +1766,6 @@ export class FileProxyManager {
     try {
       const entry = await this.cacheStore.lookupEntry(
         this.deviceId,
-        this.clientCwd,
         "claude-home",
         "settings.json",
       );
@@ -1810,7 +1832,10 @@ export class FileProxyManager {
       if (!scope) {
         return;
       }
-      const cachePath = toCacheRelPath(scope, relPath);
+      const rootPath = this.roots[root ?? ""];
+      const cachePath = scope === "cwd-ancestor-md" && rootPath
+        ? path.join(rootPath, relPath)
+        : toCacheRelPath(scope, relPath);
       const key = `${scope}\0${cachePath}`;
       if (dedup.has(key)) {
         return;
@@ -1851,7 +1876,12 @@ function sleep(ms: number): Promise<void> {
 function rootToCacheScope(root: string): CacheScope | null {
   if (root === "home-claude") return "claude-home";
   if (root === "home-claude-json") return "claude-json";
+  if (isAncestorRootName(root)) return "cwd-ancestor-md";
   return null;
+}
+
+function isAncestorRootName(root: string): boolean {
+  return /^cwd-ancestor-\d+$/.test(root);
 }
 
 /**

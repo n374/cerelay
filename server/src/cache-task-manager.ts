@@ -629,6 +629,10 @@ export class CacheTaskManager {
         scopes: {
           "claude-home": { ...manifest.scopes["claude-home"], entries: { ...manifest.scopes["claude-home"].entries } },
           "claude-json": { ...manifest.scopes["claude-json"], entries: { ...manifest.scopes["claude-json"].entries } },
+          "cwd-ancestor-md": {
+            ...manifest.scopes["cwd-ancestor-md"],
+            entries: { ...manifest.scopes["cwd-ancestor-md"].entries },
+          },
         },
       },
       syncPlan,

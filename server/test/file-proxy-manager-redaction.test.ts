@@ -67,22 +67,29 @@ class MockCacheStore {
     this.manifestEntries.set(`${scope}:${relPath}`, entry);
   }
 
-  readBlobSync(_deviceId: string, _cwd: string, sha: string): Buffer | null {
+  readBlobSync(_deviceId: string, sha: string): Buffer | null {
     return this.blobs.get(sha) ?? null;
   }
 
   async lookupEntry(
     _deviceId: string,
-    _cwd: string,
     scope: string,
     relPath: string,
   ): Promise<CacheEntry | null> {
     return this.manifestEntries.get(`${scope}:${relPath}`) ?? null;
   }
 
-  async loadManifest(_deviceId: string, _cwd: string): Promise<unknown> {
+  async loadManifest(_deviceId: string): Promise<unknown> {
     // 用于 buildSnapshotFromManifest，但测试直接喂 manifest 进去
-    return { version: 2, revision: 1, scopes: { "claude-home": { entries: {} }, "claude-json": { entries: {} } } };
+    return {
+      version: 3,
+      revision: 1,
+      scopes: {
+        "claude-home": { entries: {} },
+        "claude-json": { entries: {} },
+        "cwd-ancestor-md": { entries: {} },
+      },
+    };
   }
 }
 

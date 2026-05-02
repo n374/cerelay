@@ -20,6 +20,7 @@ import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import type {
   CacheTaskDelta,
+  CacheTaskAncestorDelta,
   CacheTaskFault,
   CacheTaskHeartbeat,
   CacheTaskSyncComplete,
@@ -660,6 +661,9 @@ export class CerelayServer {
         case "cache_task_delta":
           await this.handleCacheTaskDelta(clientId, JSON.parse(raw) as CacheTaskDelta);
           return;
+        case "cache_task_ancestor_delta":
+          await this.handleCacheTaskAncestorDelta(JSON.parse(raw) as CacheTaskAncestorDelta);
+          return;
         case "cache_task_sync_complete":
           await this.handleCacheTaskSyncComplete(
             clientId,
@@ -958,6 +962,10 @@ export class CerelayServer {
 
   private async handleCacheTaskDelta(clientId: string, message: CacheTaskDelta): Promise<void> {
     await this.cacheTaskManager.applyDelta(clientId, message);
+  }
+
+  private async handleCacheTaskAncestorDelta(message: CacheTaskAncestorDelta): Promise<void> {
+    await this.cacheTaskManager.applyAncestorDelta(message);
   }
 
   private async handleCacheTaskSyncComplete(
