@@ -1,5 +1,7 @@
 const BASE = process.env.SERVER_ADMIN_URL || "http://server:8765";
-const TOKEN = process.env.SERVER_ADMIN_TOKEN || "e2e-admin-token";
+// Note: TokenStore.createFixed enforces a "cerelay_" prefix; default value
+// kept consistent with that convention for any standalone-orchestrator dev usage.
+const TOKEN = process.env.SERVER_ADMIN_TOKEN || "cerelay_e2e-admin-token";
 
 export interface AdminEvent {
   id: number;
