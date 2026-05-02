@@ -18,7 +18,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mockAdmin, scriptToolUse, scriptText } from "./mock-admin.js";
 import { clients } from "./clients.js";
-import { cacheAdmin } from "./server-events.js";
+import {
+  cacheAdmin,
+  fileProxyEvents,
+  ptyEvents,
+  serverEvents,
+  serverExec,
+  serverDataDir,
+} from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
 
 function clientCwd(caseId: string): string {
@@ -215,4 +222,323 @@ test("C4-large-skipped(skipped 半段): > 1MB 文件被 manifest 标记 skipped"
   );
 
   await cleanupFixture(caseId);
+});
+
+// ============================================================
+// P1-B 测试 PR 1：B5 / B6 / D4 / E2
+//
+// 共同模式（INF-3 + INF-11）：
+//   1. mock 准备最简单的 turn 1 final（让 CC 启动后立刻 end_turn）
+//   2. clients.runAsync 起 child（不等 exit）
+//   3. ptyEvents.waitForSpawnReady 拿 server-side sessionId
+//      （注意 spawn.ready 的 event.sessionId 字段就是 PtySession.id，与
+//        clients.runAsync 返回的 agent traceId 不是一回事）
+//   4. serverExec.run(sessionId, …) 在 namespace 内 spawn /bin/sh 探针
+//      触发目标 FUSE op（cerelay Plan D 后这是 namespace 内 honest 触发的唯一入口）
+//   5. 等 / 找对应的 admin event 做主断言
+//   6. clients.killRun + waitRun 收尾（避免 child 等 mock 后续 turn 卡住）
+// ============================================================
+
+const HOME_ABS = "/home/clientuser";
+
+async function killAndWait(label: string, runId: string): Promise<void> {
+  try { await clients.killRun(label, runId); } catch { /* ignore */ }
+  try { await clients.waitRun(label, runId, 15_000); } catch { /* ignore */ }
+}
+
+// ============================================================
+// B5-negative-cache：
+//   守护：第一次 read 不存在文件 miss 后被 daemon NegativeCache 记住，
+//   第二次同 path 不再发 send_request 回 server (零 client.requested)。
+//   honest 触发：namespace 内连续 cat 同一不存在 path 两次。
+// ============================================================
+test("B5-negative-cache: 第二次 read 同 path 被 daemon negative_perm 拦在 server 之外", async () => {
+  const caseId = "case-b5";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const missingRel = "no-such-b5-7c2f4d.txt";
+  const missingAbs = `${HOME_ABS}/.claude/${missingRel}`;
+
+  await mockAdmin.loadScript({
+    name: "p1-b5-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("b5 negative cache ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  const { runId } = await clients.runAsync("client-a", {
+    prompt: "trigger CC start [B5-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+  });
+
+  try {
+    const spawnEvt = await ptyEvents.waitForSpawnReady({
+      expectedCwd: cwd,
+      since: baseline,
+      timeoutMs: 30_000,
+    });
+    const sessionId = spawnEvt.sessionId!;
+
+    // 第一次 cat：触发 namespace 内 FUSE getattr (file-proxy.client.requested
+    // + 后续 client.miss for ENOENT)。`|| true` 让 sh exit 0 不影响断言路径。
+    const first = await serverExec.run(sessionId, {
+      command: "/bin/sh",
+      args: ["-c", `cat ${missingAbs} 2>/dev/null || true; echo done-first`],
+      timeoutMs: 10_000,
+    });
+    assert.equal(first.exitCode, 0, `first cat sh failed: ${first.stderr}`);
+
+    // 等 events 落地 + daemon NegativeCache 写入
+    await new Promise((r) => setTimeout(r, 500));
+
+    // 切片基线 = 第一次 exec 之后,只看第二次产生的 events
+    const midline = (await serverEvents.fetch({})).at(-1)?.id ?? baseline;
+
+    const second = await serverExec.run(sessionId, {
+      command: "/bin/sh",
+      args: ["-c", `cat ${missingAbs} 2>/dev/null || true; echo done-second`],
+      timeoutMs: 10_000,
+    });
+    assert.equal(second.exitCode, 0, `second cat sh failed: ${second.stderr}`);
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    // 主断言 #1: 第一次到第二次 baseline 之间, root=home-claude+relPath 该 file
+    // 必须有至少一条 client.miss(证明 server 端真触达 client → 学到 negative)
+    const firstMiss = await fileProxyEvents.findClientMiss({
+      root: "home-claude",
+      relPath: missingRel,
+      since: baseline,
+    });
+    assert.ok(
+      firstMiss.length >= 1,
+      `expected at least 1 client.miss for ${missingRel} after first cat, got ${firstMiss.length}`,
+    );
+
+    // 主断言 #2: 第二次 cat (在 midline 之后) 期间,**0** 条 client.requested
+    // for 同 (root, relPath)。daemon 已拦在 _negative_perm,根本没进 server。
+    const secondReq = await fileProxyEvents.findClientRequested({
+      root: "home-claude",
+      relPath: missingRel,
+      since: midline,
+    });
+    assert.equal(
+      secondReq.length,
+      0,
+      `negative cache regression: expected 0 client.requested for ${missingRel} on second cat, got ${secondReq.length}`,
+    );
+  } finally {
+    await killAndWait("client-a", runId);
+    await cleanupFixture(caseId);
+  }
+});
+
+// ============================================================
+// B6-settings-local-shadow：
+//   守护：项目 .claude/settings.local.json 由 server hook injection 写到
+//   runtimeRoot,FUSE shadow 注入到 namespace,daemon 内本地直读
+//   (绕开所有 send_request 出口)。INF-2 sideband emit 是 honest 观测点。
+//   honest 触发：namespace 内 cat $cwd/.claude/settings.local.json。
+// ============================================================
+test("B6-settings-local-shadow: namespace 内 cat 触发 daemon shadow read (file-proxy.shadow.served)", async () => {
+  const caseId = "case-b6";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+
+  await mockAdmin.loadScript({
+    name: "p1-b6-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("b6 shadow read ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  const { runId } = await clients.runAsync("client-a", {
+    prompt: "trigger CC start [B6-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+  });
+
+  try {
+    const spawnEvt = await ptyEvents.waitForSpawnReady({
+      expectedCwd: cwd,
+      since: baseline,
+      timeoutMs: 30_000,
+    });
+    const sessionId = spawnEvt.sessionId!;
+
+    // probe 内 cat $cwd/.claude/settings.local.json (server hook injection
+    // 自动写到 runtimeRoot,FUSE shadow 注入到 namespace 内 $cwd/.claude/)
+    const result = await serverExec.run(sessionId, {
+      command: "/bin/sh",
+      args: ["-c", `cat ${cwd}/.claude/settings.local.json`],
+      timeoutMs: 10_000,
+    });
+    assert.equal(result.exitCode, 0, `cat shadow file failed: ${result.stderr}`);
+    // server hook injection 写的 settings.local.json 是 JSON 配置(含 hooks 段)
+    assert.ok(result.stdout.length > 0, "settings.local.json should not be empty");
+    assert.ok(
+      result.stdout.includes("{") || result.stdout.includes("hooks"),
+      `settings.local.json should look like JSON config, got: ${result.stdout.slice(0, 200)}`,
+    );
+
+    // 主断言: file-proxy.shadow.served emit (root=project-claude, relPath=settings.local.json)
+    await fileProxyEvents.waitForShadowServed({
+      root: "project-claude",
+      relPath: "settings.local.json",
+      since: baseline,
+      timeoutMs: 5_000,
+    });
+  } finally {
+    await killAndWait("client-a", runId);
+    await cleanupFixture(caseId);
+  }
+});
+
+// ============================================================
+// D4-credentials-shadow：
+//   守护：server 侧 ${CERELAY_DATA_DIR}/credentials/default/.credentials.json
+//   通过 FUSE shadow 暴露给 namespace 内 ~/.claude/.credentials.json,即使源
+//   不存在 mapping 也总是注入(CC login 流程才会创建源)。INF-5 PUT 预置 + INF-11
+//   probe 触发 + INF-2 shadow.served event 主断言。
+// ============================================================
+test("D4-credentials-shadow: server dataDir credentials 经 FUSE shadow 暴露给 namespace", async () => {
+  const caseId = "case-d4";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const marker = "D4-CREDENTIAL-MARKER-9b3a7e";
+  const credContent = JSON.stringify({ e2e_marker: marker, claudeAiOauth: { type: "oauth" } });
+
+  // pre: 用 INF-5 把 marker 内容写到 server dataDir
+  await serverDataDir.putCredentials(credContent);
+
+  await mockAdmin.loadScript({
+    name: "p1-d4-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("d4 credentials shadow ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  const { runId } = await clients.runAsync("client-a", {
+    prompt: "trigger CC start [D4-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+  });
+
+  try {
+    const spawnEvt = await ptyEvents.waitForSpawnReady({
+      expectedCwd: cwd,
+      since: baseline,
+      timeoutMs: 30_000,
+    });
+    const sessionId = spawnEvt.sessionId!;
+
+    // probe 内 cat ~/.claude/.credentials.json (FUSE shadow 触发 daemon 本地读
+    // server dataDir 的 credentials 文件)
+    const result = await serverExec.run(sessionId, {
+      command: "/bin/sh",
+      args: ["-c", `cat ${HOME_ABS}/.claude/.credentials.json`],
+      timeoutMs: 10_000,
+    });
+    assert.equal(result.exitCode, 0, `cat credentials shadow failed: ${result.stderr}`);
+    // marker 应当原样从 server dataDir 流到 namespace
+    assert.ok(
+      result.stdout.includes(marker),
+      `credentials content should contain marker, got: ${result.stdout.slice(0, 200)}`,
+    );
+
+    // 主断言: shadow.served emit (root=home-claude, relPath=.credentials.json)
+    const evt = await fileProxyEvents.waitForShadowServed({
+      root: "home-claude",
+      relPath: ".credentials.json",
+      since: baseline,
+      timeoutMs: 5_000,
+    });
+    assert.equal(evt.detail.op, "read", "shadow.served should be triggered by read op");
+    assert.ok(evt.detail.bytes > 0, "shadow read should return non-zero bytes");
+  } finally {
+    await killAndWait("client-a", runId);
+    await serverDataDir.deleteCredentials();
+    await cleanupFixture(caseId);
+  }
+});
+
+// ============================================================
+// E2-credentials-rw：
+//   守护：namespace 内对 ~/.claude/.credentials.json 写入 → 经 daemon FUSE
+//   shadow 重定向 → server 侧 dataDir 真实文件持久化。INF-11 probe 触发
+//   write + INF-6 write.served event 主断言 + INF-5 GET 验持久化。
+// ============================================================
+test("E2-credentials-rw: namespace 内 write credentials shadow 落到 server dataDir", async () => {
+  const caseId = "case-e2";
+  await writeFixture(caseId, { ".keep": "" });
+  const cwd = clientCwd(caseId);
+  const marker = "E2-WRITE-MARKER-4f8d2a";
+  const writePayload = JSON.stringify({ e2e_marker: marker, claudeAiOauth: { type: "oauth" } });
+
+  // pre: 用 INF-5 预置一个空 credentials(确保 shadow path 存在 + 后续 echo > 走 truncate+write)
+  await serverDataDir.putCredentials("{}");
+
+  await mockAdmin.loadScript({
+    name: "p1-e2-final",
+    match: { turnIndex: 1 },
+    respond: scriptText("e2 credentials write ok"),
+  });
+
+  const baseline = (await serverEvents.fetch({})).at(-1)?.id ?? 0;
+
+  const { runId } = await clients.runAsync("client-a", {
+    prompt: "trigger CC start [E2-MARKER]",
+    cwd,
+    timeoutMs: 60_000,
+  });
+
+  try {
+    const spawnEvt = await ptyEvents.waitForSpawnReady({
+      expectedCwd: cwd,
+      since: baseline,
+      timeoutMs: 30_000,
+    });
+    const sessionId = spawnEvt.sessionId!;
+
+    // probe 内 echo > .credentials.json:open(O_TRUNC|O_WRONLY) + write + close
+    // FUSE 路径: truncate(0) → write(payload) → 都走 daemon shadow 分支
+    // (不走 send_request 回 server)。INF-6 在 write op shadow 分支 emit
+    // file-proxy.write.served (shadow:true)。
+    //
+    // 注意单引号里的 marker 字符串避免 shell 转义问题。
+    const result = await serverExec.run(sessionId, {
+      command: "/bin/sh",
+      args: ["-c", `printf '%s' '${writePayload}' > ${HOME_ABS}/.claude/.credentials.json`],
+      timeoutMs: 10_000,
+    });
+    assert.equal(result.exitCode, 0, `write to shadow failed: ${result.stderr}`);
+
+    // 主断言 #1: file-proxy.write.served (root=home-claude, relPath=.credentials.json)
+    const evt = await fileProxyEvents.waitForWriteServed({
+      root: "home-claude",
+      relPath: ".credentials.json",
+      since: baseline,
+      timeoutMs: 5_000,
+    });
+    assert.equal(evt.detail.shadow, true, "credentials write must go through shadow path");
+    assert.ok(evt.detail.bytes > 0, "shadow write should report non-zero bytes");
+    assert.match(evt.detail.servedTo, /credentials\/default\/\.credentials\.json$/,
+      `servedTo should be server dataDir credentials path, got: ${evt.detail.servedTo}`);
+
+    // 主断言 #2: server 侧 dataDir 文件真持久化,内容含 marker
+    const persisted = await serverDataDir.getCredentials();
+    assert.equal(persisted.exists, true, "server dataDir credentials should exist after write");
+    assert.ok(
+      persisted.content?.includes(marker),
+      `server dataDir content should contain marker, got: ${persisted.content?.slice(0, 200)}`,
+    );
+  } finally {
+    await killAndWait("client-a", runId);
+    await serverDataDir.deleteCredentials();
+    await cleanupFixture(caseId);
+  }
 });
