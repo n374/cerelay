@@ -91,6 +91,16 @@ export interface FileProxyManagerOptions {
   cacheStore?: ClientCacheStore;
   /** Client 本机 deviceId，用于定位 cache session 目录 */
   deviceId?: string;
+  /**
+   * 可选 FileAgent 引用。Task 9 wiring：FileAgent 与 FileProxyManager **共享**
+   * 同一 ClientCacheStore，所以 FUSE 命中事实上等价于 FileAgent 视角的命中。
+   * 当前 FUSE IPC handler 不强制走 FileAgent.read（避免与现有 redaction / mutation
+   * 路径耦合，也避免破坏 e2e）；保留字段供后续完整 wiring（plan §9 列为渐进事项）。
+   *
+   * ConfigPreloader 持有同一 FileAgent，启动期 prefetch 通过 store 落入 manifest，
+   * 运行期 FUSE 读到的 cache 数据即是 ConfigPreloader 预热的产物。
+   */
+  fileAgent?: import("./file-agent/index.js").FileAgent;
   /** Cache task ready gate / mutation hint 协调器 */
   cacheTaskManager?: CacheTaskReadGate;
   /**
@@ -173,6 +183,12 @@ export class FileProxyManager {
   /** AccessLedger projection (启动期把 ledger.missing 注入 snapshot, 见 §7.4) */
   private readonly accessLedgerStore: AccessLedgerProjection | undefined;
   /**
+   * 可选 FileAgent 引用（Task 9 wiring）。FileAgent 与本 manager **共享**同一
+   * ClientCacheStore，所以 FUSE 命中事实上等价于 FileAgent 视角的命中。
+   * 当前不强制走 FileAgent.read（保留现有 redaction / mutation 路径行为）。
+   */
+  private readonly fileAgent: import("./file-agent/index.js").FileAgent | undefined;
+  /**
    * 当前 session 的访问事件 buffer (Phase 5.1). flush 由 file-proxy-manager 在
    * shutdown / 5s timer / sync_complete 时驱动 (Phase 5.3 集成).
    * Buffer 内 events 在 flush 时应用到 ledger; 但 daemon 实时增量推送在 RPC
@@ -220,6 +236,7 @@ export class FileProxyManager {
     this.deviceId = options.deviceId;
     this.cacheTaskManager = options.cacheTaskManager;
     this.accessLedgerStore = options.accessLedgerStore;
+    this.fileAgent = options.fileAgent;
     // Phase 6: capture mode 由 env 触发 (dev-only)
     this.captureSeedPath = process.env.CERELAY_CAPTURE_SEED;
 
