@@ -40,6 +40,7 @@ except ImportError:
 MOUNT_POINT = os.environ["CERELAY_FUSE_MOUNT_POINT"]
 CONTROL_FD = int(os.environ.get("CERELAY_FUSE_CONTROL_FD", "3"))
 ROOTS = json.loads(os.environ.get("CERELAY_FUSE_ROOTS", "{}"))
+ANCESTOR_ROOT_ALLOWED_FILES = frozenset(["CLAUDE.md", "CLAUDE.local.md"])
 READY_FILE = os.environ.get("CERELAY_FUSE_READY_FILE", "")
 # Shadow files: FUSE 内路径 → 本地真实文件路径（如 hook injection 的 settings.local.json）
 # 这些文件由 FUSE daemon 直接从本地读取，不代理到 Client
@@ -416,6 +417,9 @@ def resolve_hand_path(root_name, rel_path):
         return os.path.join(hand_root, rel_path)
     return hand_root
 
+def is_ancestor_root(root_name):
+    return root_name.startswith("cwd-ancestor-")
+
 def resolve_shadow_path(fuse_path):
     """返回 shadow file 对应的本地真实路径；非 shadow file 返回 None。"""
     return SHADOW_FILES.get(fuse_path.lstrip("/"))
@@ -530,6 +534,10 @@ class CerelayFuseOps(Operations):
         if root_name not in ROOTS:
             raise FuseOSError(errno.ENOENT)
 
+        if root_name.startswith("cwd-ancestor-") and rel_path:
+            if rel_path not in ANCESTOR_ROOT_ALLOWED_FILES:
+                raise FuseOSError(errno.ENOENT)
+
         # Shadow file: 本地文件优先（如 hook injection 的 settings.local.json）
         local_path = resolve_shadow_path(path)
         if local_path:
@@ -591,6 +599,11 @@ class CerelayFuseOps(Operations):
         # home-claude-json 是文件，不能 readdir
         if root_name == "home-claude-json":
             raise FuseOSError(errno.ENOTDIR)
+
+        if root_name.startswith("cwd-ancestor-"):
+            if rel_path:
+                raise FuseOSError(errno.ENOTDIR)
+            return [".", ".."] + list(ANCESTOR_ROOT_ALLOWED_FILES)
 
         hand_path = resolve_hand_path(root_name, rel_path)
         if not hand_path:

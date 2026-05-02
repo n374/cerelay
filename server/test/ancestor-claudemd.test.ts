@@ -4,6 +4,7 @@ import {
   buildMountNamespaceEnvForTest,
   renderNamespaceBootstrapScript,
 } from "../src/claude-session-runtime.js";
+import { PYTHON_FUSE_HOST_SCRIPT } from "../src/fuse-host-script.js";
 
 test("bootstrap script binds ancestor CLAUDE files from cwd-ancestor roots", () => {
   const script = renderNamespaceBootstrapScript();
@@ -39,4 +40,11 @@ test("mount namespace env uses empty ancestor dirs when cwd equals home", () => 
   });
 
   assert.equal(env.CERELAY_ANCESTOR_DIRS, "");
+});
+
+test("fuse host restricts cwd-ancestor roots to allowed Claude files", () => {
+  assert.match(PYTHON_FUSE_HOST_SCRIPT, /ANCESTOR_ROOT_ALLOWED_FILES/);
+  assert.match(PYTHON_FUSE_HOST_SCRIPT, /root_name\.startswith\("cwd-ancestor-"\)/);
+  assert.match(PYTHON_FUSE_HOST_SCRIPT, /rel_path not in ANCESTOR_ROOT_ALLOWED_FILES/);
+  assert.match(PYTHON_FUSE_HOST_SCRIPT, /return \["\.", "\.\."\] \+ list\(ANCESTOR_ROOT_ALLOWED_FILES\)/);
 });
