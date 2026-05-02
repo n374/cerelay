@@ -202,6 +202,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyReadServedDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
@@ -209,7 +210,9 @@ export const fileProxyEvents = {
       .filter((e) => e.kind === "file-proxy.read.served")
       .filter((e) => {
         const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
-        return d?.root === opts.root && d?.relPath === opts.relPath;
+        if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
+        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
+        return true;
       }) as Array<AdminEvent & { detail: FileProxyReadServedDetail }>;
   },
 
@@ -221,6 +224,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
     timeoutMs?: number;
   }): Promise<AdminEvent & { detail: FileProxyReadServedDetail }> {
@@ -251,6 +255,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyShadowServedDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
@@ -258,7 +263,9 @@ export const fileProxyEvents = {
       .filter((e) => e.kind === "file-proxy.shadow.served")
       .filter((e) => {
         const d = e.detail as Partial<FileProxyShadowServedDetail> | undefined;
-        return d?.root === opts.root && d?.relPath === opts.relPath;
+        if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
+        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
+        return true;
       }) as Array<AdminEvent & { detail: FileProxyShadowServedDetail }>;
   },
 
@@ -267,6 +274,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
     timeoutMs?: number;
   }): Promise<AdminEvent & { detail: FileProxyShadowServedDetail }> {
@@ -296,6 +304,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyWriteServedDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
@@ -303,7 +312,9 @@ export const fileProxyEvents = {
       .filter((e) => e.kind === "file-proxy.write.served")
       .filter((e) => {
         const d = e.detail as Partial<FileProxyWriteServedDetail> | undefined;
-        return d?.root === opts.root && d?.relPath === opts.relPath;
+        if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
+        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
+        return true;
       }) as Array<AdminEvent & { detail: FileProxyWriteServedDetail }>;
   },
 
@@ -312,6 +323,7 @@ export const fileProxyEvents = {
     root: string;
     relPath: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
     timeoutMs?: number;
   }): Promise<AdminEvent & { detail: FileProxyWriteServedDetail }> {
@@ -347,6 +359,7 @@ export const fileProxyEvents = {
     relPath: string;
     op?: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyClientRequestedDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
@@ -356,6 +369,7 @@ export const fileProxyEvents = {
         const d = e.detail as Partial<FileProxyClientRequestedDetail> | undefined;
         if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
         if (opts.op !== undefined && d?.op !== opts.op) return false;
+        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
         return true;
       }) as Array<AdminEvent & { detail: FileProxyClientRequestedDetail }>;
   },
@@ -366,17 +380,61 @@ export const fileProxyEvents = {
     relPath: string;
     op?: string;
     sessionId?: string;
+    clientCwd?: string;
     since?: number;
   }): Promise<Array<AdminEvent & { detail: FileProxyClientMissDetail }>> {
     const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
     return events
       .filter((e) => e.kind === "file-proxy.client.miss")
       .filter((e) => {
-        const d = e.detail as Partial<FileProxyClientMissDetail> | undefined;
+        const d = e.detail as Partial<FileProxyClientMissDetail & { clientCwd?: string }> | undefined;
         if (d?.root !== opts.root || d?.relPath !== opts.relPath) return false;
         if (opts.op !== undefined && d?.op !== opts.op) return false;
+        if (opts.clientCwd !== undefined && d?.clientCwd !== opts.clientCwd) return false;
         return true;
       }) as Array<AdminEvent & { detail: FileProxyClientMissDetail }>;
+  },
+
+  /**
+   * Negative-assert: 在 timeoutMs 内收集所有 sessionId === sessionId 且
+   * clientPath.startsWith(foreignCwd) 的 file-proxy.read.served event,
+   * 期望 count === 0。
+   *
+   * 重点: poll-and-collect 模式，不是 absence-of-log——
+   * 必须真等够 timeoutMs 收集完才能断言，而不是"没看到就跳过"。
+   */
+  async assertNoReadServedForCwd(opts: {
+    sessionId: string;
+    foreignCwd: string;
+    since: number;
+    timeoutMs?: number;  // 默认 500ms，所有 probe 完成后再调用
+  }): Promise<void> {
+    const timeoutMs = opts.timeoutMs ?? 500;
+    const deadline = Date.now() + timeoutMs;
+    const collected: AdminEvent[] = [];
+    while (Date.now() < deadline) {
+      const all = await serverEvents.fetch({ since: opts.since });
+      for (const e of all) {
+        if (e.kind !== "file-proxy.read.served") continue;
+        if (e.sessionId !== opts.sessionId) continue;
+        const clientPath = (e.detail as Record<string, unknown> | undefined)?.["clientPath"];
+        if (typeof clientPath !== "string") continue;
+        if (!clientPath.startsWith(opts.foreignCwd)) continue;
+        if (collected.find((c) => c.id === e.id)) continue;
+        collected.push(e);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (collected.length > 0) {
+      throw new Error(
+        `assertNoReadServedForCwd FAIL: 在 sessionId=${opts.sessionId} 检测到 ` +
+        `${collected.length} 条访问 foreignCwd=${opts.foreignCwd} 的 read.served:\n` +
+        collected.map((e) => {
+          const d = e.detail as Record<string, unknown> | undefined;
+          return `  - ${d?.["clientPath"]} (root=${d?.["root"]})`;
+        }).join("\n")
+      );
+    }
   },
 };
 
@@ -611,3 +669,187 @@ export const testToggles = {
     if (!r.ok) throw new Error(`server /admin/test-toggles reset → ${r.status}: ${await r.text()}`);
   },
 };
+
+/**
+ * F4 P2: ConfigPreloader 启动期预热计划事件 helper。
+ * 用于断言"预热只覆盖当前 session cwd，不泄露跨 session 路径"。
+ */
+export const configPreloaderEvents = {
+  async findPlan(opts: {
+    sessionId: string;
+    since: number;
+  }): Promise<(AdminEvent & { detail: ConfigPreloaderPlanDetail }) | null> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    const hit = events.find(
+      (e) => e.kind === "config-preloader.plan" && e.sessionId === opts.sessionId && e.id > opts.since
+    );
+    return (hit ?? null) as (AdminEvent & { detail: ConfigPreloaderPlanDetail }) | null;
+  },
+
+  async waitForPlan(opts: {
+    sessionId: string;
+    since: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: ConfigPreloaderPlanDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 5_000);
+    while (Date.now() < deadline) {
+      const hit = await this.findPlan(opts);
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(
+      `waitForPlan(config-preloader.plan, sessionId=${opts.sessionId}) timeout after ${opts.timeoutMs ?? 5_000}ms`
+    );
+  },
+};
+
+/**
+ * F4 P2: SessionBootstrap 启动计划事件 helper。
+ * 用于断言"每个 session 有独立的 runtimeRoot / mountPoint，彼此不共享"。
+ */
+export const sessionBootstrapEvents = {
+  async findPlan(opts: {
+    sessionId: string;
+    since: number;
+  }): Promise<(AdminEvent & { detail: SessionBootstrapPlanDetail }) | null> {
+    const events = await serverEvents.fetch({ sessionId: opts.sessionId, since: opts.since });
+    const hit = events.find(
+      (e) => e.kind === "session.bootstrap.plan" && e.sessionId === opts.sessionId && e.id > opts.since
+    );
+    return (hit ?? null) as (AdminEvent & { detail: SessionBootstrapPlanDetail }) | null;
+  },
+
+  async waitForPlan(opts: {
+    sessionId: string;
+    since: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: SessionBootstrapPlanDetail }> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 5_000);
+    while (Date.now() < deadline) {
+      const hit = await this.findPlan(opts);
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(
+      `waitForPlan(session.bootstrap.plan, sessionId=${opts.sessionId}) timeout after ${opts.timeoutMs ?? 5_000}ms`
+    );
+  },
+};
+
+/**
+ * F4 Cross-CWD 综合隔离断言。失败时 dump 完整 fileProxy + config-preloader +
+ * session.bootstrap probe 摘要，方便 reviewer 定位串台。
+ *
+ * 详细约束见 spec §5.3 与 §6 守护意图自查。
+ */
+export async function assertF4CrossCwdIsolation(opts: {
+  sessionA: { sessionId: string };
+  sessionB: { sessionId: string };
+  cwdA: string;
+  cwdB: string;
+  since: number;
+}): Promise<void> {
+  const errors: string[] = [];
+
+  // 拉全量事件（不按 sessionId 过滤，确保两个 session 的事件都在）
+  const allEvents = await serverEvents.fetch({ since: opts.since });
+
+  // (a)+(d): A 的 project-claude read.served 必须 clientCwd === cwdA
+  const aProjectReads = allEvents.filter((e) =>
+    e.kind === "file-proxy.read.served" &&
+    e.sessionId === opts.sessionA.sessionId &&
+    (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.root === "project-claude"
+  );
+  for (const e of aProjectReads) {
+    const clientCwd = (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.clientCwd;
+    if (clientCwd !== opts.cwdA) {
+      errors.push(
+        `(a/d) sessionA project-claude read.served clientCwd 错位: 期望 ${opts.cwdA}，实际 ${clientCwd}`
+      );
+    }
+  }
+
+  // (a)+(d): B 的 project-claude read.served 必须 clientCwd === cwdB
+  const bProjectReads = allEvents.filter((e) =>
+    e.kind === "file-proxy.read.served" &&
+    e.sessionId === opts.sessionB.sessionId &&
+    (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.root === "project-claude"
+  );
+  for (const e of bProjectReads) {
+    const clientCwd = (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.clientCwd;
+    if (clientCwd !== opts.cwdB) {
+      errors.push(
+        `(a/d) sessionB project-claude read.served clientCwd 错位: 期望 ${opts.cwdB}，实际 ${clientCwd}`
+      );
+    }
+  }
+
+  // (c): config-preloader.plan ancestorDirs / prefetchAbsPaths 不串台
+  const planA = await configPreloaderEvents.findPlan({
+    sessionId: opts.sessionA.sessionId,
+    since: opts.since,
+  });
+  if (!planA) {
+    errors.push(`(c) sessionA config-preloader.plan event 缺失`);
+  } else {
+    const ancestorsA = planA.detail.ancestorDirs;
+    const prefetchA = planA.detail.prefetchAbsPaths;
+    const ancestorLeak = ancestorsA.filter((p) => p.startsWith(opts.cwdB));
+    if (ancestorLeak.length > 0) {
+      errors.push(`(c) sessionA ancestorDirs 串到 cwdB 子树: ${ancestorLeak.join(", ")}`);
+    }
+    const prefetchLeak = prefetchA.filter((p) => p.startsWith(opts.cwdB));
+    if (prefetchLeak.length > 0) {
+      errors.push(`(c) sessionA prefetchAbsPaths 串到 cwdB 子树: ${prefetchLeak.join(", ")}`);
+    }
+  }
+
+  // (c): 对称检查 B
+  const planB = await configPreloaderEvents.findPlan({
+    sessionId: opts.sessionB.sessionId,
+    since: opts.since,
+  });
+  if (!planB) {
+    errors.push(`(c) sessionB config-preloader.plan event 缺失`);
+  } else {
+    const ancestorsB = planB.detail.ancestorDirs;
+    const prefetchB = planB.detail.prefetchAbsPaths;
+    const ancestorLeak = ancestorsB.filter((p) => p.startsWith(opts.cwdA));
+    if (ancestorLeak.length > 0) {
+      errors.push(`(c) sessionB ancestorDirs 串到 cwdA 子树: ${ancestorLeak.join(", ")}`);
+    }
+    const prefetchLeak = prefetchB.filter((p) => p.startsWith(opts.cwdA));
+    if (prefetchLeak.length > 0) {
+      errors.push(`(c) sessionB prefetchAbsPaths 串到 cwdA 子树: ${prefetchLeak.join(", ")}`);
+    }
+  }
+
+  // (d): session.bootstrap.plan projectClaudeBindTarget 严格按 cwd
+  const bootA = await sessionBootstrapEvents.findPlan({
+    sessionId: opts.sessionA.sessionId,
+    since: opts.since,
+  });
+  if (!bootA) {
+    errors.push(`(d) sessionA session.bootstrap.plan event 缺失`);
+  } else if (bootA.detail.projectClaudeBindTarget !== `${opts.cwdA}/.claude`) {
+    errors.push(
+      `(d) sessionA projectClaudeBindTarget 错位: 期望 ${opts.cwdA}/.claude，实际 ${bootA.detail.projectClaudeBindTarget}`
+    );
+  }
+
+  const bootB = await sessionBootstrapEvents.findPlan({
+    sessionId: opts.sessionB.sessionId,
+    since: opts.since,
+  });
+  if (!bootB) {
+    errors.push(`(d) sessionB session.bootstrap.plan event 缺失`);
+  } else if (bootB.detail.projectClaudeBindTarget !== `${opts.cwdB}/.claude`) {
+    errors.push(
+      `(d) sessionB projectClaudeBindTarget 错位: 期望 ${opts.cwdB}/.claude，实际 ${bootB.detail.projectClaudeBindTarget}`
+    );
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`assertF4CrossCwdIsolation FAIL:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+  }
+}
