@@ -757,17 +757,23 @@ E2E 覆盖：
 | FileAgent 写操作（write/unlink/mkdir 接口）| 本期写仍由 file-proxy-manager 走原穿透路径；写后调 FileAgent.invalidate(path) 即可 |
 | daemon snapshot 注入逻辑改造 | 暂保留现状（FuseHost 启动期向 FileAgent 取 snapshot dump）；新架构不阻碍后续优化 |
 
-### 9.1 落地后明确"未完整闭环"事项 / Explicit Wiring Gaps（Codex review 2026-05-02 反馈）
+### 9.1 wiring 闭环 / Wiring Closure（Codex review 反馈 + 后续 follow-up 一并完成）
 
-虽然代码完成度高，但生产链路上以下三处尚未把 FileAgent 接成"唯一文件代理底座"。当前每处都是**安全降级**（不破坏现有功能），但要让 plan §2 P9 / P10 真正生效，需要后续 follow-up：
+> **Status: 三处全部接通（commits bbeb651 + 46ff2e0 + wiring-integration.test.ts，2026-05-02）**
 
-1. **生产 FileAgent 没接 fetcher（Task 5 路径 A 在生产不可用）**：`server.ts: getOrCreateFileAgent` 创建 FileAgent 时只传 store，没传 fetcher。冷缓存场景下 ConfigPreloader prefetch 调 fileAgent miss 时会抛 "no fetcher"——被外层 `try/catch` log warn 后降级，session 仍能启动。**要让 P9 路径 A 生效**：需要把 cache-task-manager 包装成 `ClientFetchDispatcher` 接到 SyncCoordinator。
+| # | 接通方式 | 生产路径 |
+|---|---|---|
+| **#1 FileAgent fetcher 接通** | `CacheTaskClientDispatcher`（`file-agent/cache-task-dispatcher.ts`）实现 `ClientFetchDispatcher` 接口；`server.ts: getOrCreateFileAgent` 装配 ScopeAdapter + InflightMap + Dispatcher → SyncCoordinator → FileAgent。当前 dispatcher 实现策略是"被动 lookup"：查 store manifest（active client 之前推过的能命中），miss 返 null。**未来扩展**（仍属 plan §9 Out of Scope）：dispatchSinglePathFetch 替换为派发单 path SyncPlan 主动 fetch。 | FileAgent.read miss → SyncCoordinator.fetchFile → dispatcher.dispatchSinglePathFetch → 命中返 change / miss 返 null（不抛 unavailable） |
+| **#2 FUSE IPC 命中通知 FileAgent** | `FileAgent.bumpTtlForExternalHit(absPath, ttlMs)` 公开方法（非法 ttlMs / 不在 scope 内静默忽略）。`file-proxy-manager.ts: tryServeReadFromCache` 命中分支调 `fileAgent?.bumpTtlForExternalHit(handPath, 10*60*1000)`。**保守策略**：不强制让 FUSE IPC 完全替换为 `FileAgent.read`（避免与 redaction / mutation hint / pendingReadBypass 等多分支耦合）；改为命中后通知 FileAgent，让 GC 不会清掉正在被 FUSE 读的 path。 | FUSE → file-proxy-manager.tryServeReadFromCache 命中 → fileAgent.bumpTtlForExternalHit → TTL 续期 → FileAgent.runGcOnce 不 evict |
+| **#3 watcher delta 接 FileAgent** | `cache-task-manager.ts: CacheTaskManagerOptions` 增加 `onDeltaApplied` 回调；applyDelta 应用到 store 后调它（错误不影响 ack）。`server.ts` 注册回调：找对应 deviceId 的 FileAgent → `notifyWatcherDeltaApplied(changes)` → 续期 TTL + inflight telemetry。FileAgent **不重复 apply**（store 已写入）。 | client watcher → cache_task_delta → cache-task-manager.applyDelta → store.applyDelta → onDeltaApplied → FileAgent.notifyWatcherDeltaApplied → TTL 续期 |
 
-2. **FUSE IPC handler 没强行走 FileAgent.read（Task 9 部分）**：`file-proxy-manager.ts` 仅接受 fileAgent 字段作 wiring 占位；运行时 FUSE 仍用现有 `tryServeReadFromCache`（直接调 store）+ 穿透 client 路径。FileAgent 与 manager 共享 store，命中事实上等价，但语义上"FuseHost 经 FileAgent 走"未实现。
+**测试覆盖**：`server/test/wiring-integration.test.ts` 共 10 个 case 覆盖三处接通的端到端契约。
 
-3. **watcher delta 在生产没经过 SyncCoordinator.applyWatcherDelta（Task 11 part of P9 路径 B 未真闭环）**：当前 `cache-task-manager.ts:209 applyDelta` 直接调 `store.applyDelta`，没经过 `SyncCoordinator.applyWatcherDelta`。`SyncCoordinator.applyWatcherDelta` 在生产从未被调用，仅在测试里。这意味着生产环境 plan §3.6 路径 B 名义上有但实际没走。**要让 P9 路径 B 生效**：要把 cache-task-manager 改为通过 SyncCoordinator 落 manifest，或者让 cache-task-manager 在 applyDelta 后再调 SyncCoordinator 的 inflight 清理。
-
-**为什么本期接受**：用户最初拍板"先把缓存维度扩大到 device 维度"是核心目标；以上三处都是接通生产链路的 wiring 工作，零件已经到位（FileAgent / SyncCoordinator / ConfigPreloader 单元测试覆盖 552 cases），只是 server.ts 与 cache-task-manager.ts 的胶水代码没改完。**所有零件已经过测试，未来接通时主要是 wiring，不需要重新设计**。
+**累计代码统计**：
+- 新增模块：`file-agent/` 9 个文件 + `config-preloader.ts` + `cache-task-dispatcher.ts`
+- 新增测试：8 个 `file-agent-*.test.ts` + `config-preloader.test.ts` + `wiring-integration.test.ts` + `e2e-file-agent.test.ts`
+- 修改既有：`cache-task-manager.ts` / `file-proxy-manager.ts` / `server.ts` / 相关测试
+- 总测试通过：server 411 / client 135 / web 6 / smoke 23（典型场景）
 
 ---
 
