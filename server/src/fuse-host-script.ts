@@ -693,6 +693,7 @@ class CerelayFuseOps(Operations):
                     "bytes": len(chunk),
                     "offset": offset,
                     "size": size,
+                    "fusePath": path,
                 })
                 return chunk
             except OSError as e:
@@ -762,6 +763,7 @@ class CerelayFuseOps(Operations):
                     "bytes": written,
                     "offset": offset,
                     "shadow": True,
+                    "fusePath": path,
                 })
                 return written
             except OSError as e:
