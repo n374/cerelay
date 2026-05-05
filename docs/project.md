@@ -91,6 +91,9 @@ Client（client/）         Server（server/）             Claude Code CLI
 | TD-2 | `docs/` 顶层 6 份既有文档（`architecture.md` 等）未按 Spec-Driven 模型组织 | 独立 change `docs-restructure` 启动时 |
 | TD-3 | living spec 仅覆盖 2 个 capability（`shadow-mcp-tools` / `client-config-sync`），其他能力未反向生成 | 后续 change 触达对应能力时通过 baseline change 反向补齐 |
 | TD-4 | Mini permission engine 仅支持 `Bash(prefix:*)` / exact / tool-level 三种规则形式，CC 未来若引入 regex / env-var 替换需要扩展 | CC 升级到带新 permission 语法的版本时 |
+| TD-5 | shadow-mcp-tools NFR-1 降级安全（MCPIpcHost 启动失败仅 warn 不阻塞 session）无显式 e2e 守护，依赖代码 try/catch 实现 | 后续 change 触达 `server/src/mcp-ipc-host.ts` 时补 e2e；来源 baseline-shadow-mcp-clientcache BD-1 |
+| TD-6 | shadow-mcp-tools NFR-3 工具调用 hot path 性能未量化，依赖整体 e2e 耗时观察 | 待性能预算 change 启动时定基线；来源 baseline-shadow-mcp-clientcache BD-2 |
+| TD-7 | client-config-sync NFR-2 失败降级（缓存同步失败不阻塞 PTY session）无显式 e2e 守护，依赖代码 try/catch 实现 | 后续 change 触达 cache 启动路径时补 e2e；来源 baseline-shadow-mcp-clientcache BD-3 |
 
 ## 5. 与 CLAUDE.md 的关系
 
