@@ -22,8 +22,6 @@ import {
   sessionBootstrapEvents,
   assertF4CrossCwdIsolation,
   isUnderDir,
-  type AdminEvent,
-  type FileProxyReadServedDetail,
 } from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
 
@@ -255,7 +253,12 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
       timeoutMs: 15_000,
     });
 
-    // 等 events 彻底落地
+    // 阶段二完成后等 600ms,让所有阶段一 + bAttemptA 触发的 read.served event 完成
+    // admin events buffer 落地(server emit → buffer push 是同步的,但 HTTP 拉取
+    // 有 RTT,600ms 在容器局域网下足够)。然后下方 assertNoReadServedForCwd(timeoutMs:500)
+    // 用 50ms 间隔轮询的 10 次窗口,任何"漏网" event 也会被捕到。spec §5.4 锚定到
+    // "所有 probe 完成后 + 500ms safety margin",此处 600ms settle + 500ms poll
+    // 比 spec 更保守。
     await new Promise((r) => setTimeout(r, 600));
 
     // ================================================================
@@ -291,11 +294,15 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
     // namespace 内访问不经 FUSE，内容不保证可见。不做正负 marker 断言。
     // aClaude / bClaude 已在上方 void，断言(c)通过 configPreloaderEvents 计划检查覆盖。
 
-    // home 内容两个 session 都可见(共享 $HOME,不是 per-cwd)
-    // aHome / bHome 都含 HOME_SHARED_EXPECTED
-    // 注: home fixture 只给了 client-a 的 runIdA,bHome 可能看不到(两个 session 共享 device 所以
-    //     homeFixture 写入是 client 容器 $HOME,两个 session 的 namespace 都应挂同一个 home root)
-    // 这里只做软验证(home fixture 落地时序不定),不是主断言
+    // home 共享 $HOME(spec §2 第 3 项纠偏:同 client 两并发 session 共享 $HOME 与 deviceId,
+    // home root 不是 per-cwd 内容空间)。aHome / bHome / aHomeJson / bHomeJson 仅作 smoke
+    // probe 触发 FUSE,不做 enforced stdout 断言——理由:
+    //   1. namespace 内 home 路径(/home/clientuser)与 client agent 写 homeFixture 的
+    //      $HOME 路径在不同 mount namespace 下不保证 1:1 等价
+    //   2. spec §5.3 (a) 守"home root 不被 project cwd 子树污染"靠 read.served event
+    //      detail.clientCwd / clientPath 字段(由 assertF4CrossCwdIsolation + 阶段三
+    //      assertNoReadServedForCwd 守),而非 stdout includes 字符串
+    // 故 void。
     void aHome; void bHome; void aHomeJson; void bHomeJson;
 
     // settings.local.json:走 shadow FUSE 路径,各 session 必须只见自己 cwd 内容,不串对方
@@ -324,69 +331,30 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
 
     // (2) read.served event: sessionA 的 project-claude read.served clientCwd 必须 === cwdA
     // 等 project-claude 下任意 relPath 的 read.served event(不限定具体文件,只要 root 对)
-    // 用自定义轮询，避免 waitForReadServed 的 relPath 必填限制
-    // 等 session A 的 project-claude read.served event
-    // 使用 findReadServed 自定义轮询，因为 waitForReadServed 要求 relPath 必填
-    const deadline2 = Date.now() + 15_000;
-    let readEvA: AdminEvent | undefined;
-    while (Date.now() < deadline2) {
-      const evs = await serverEvents.fetch({ sessionId: sessionIdA, since: baseline });
-      readEvA = evs.find((e) => {
-        if (e.kind !== "file-proxy.read.served") return false;
-        const d = e.detail as { root?: string } | undefined;
-        return d?.root === "project-claude";
-      });
-      if (readEvA) break;
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    // 诊断: 如果没找到 project-claude read.served for sessionA,dump 事件
-    if (!readEvA) {
-      const allEvs = await serverEvents.fetch({ since: baseline });
-      const proxyEvs = allEvs
-        .filter((e) => e.kind.startsWith("file-proxy.") || e.kind.startsWith("pty."))
-        .map((e) => ({ kind: e.kind, sessionId: e.sessionId, detail: e.detail }));
-      throw new Error(
-        `[F4-diag] sessionA project-claude read.served 未找到\n` +
-          `sessionIdA=${sessionIdA}, sessionIdB=${sessionIdB}\n` +
-          `file-proxy/pty events: ${JSON.stringify(proxyEvs, null, 2)}`
-      );
-    }
-    const readEvADetail = readEvA.detail as FileProxyReadServedDetail | undefined;
+    // 使用 waitForReadServedByRoot 代替自定义轮询(relPath 不约束,只按 root + sessionId 过滤)
+    const readEvA = await fileProxyEvents.waitForReadServedByRoot({
+      root: "project-claude",
+      sessionId: sessionIdA,
+      since: baseline,
+      timeoutMs: 15_000,
+    });
     assert.equal(
-      readEvADetail?.clientCwd,
+      readEvA.detail.clientCwd,
       cwdA,
-      `sessionA read.served(project-claude).clientCwd 必须等于 cwdA; got: ${readEvADetail?.clientCwd}`,
+      `sessionA project-claude read.served clientCwd 必须 === cwdA;detail=${JSON.stringify(readEvA.detail)}`,
     );
 
     // sessionB 的 project-claude read.served clientCwd 必须 === cwdB
-    const deadline3 = Date.now() + 15_000;
-    let readEvB: AdminEvent | undefined;
-    while (Date.now() < deadline3) {
-      const evs = await serverEvents.fetch({ sessionId: sessionIdB, since: baseline });
-      readEvB = evs.find((e) => {
-        if (e.kind !== "file-proxy.read.served") return false;
-        const d = e.detail as { root?: string } | undefined;
-        return d?.root === "project-claude";
-      });
-      if (readEvB) break;
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    if (!readEvB) {
-      const allEvs = await serverEvents.fetch({ since: baseline });
-      const proxyEvs = allEvs
-        .filter((e) => e.kind.startsWith("file-proxy.") || e.kind.startsWith("pty."))
-        .map((e) => ({ kind: e.kind, sessionId: e.sessionId, detail: e.detail }));
-      throw new Error(
-        `[F4-diag] sessionB project-claude read.served 未找到\n` +
-          `sessionIdA=${sessionIdA}, sessionIdB=${sessionIdB}\n` +
-          `file-proxy/pty events: ${JSON.stringify(proxyEvs, null, 2)}`
-      );
-    }
-    const readEvBDetail = readEvB.detail as FileProxyReadServedDetail | undefined;
+    const readEvB = await fileProxyEvents.waitForReadServedByRoot({
+      root: "project-claude",
+      sessionId: sessionIdB,
+      since: baseline,
+      timeoutMs: 15_000,
+    });
     assert.equal(
-      readEvBDetail?.clientCwd,
+      readEvB.detail.clientCwd,
       cwdB,
-      `sessionB read.served(project-claude).clientCwd 必须等于 cwdB; got: ${readEvBDetail?.clientCwd}`,
+      `sessionB project-claude read.served clientCwd 必须 === cwdB;detail=${JSON.stringify(readEvB.detail)}`,
     );
 
     // (3) negative-assert: session B 没有读取 cwdA 子树的 read.served

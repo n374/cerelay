@@ -403,6 +403,50 @@ export const fileProxyEvents = {
   },
 
   /**
+   * 等任意 relPath 的 read.served event(按 root + sessionId 过滤,relPath 不约束)。
+   * 与 waitForReadServed 区别:`waitForReadServed` relPath 必填,要求精确等值;
+   * `waitForReadServedByRoot` 不限 relPath,适用于"等 root=project-claude 任意文件
+   * read.served 出现"的场景(spec §5.3 阶段三 read.served clientCwd 对齐断言)。
+   *
+   * 失败时 dump 完整 file-proxy.* + pty.* event 摘要便于排错。
+   */
+  async waitForReadServedByRoot(opts: {
+    root: string;
+    sessionId?: string;
+    clientCwd?: string;
+    since?: number;
+    timeoutMs?: number;
+  }): Promise<AdminEvent & { detail: FileProxyReadServedDetail }> {
+    const timeoutMs = opts.timeoutMs ?? 15_000;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const events = await serverEvents.fetch({
+        sessionId: opts.sessionId,
+        since: opts.since,
+      });
+      const hit = events.find((e) => {
+        if (e.kind !== "file-proxy.read.served") return false;
+        const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+        if (d?.root !== opts.root) return false;
+        if (opts.clientCwd && d?.clientCwd !== opts.clientCwd) return false;
+        return true;
+      });
+      if (hit) return hit as AdminEvent & { detail: FileProxyReadServedDetail };
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    // dump 摘要便于排错
+    const dumpEvents = await serverEvents.fetch({ since: opts.since });
+    const summary = dumpEvents
+      .filter((e) => e.kind.startsWith("file-proxy.") || e.kind.startsWith("pty."))
+      .map((e) => `    [${e.kind}] sessionId=${e.sessionId} detail=${JSON.stringify(e.detail)}`)
+      .join("\n");
+    throw new Error(
+      `waitForReadServedByRoot(root=${opts.root}, sessionId=${opts.sessionId}) timeout after ${timeoutMs}ms\n` +
+      `  ── 已 captured 的 file-proxy + pty 事件 ──\n${summary}`
+    );
+  },
+
+  /**
    * Negative-assert: 在 timeoutMs 内收集所有 sessionId === sessionId 且
    * isUnderDir(clientPath, foreignCwd) 的 file-proxy.read.served event,
    * 期望 count === 0。isUnderDir 严格按目录分隔符（path === foreignCwd 或
