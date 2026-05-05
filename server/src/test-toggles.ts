@@ -33,12 +33,20 @@ interface TestToggles {
    * - toolName 提供 = 精确匹配，全等比较
    */
   injectToolTimeout: { ms: number; toolName?: string } | null;
+  /**
+   * F4 P2 meta failure case 用：在 CERELAY_ADMIN_EVENTS=true + toggle 非空时，
+   * 故意把 fromCwd session 的 project-claude root 错挂到 toCwd，
+   * 验证 assertF4CrossCwdIsolation 能捕获 (a)/(d) 不变量违反。
+   * 生产路径：双重 gate（env + toggle 字段非空）确保零开销。
+   */
+  injectCrossCwdRootCollision: { fromCwd: string; toCwd: string } | null;
 }
 
 const state: TestToggles = {
   disableRedact: false,
   injectIfsBug: false,
   injectToolTimeout: null,
+  injectCrossCwdRootCollision: null,
 };
 
 /**
@@ -72,6 +80,7 @@ export function setTestToggles(patch: Partial<TestToggles>): TestToggles {
   if (patch.disableRedact !== undefined) state.disableRedact = patch.disableRedact;
   if (patch.injectIfsBug !== undefined) state.injectIfsBug = patch.injectIfsBug;
   if (patch.injectToolTimeout !== undefined) state.injectToolTimeout = patch.injectToolTimeout;
+  if (patch.injectCrossCwdRootCollision !== undefined) state.injectCrossCwdRootCollision = patch.injectCrossCwdRootCollision;
   return { ...state };
 }
 
@@ -80,4 +89,5 @@ export function resetTestToggles(): void {
   state.disableRedact = false;
   state.injectIfsBug = false;
   state.injectToolTimeout = null;
+  state.injectCrossCwdRootCollision = null;
 }

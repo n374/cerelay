@@ -459,6 +459,8 @@ export class CerelayServer {
             injectIfsBug: boolean;
             /** INF-8: { ms, toolName? } | null */
             injectToolTimeout: { ms: number; toolName?: string } | null;
+            /** F4 P2 meta: 故意错挂 project-claude root，验 assertF4CrossCwdIsolation 能 catch */
+            injectCrossCwdRootCollision: { fromCwd: string; toCwd: string } | null;
             reset: boolean;
           }>;
           if (body.reset) {
@@ -1243,12 +1245,25 @@ export class CerelayServer {
     // sessionId 由 record 第二参数携带于 event 顶层，detail 不放——
     // T6 follow-up commit 69f99c4 学到的教训：detail.sessionId 与
     // AdminEvent.sessionId 顶层冗余 + 类型契约冲突，T7 一上来就避免。
+    //
+    // F4 P2 meta failure (injectCrossCwdRootCollision)：在 toggle 命中时，
+    // projectClaudeBindTarget 反映 FileProxyManager.roots["project-claude"] 的
+    // 实际值（已被 toggle 改为 toCwd/.claude），让 assertF4CrossCwdIsolation (d)
+    // 检查能捕获串台——与 file-proxy-manager.ts constructor 末尾逻辑对称。
+    const cwd = message.cwd || ".";
+    const crossCwdCollision = getTestToggles().injectCrossCwdRootCollision;
+    const effectiveProjectClaudeTarget =
+      process.env.CERELAY_ADMIN_EVENTS === "true" &&
+      crossCwdCollision &&
+      crossCwdCollision.fromCwd === cwd
+        ? `${crossCwdCollision.toCwd}/.claude`
+        : `${cwd}/.claude`;
     this.adminEvents?.record("session.bootstrap.plan", sessionId, {
       deviceId: message.deviceId ?? "",
-      clientCwd: message.cwd || ".",
+      clientCwd: cwd,
       runtimeRoot: runtime.rootDir,
       fileProxyMountPoint: fileProxy?.mountPoint ?? "",
-      projectClaudeBindTarget: `${message.cwd || "."}/.claude`,
+      projectClaudeBindTarget: effectiveProjectClaudeTarget,
     });
 
     const session = new ClaudePtySession({

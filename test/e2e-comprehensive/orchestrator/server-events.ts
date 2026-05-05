@@ -720,6 +720,19 @@ export const testToggles = {
     });
     if (!r.ok) throw new Error(`server /admin/test-toggles reset → ${r.status}: ${await r.text()}`);
   },
+  /**
+   * F4 P2 meta failure case 用：注入 / 清除 cross-cwd root collision。
+   * opts 非 null 时，fromCwd session 的 project-claude root 会被错挂到 toCwd；
+   * opts === null 时，清除 toggle（防止泄漏到下一 case）。
+   */
+  async injectCrossCwdRootCollision(opts: { fromCwd: string; toCwd: string } | null): Promise<void> {
+    const r = await fetch(new URL("/admin/test-toggles", BASE), {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ injectCrossCwdRootCollision: opts }),
+    });
+    if (!r.ok) throw new Error(`server /admin/test-toggles injectCrossCwdRootCollision → ${r.status}: ${await r.text()}`);
+  },
 };
 
 /**
@@ -806,32 +819,82 @@ export async function assertF4CrossCwdIsolation(opts: {
   // 拉全量事件（不按 sessionId 过滤，确保两个 session 的事件都在）
   const allEvents = await serverEvents.fetch({ since: opts.since });
 
-  // (a)+(d): A 的 project-claude read.served 必须 clientCwd === cwdA
+  // (a)+(d): A 的 project-claude read.served 必须 clientCwd === cwdA 且
+  //          clientPath 不落在 cwdB 子树（防止 roots 错挂导致 clientPath 串台）
   const aProjectReads = allEvents.filter((e) =>
     e.kind === "file-proxy.read.served" &&
     e.sessionId === opts.sessionA.sessionId &&
     (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.root === "project-claude"
   );
   for (const e of aProjectReads) {
-    const clientCwd = (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.clientCwd;
+    const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+    const clientCwd = d?.clientCwd;
     if (clientCwd !== opts.cwdA) {
       errors.push(
         `(a/d) sessionA project-claude read.served clientCwd 错位: 期望 ${opts.cwdA}，实际 ${clientCwd}`
       );
     }
+    // clientPath 串台检查：project-claude root 错挂时 clientPath 会落在另一 cwd 子树
+    const clientPath = d?.clientPath;
+    if (clientPath !== undefined && isUnderDir(clientPath, opts.cwdB)) {
+      errors.push(
+        `(a/d) sessionA project-claude read.served clientPath 串到 cwdB 子树: ${clientPath}`
+      );
+    }
   }
 
-  // (a)+(d): B 的 project-claude read.served 必须 clientCwd === cwdB
+  // (a)+(d): A 的 project-claude client.requested clientPath 不落在 cwdB 子树
+  // file-proxy.read.served 只在 snapshot/cache 路径 emit；runtime read 穿透走
+  // client.requested，两者都需要检查 clientPath 串台。
+  const aProjectClientReqs = allEvents.filter((e) =>
+    e.kind === "file-proxy.client.requested" &&
+    e.sessionId === opts.sessionA.sessionId &&
+    (e.detail as Partial<FileProxyClientRequestedDetail> | undefined)?.root === "project-claude"
+  );
+  for (const e of aProjectClientReqs) {
+    const clientPath = (e.detail as Partial<FileProxyClientRequestedDetail> | undefined)?.clientPath;
+    if (clientPath !== undefined && isUnderDir(clientPath, opts.cwdB)) {
+      errors.push(
+        `(a/d) sessionA project-claude client.requested clientPath 串到 cwdB 子树: ${clientPath}`
+      );
+    }
+  }
+
+  // (a)+(d): B 的 project-claude read.served 必须 clientCwd === cwdB 且
+  //          clientPath 不落在 cwdA 子树
   const bProjectReads = allEvents.filter((e) =>
     e.kind === "file-proxy.read.served" &&
     e.sessionId === opts.sessionB.sessionId &&
     (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.root === "project-claude"
   );
   for (const e of bProjectReads) {
-    const clientCwd = (e.detail as Partial<FileProxyReadServedDetail> | undefined)?.clientCwd;
+    const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+    const clientCwd = d?.clientCwd;
     if (clientCwd !== opts.cwdB) {
       errors.push(
         `(a/d) sessionB project-claude read.served clientCwd 错位: 期望 ${opts.cwdB}，实际 ${clientCwd}`
+      );
+    }
+    // clientPath 串台检查：project-claude root 错挂时 clientPath 会落在另一 cwd 子树
+    const clientPath = d?.clientPath;
+    if (clientPath !== undefined && isUnderDir(clientPath, opts.cwdA)) {
+      errors.push(
+        `(a/d) sessionB project-claude read.served clientPath 串到 cwdA 子树: ${clientPath}`
+      );
+    }
+  }
+
+  // (a)+(d): B 的 project-claude client.requested clientPath 不落在 cwdA 子树
+  const bProjectClientReqs = allEvents.filter((e) =>
+    e.kind === "file-proxy.client.requested" &&
+    e.sessionId === opts.sessionB.sessionId &&
+    (e.detail as Partial<FileProxyClientRequestedDetail> | undefined)?.root === "project-claude"
+  );
+  for (const e of bProjectClientReqs) {
+    const clientPath = (e.detail as Partial<FileProxyClientRequestedDetail> | undefined)?.clientPath;
+    if (clientPath !== undefined && isUnderDir(clientPath, opts.cwdA)) {
+      errors.push(
+        `(a/d) sessionB project-claude client.requested clientPath 串到 cwdA 子树: ${clientPath}`
       );
     }
   }

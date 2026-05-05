@@ -260,6 +260,18 @@ export class FileProxyManager {
       "home-claude-json": path.join(this.clientHomeDir, ".claude.json"),
       "project-claude": path.join(this.clientCwd, ".claude"),
     };
+
+    // 仅 e2e meta failure case 用——在 CERELAY_ADMIN_EVENTS=true 且 toggle 命中时,
+    // 故意把 project-claude root 错挂到另一 cwd,验 assertF4CrossCwdIsolation 能 catch。
+    // gate 双重防护:env + toggle 字段非空。生产路径零开销。
+    const collision = getTestToggles().injectCrossCwdRootCollision;
+    if (
+      process.env.CERELAY_ADMIN_EVENTS === "true" &&
+      collision &&
+      collision.fromCwd === this.clientCwd
+    ) {
+      this.roots["project-claude"] = path.join(collision.toCwd, ".claude");
+    }
   }
 
   /** 判断是否启用了 cache 读优先路径。二者同时存在才算启用。 */
