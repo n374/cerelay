@@ -2,7 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **文档规范**：以 `~/.claude/rules/doc-conventions.md` 为准（中英双语、章节模板、图表）。新增 sub-doc 在 [`docs/architecture.md` §11 子文档索引](./docs/architecture.md#11-子文档索引--sub-documents-index) 登记。
+> **文档规范**：以 `~/.claude/rules/doc-conventions.md` 为准（**纯中文**，唯一例外是 git commit message / MR title）。Spec-Driven 文档（`project.md` / `constitution.md` / `specs/` / `changes/` / `archive/` / `decisions/`）放在 [`docs/`](./docs/README.md) 下，不带 `openspec/` 前缀（项目级覆盖了 `~/.claude/skills/spec-driven-docs/SKILL.md` 的默认目录结构）。新增非 spec-driven 类 sub-doc 暂在 [`docs/architecture.md` §11 子文档索引](./docs/architecture.md#11-子文档索引--sub-documents-index) 登记，等 `docs-restructure` change 落地后会被新结构替代。
+
+## Spec-Driven 目录覆盖 / Spec-Driven Layout Override
+
+本项目对 `~/.claude/skills/spec-driven-docs/SKILL.md` 的默认目录结构做了如下覆盖：
+
+| SKILL 默认 | 本项目实际 | 备注 |
+|---|---|---|
+| `openspec/project.md` | `docs/project.md` | 去掉 `openspec/` 前缀 |
+| `openspec/memory/constitution.md` | `docs/constitution.md` | 同时去掉 `memory/` 中间层 |
+| `openspec/specs/<cap>/spec.md` | `docs/specs/<cap>/spec.md` | — |
+| `openspec/changes/<name>/` | `docs/changes/<name>/` | — |
+| `openspec/archive/<dated>/` | `docs/archive/<dated>/` | — |
+| `openspec/decisions/NNNN-*.md` | `docs/decisions/NNNN-*.md` | — |
+
+`docs/superpowers/`（superpowers skill 产出，按日期前缀的 specs/plans）与本流程**正交**，维持现状。
+
+阅读入口：[`docs/README.md`](./docs/README.md)。
 
 ## E2E 综合测试覆盖审计 / E2E Comprehensive Test Coverage Audit
 
@@ -375,6 +392,16 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
   - 单 scope 累计 > 100MB（`MAX_SCOPE_BYTES`）：按 mtime 倒序截断，后面的文件完全丢弃，manifest 记录 `truncated: true` 用于诊断
 - 失败策略：缓存同步失败不阻塞 PTY session 启动——降级为"无 Server 缓存"，FUSE 读请求仍可穿透回 Client
 - Integration 测试通过 `CERELAY_DISABLE_INITIAL_CACHE_SYNC=true` 跳过该流程，避免 mock server 需要模拟该协议
+
+**扫描范围（include_dirs 白名单 + exclude_dirs 黑名单）**（`client/src/config.ts`）：
+
+> **2026-05-05 起语义反转**：默认配置由"列黑名单跳过若干目录"改为"列白名单只同步若干目录"。两个字段并存：先按 `include_dirs` 通过，再按 `exclude_dirs` 剪枝。
+
+- `include_dirs` 默认列表：CC 启动期会 readdir/getattr 的顶级目录与单文件——`plugins`、`projects`、`sessions`、`backups`、`skills`、`commands`、`agents`、`shell-snapshots`、`session-env`、`file-history`、`paste-cache`、`cache`、`tasks`、`todos`、`telemetry`、`statsig`、`ide`、`settings.json`、`settings.local.json`、`CLAUDE.md`、`CLAUDE.local.md`、`.credentials.json`、`history.jsonl`。**该列表来自一次真实 CC 容器 capture（`CERELAY_CAPTURE_SEED` 模式）的访问名单**，避免凭印象 hand-curate；capture 数据归档于 `.claude/seed-capture-2026-05-05.json`
+- `exclude_dirs` 默认空数组——黑名单语义保留，留给用户在 include 范围内补充剪枝（例如 `plugins/cache/old-stuff`）
+- **空 include_dirs = 放行所有**：旧 toml（升级前没有 `include_dirs` 字段的 client）解析时 `includeDirs=[]`，过滤器视为不限制范围 → 行为与 v1 完全等价。新装/重置 toml 时才走默认白名单
+- 过滤实现（`createScanFilter`）：dir/file 同一套规则——relPath 在某个 include prefix 之下、或者是某个 include prefix 的祖先（保证 walkDir 递归得进 include 子树），并且不在任何 exclude 子树之下，才被收录
+- **决策依据**：F4 P2 之后排查启动期 readdir 穿透时发现，黑名单默认跳过 `projects/sessions/backups/tasks` 导致 daemon snapshot 缺这些 dir 的 readdir entry，CC 启动期一律穿透 client。反转为白名单后这些目录默认进 cache，启动期 readdir 由 `buildSnapshotFromManifest` 反推的 dir entry 直接命中 daemon perm cache
 
 **启动期同步进度 UI 与 pipeline / Initial cache sync progress & pipeline**（`client/src/cache-sync.ts` + `client/src/ui.ts` + `server/src/client-cache-store.ts`）：
 
