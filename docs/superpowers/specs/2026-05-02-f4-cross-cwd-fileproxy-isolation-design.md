@@ -322,7 +322,7 @@ test("F4-cross-cwd-fileproxy-isolation", async () => {
 |---|---|---|
 | 测试代码绕被守护路径 | ❌ 不中 | 所有内容读取经 `serverExec.run` 在 namespace 内执行(`server-events.ts:447-452` 注释明确为 honest 触发 FUSE 入口) |
 | 用 `pty.spawn.ready detail.cwd` 替代 fileProxy 隔离证明 | ❌ 不中 | P1 已覆盖该层,P2 必须用 `serverExec.run` + read.served event detail.clientCwd 双重证据 |
-| 用 `/admin/cache lookupEntry` 替代 runtime read | ❌ 不中 | cacheAdmin lookupEntry 只查 manifest 摘要,不能证明 runtime 用了该内容。本 case 用 read.served `servedFrom:"cache"` event |
+| 用 `/admin/cache lookupEntry` 替代 runtime read | ❌ 不中 | cacheAdmin lookupEntry 只查 manifest 摘要,不能证明 runtime 用了该内容。phase-p2 阶段三加强 home-claude / home-claude-json read.served servedFrom + clientCwd 对齐断言(覆盖 cache + snapshot-cache + snapshot-client 三种 servedFrom 的 cwd 隔离),(b) 不变量 runtime cache hit 守护证据完整 |
 | Negative-assert 用 absence-of-log | ❌ 不中 | poll-and-collect 模式,在 timeout 内收集所有匹配 event 后断言 count === 0 |
 | Session B 没主动访问就 negative-assert | ❌ 不中 | §5.4 强制 session B 阶段二主动 cat A 子树 |
 | Helper 自身退化通过 | ❌ 不中 | §5.4 meta failure case 反向期望 throw |

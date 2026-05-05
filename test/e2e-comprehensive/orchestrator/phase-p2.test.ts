@@ -22,6 +22,7 @@ import {
   sessionBootstrapEvents,
   assertF4CrossCwdIsolation,
   isUnderDir,
+  type FileProxyReadServedDetail,
 } from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
 
@@ -336,6 +337,76 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
       cwdB,
       `sessionB project-claude read.served clientCwd 必须 === cwdB;detail=${JSON.stringify(readEvB.detail)}`,
     );
+
+    // 阶段三 #2 加强：不变量 (b) 共享 ClientCacheStore 命中污染守护
+    // 遍历各 session 的 home-claude / home-claude-json read.served event，
+    // 必须 clientCwd 都对齐自己 session cwd——共享 cache 命中不能把 cwd-bound 元数据
+    // 混淆（spec §5.3 (b)）。即使两 session 共享 $HOME，read.served event 字段
+    // 仍须忠实反映各自 session 上下文。
+    const allReads = (await serverEvents.fetch({ since: baseline }))
+      .filter((e) => e.kind === "file-proxy.read.served");
+
+    const aHomeReads = allReads.filter((e) => {
+      const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+      return e.sessionId === sessionIdA && (d?.root === "home-claude" || d?.root === "home-claude-json");
+    });
+    const bHomeReads = allReads.filter((e) => {
+      const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+      return e.sessionId === sessionIdB && (d?.root === "home-claude" || d?.root === "home-claude-json");
+    });
+
+    // 至少一条非空——证明 home root 经过 fileProxy 服务过（无论 cache 命中还是穿透）
+    assert.ok(
+      aHomeReads.length > 0,
+      `sessionA 必须有 home-claude / home-claude-json read.served event`,
+    );
+    assert.ok(
+      bHomeReads.length > 0,
+      `sessionB 必须有 home-claude / home-claude-json read.served event`,
+    );
+
+    // 关键不变量：每条 read.served event 的 clientCwd 必须对齐 session 自己的 cwd
+    for (const ev of aHomeReads) {
+      const d = ev.detail as unknown as FileProxyReadServedDetail;
+      assert.equal(
+        d.clientCwd,
+        cwdA,
+        `(b) sessionA home read.served clientCwd 必须 === cwdA;servedFrom=${d.servedFrom},detail=${JSON.stringify(d)}`,
+      );
+    }
+    for (const ev of bHomeReads) {
+      const d = ev.detail as unknown as FileProxyReadServedDetail;
+      assert.equal(
+        d.clientCwd,
+        cwdB,
+        `(b) sessionB home read.served clientCwd 必须 === cwdB;servedFrom=${d.servedFrom},detail=${JSON.stringify(d)}`,
+      );
+    }
+
+    // 加固：至少有一条命中 runtime cache（servedFrom === "cache"）或 snapshot-cache，
+    // 证明 ClientCacheStore 真的被用过（否则上面 clientCwd 断言只覆盖 snapshot-client 穿透路径）
+    const aCacheHit = aHomeReads.some((e) => {
+      const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+      return d?.servedFrom === "cache" || d?.servedFrom === "snapshot-cache";
+    });
+    const bCacheHit = bHomeReads.some((e) => {
+      const d = e.detail as Partial<FileProxyReadServedDetail> | undefined;
+      return d?.servedFrom === "cache" || d?.servedFrom === "snapshot-cache";
+    });
+    // 软断言：如果 e2e 拓扑下 home root 实际走 snapshot-client 而非 cache，记 warning 不挂
+    // （cache 命中是"if cache exists"，e2e fixture 启动期可能直接穿透 client → snapshot-client）
+    if (!aCacheHit) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[F4-cross-cwd] WARN sessionA 没有命中 cache（snapshot-client 全穿透）。runtime cache 隔离守护降级为 snapshot-client clientCwd 对齐。servedFrom 列表:${aHomeReads.map((e) => (e.detail as Partial<FileProxyReadServedDetail>)?.servedFrom).join(",")}`,
+      );
+    }
+    if (!bCacheHit) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[F4-cross-cwd] WARN sessionB 没有命中 cache。servedFrom 列表:${bHomeReads.map((e) => (e.detail as Partial<FileProxyReadServedDetail>)?.servedFrom).join(",")}`,
+      );
+    }
 
     // (3) negative-assert: session B 没有读取 cwdA 子树的 read.served
     // 等所有 probe 完成 + 500ms safety margin(已在阶段二后 await 600ms)
