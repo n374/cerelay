@@ -20,7 +20,7 @@ import {
   DEFAULT_SUPPRESS_TTL_MS,
   type CacheWatcherFault,
 } from "./cache-watcher.js";
-import { createExcludeMatcher, type CerelayConfig } from "./config.js";
+import { createScanFilter, type CerelayConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import type { ScanCacheStore } from "./scan-cache.js";
 import type {
@@ -127,9 +127,12 @@ export class CacheTaskStateMachine {
   constructor(options: CacheTaskStateMachineOptions) {
     this.cwd = options.cwd;
     this.deviceId = options.deviceId;
-    this.config = options.config ?? { scan: { excludeDirs: [] } };
+    this.config = options.config ?? { scan: { includeDirs: [], excludeDirs: [] } };
     this.scanCache = options.scanCache;
-    this.exclude = createExcludeMatcher(this.config.scan.excludeDirs);
+    this.exclude = createScanFilter(
+      this.config.scan.includeDirs,
+      this.config.scan.excludeDirs,
+    );
     this.homedir = options.homedir ?? os.homedir();
     this.debounceMs = options.debounceMs ?? 250;
     this.disableCacheTask = options.disableCacheTask ?? isCacheTaskDisabled();

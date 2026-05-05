@@ -7,6 +7,20 @@ import { createLogger } from "./logger.js";
 const log = createLogger("config");
 
 export interface ScanConfig {
+  /**
+   * 同步白名单（CC 启动期会读取的目录或单文件）。
+   * 取值规则：
+   *   - 顶级 dir 名（如 "plugins"） → 整子树同步
+   *   - 顶级文件名（如 "settings.json"） → 该单文件同步
+   *   - 嵌套 dir（如 "plugins/cache"） → 仅该子树同步，walk 时其祖先链放行
+   *   - 空数组 → 放行所有（向后兼容；老 toml 没有 include_dirs 字段时落空数组）
+   * 与 excludeDirs 共同生效：先 include 通过、再 exclude 剪枝。
+   */
+  includeDirs: string[];
+  /**
+   * 同步黑名单：从 includeDirs 内再剪掉哪些子树。
+   * 取值规则同 includeDirs，语义"在 prefix 之下都跳过"。
+   */
   excludeDirs: string[];
 }
 
@@ -30,56 +44,76 @@ export const CONFIG_TEMPLATE = `# Cerelay Client 配置文件
 
 
 [scan]
-# 启动时 cerelay 会扫描 ~/.claude/ 并把内容同步到 Server 端缓存。
-# 列在 exclude_dirs 里的目录会被跳过；这些目录在 Server 缓存里
-# 没有副本，但 Claude Code 第一次访问它们时 cerelay 会自动从你的
-# 本机读取文件 —— 只是少了一次缓存加速，功能完全不受影响。
+# cerelay 启动时会扫描 ~/.claude/ 并把内容同步到 Server 端缓存。
 #
-# ------ 怎么添加你想跳过的目录 ------
-# 假如你想跳过 ~/.claude/my-folder/：
+# 扫描规则：先按 include_dirs 白名单挑出"要同步的范围"，
+# 再按 exclude_dirs 黑名单从范围里剪掉"明确不要的子树"。
 #
-#   1. 在下面的 exclude_dirs = [ ... ] 数组里新增一行
-#   2. 这一行写成        "my-folder",
-#      （双引号包起来，结尾的逗号别忘）
-#   3. 保存文件
-#   4. 下次启动 cerelay 时生效
+# 默认 include_dirs 仅列 Claude Code 启动期会读取的目录与文件
+# （plugins / projects / sessions / settings.json 等）。这些目录里的
+# 内容会进入 Server 缓存，CC 启动时不会反复穿透回你本机。
 #
-# ------ 怎么取消跳过某个目录 ------
-# 找到对应那一行，要么直接删掉整行，要么在行首加上 "#" 把它注释掉。
+# include_dirs 之外的路径（例如你自己放在 ~/.claude/ 下的笔记目录）
+# 不会被同步——CC 不会读它们，所以不需要缓存。如果某天 CC 真的去读了
+# 一个未列入的路径，cerelay 会自动从你本机直接读取（功能不受影响、
+# 只是少了一次缓存加速）。
 #
-# ------ 启用下方被注释掉的条目 ------
-# 找到带 "# " 前缀的那一行（例如  # "cache",）
-# 把行首的 "# " 删掉就是启用；保留就是不启用。
+# ------ 想让 cerelay 同步你额外的目录/文件 ------
+# 在下方 include_dirs = [ ... ] 数组里新增一行，例如  "my-folder",
+#
+# ------ 想让 cerelay 跳过 include 范围内某个子目录 ------
+# 在下方 exclude_dirs = [ ... ] 数组里新增对应路径
+# （路径写法与 include_dirs 一致，比如 "plugins/cache/old-stuff"）
+#
+# ------ 想完全恢复"全量同步整个 ~/.claude/" 的旧行为 ------
+# 把 include_dirs = [] 写空即可（或整行删掉）。空数组 = 放行所有。
+
+include_dirs = [
+  # —— Claude Code 启动期会 readdir 的目录（必须缓存，否则启动有大量穿透）——
+  "plugins",         # 插件子树（含 marketplace、cache、data）
+  "projects",        # 历史会话索引（CC 启动会列出可恢复 session）
+  "sessions",        # 会话索引
+  "backups",         # .claude.json 自动备份
+  "skills",          # 用户级 skills
+  "commands",        # 用户级 slash commands
+  "agents",          # 用户级 agents
+
+  # —— Claude Code 启动期会 stat 的目录（缓存顶级 stat 即可）——
+  "shell-snapshots", # 启动会写新文件、stat 旧文件
+  "session-env",     # 含 sessionstart-hook，CC 启动时会执行
+  "file-history",    # Edit 工具的文件备份
+  "paste-cache",     # paste 命令的中间文件
+  "cache",           # CC 内部缓存（含更新检查 changelog）
+  "tasks",           # 任务锁
+  "todos",           # TodoWrite 状态
+  "telemetry",       # 遥测
+  "statsig",         # feature flags 缓存
+  "ide",             # IDE 集成
+
+  # —— Claude Code 启动期必读的顶级单文件 ——
+  "settings.json",
+  "settings.local.json",
+  "CLAUDE.md",
+  "CLAUDE.local.md",
+  ".credentials.json",
+  "history.jsonl",
+
+  # —— 在下面添加你想额外同步的目录或文件 ——
+  # 例如：
+  # "my-notes",
+]
 
 exclude_dirs = [
-  # —— CC 启动时不读取（运行时按需访问，跳过完全安全）——
-  "projects",        # 历史会话 JSONL，仅 /resume 时按需读
-  "file-history",    # Edit 工具的文件备份
-  "backups",         # .claude.json 的自动备份
-  "paste-cache",     # paste 命令的中间文件
-  "shell-snapshots", # 启动会写新文件，旧的不再读
-  "telemetry",       # 遥测，写为主
-  "todos",           # TodoWrite 工具状态
-  "tasks",           # 任务锁文件
-
-  # —— 用途不确定，CC 启动时可能读取（默认未启用，按需取舍）——
-  # 启用方式：把行首的 "# " 删掉。如果启用后 CC 表现异常，
-  #          把 "# " 加回去即可恢复。
-  # "cache",         # CC 内部缓存（含更新检查 changelog）
-  # "plans",         # 计划/笔记（多设备同步场景建议保留）
-  # "session-env",   # 含 sessionstart-hook，启动时会执行
-  # "sessions",      # 会话索引
-  # "statsig",       # feature flags 缓存
-
-  # —— 在下面添加你自己想跳过的目录 ——
+  # —— include_dirs 范围内还想剪掉的子树写在这里 ——
   # 例如：
-  # "my-folder",
+  # "plugins/cache/old-stuff",
 ]
 `;
 
 const templateDefaults = parseFallbackDefaults(CONFIG_TEMPLATE);
 
-export const DEFAULT_EXCLUDE_DIRS = Object.freeze([...templateDefaults]);
+export const DEFAULT_INCLUDE_DIRS = Object.freeze([...templateDefaults.includeDirs]);
+export const DEFAULT_EXCLUDE_DIRS = Object.freeze([...templateDefaults.excludeDirs]);
 
 export async function loadConfig(opts: {
   configPath?: string;
@@ -117,6 +151,10 @@ export async function loadConfig(opts: {
   return parseLoadedConfig(content, configPath);
 }
 
+/**
+ * 仅根据 exclude_dirs 决定是否跳过。保留以兼容仍在直接调用的代码（cache-watcher
+ * 之外的旧调用点）；新逻辑应改用 createScanFilter。
+ */
 export function createExcludeMatcher(
   excludeDirs: string[],
 ): (relPath: string) => boolean {
@@ -137,6 +175,62 @@ export function createExcludeMatcher(
     }
     return false;
   };
+}
+
+/**
+ * 同步阶段的复合过滤器：
+ *   - includeDirs 非空时，**仅对含 "/" 的子项做白名单过滤**：relPath 必须在某个
+ *     include prefix 之下、或者是某个 include prefix 的祖先（保证 walkDir
+ *     递归能进到 include 子树）。
+ *   - **顶级 entry（不含 "/"）一律放行**——CC 二进制可能读 ~/.claude/ 顶级
+ *     任意配置文件（settings.json / .config.json / 任意 marker），列名不可穷举；
+ *     语义跟 exclude_dirs 时代一致（旧黑名单只针对 dir 子树，顶级文件从来都同步）。
+ *     顶级 dir 没列在 include_dirs 时，dir 自身的 relPath 通过，但 walkDir 进它
+ *     后所有子项都含 "/" → 都被过滤掉，等价于"dir 进不去"。manifest 不存 dir
+ *     entry，所以无副作用。
+ *   - includeDirs 为空 → 视为"放行所有"（保留旧 toml 没有 include_dirs 字段时
+ *     的兼容语义）。
+ *   - excludeDirs 永远生效：在 prefix 之下的一律跳过（语义同 createExcludeMatcher）。
+ *
+ * 函数返回值：true = 跳过该 relPath，false = 继续 walk / 收入 manifest。
+ */
+export function createScanFilter(
+  includeDirs: string[],
+  excludeDirs: string[],
+): (relPath: string) => boolean {
+  const includes = includeDirs
+    .map((value) => normalizeRelativePath(value))
+    .filter((value) => value.length > 0);
+  const excludes = excludeDirs
+    .map((value) => normalizeRelativePath(value))
+    .filter((value) => value.length > 0);
+
+  return (relPath: string): boolean => {
+    const normalized = normalizeRelativePath(relPath);
+    // includes 非空且 relPath 是子项（含 "/"）才走白名单过滤；顶级 entry 直接通过
+    if (includes.length > 0 && normalized.includes("/")) {
+      const passIncludes = includes.some((prefix) =>
+        isUnderOrAncestorOf(normalized, prefix),
+      );
+      if (!passIncludes) return true; // 子项不在白名单范围 → 跳过
+    }
+    for (const prefix of excludes) {
+      if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+        return true; // 落在黑名单子树 → 跳过
+      }
+    }
+    return false;
+  };
+}
+
+function isUnderOrAncestorOf(relPath: string, prefix: string): boolean {
+  if (prefix === "" || relPath === "") return true;
+  if (relPath === prefix) return true;
+  // relPath 在 prefix 之下：rel = "plugins/cache/x"  prefix = "plugins/cache"
+  if (relPath.startsWith(`${prefix}/`)) return true;
+  // relPath 是 prefix 的祖先：rel = "plugins"  prefix = "plugins/cache"
+  if (prefix.startsWith(`${relPath}/`)) return true;
+  return false;
 }
 
 function parseLoadedConfig(content: string, configPath: string): CerelayConfig {
@@ -173,26 +267,44 @@ function decodeConfig(value: unknown):
 
   const scan = value.scan;
   if (scan === undefined) {
-    return { ok: true, config: { scan: { excludeDirs: [] } } };
+    return { ok: true, config: { scan: { includeDirs: [], excludeDirs: [] } } };
   }
   if (!isRecord(scan)) {
     return { ok: false, reason: "[scan] 必须是 table" };
   }
 
-  const excludeDirs = scan.exclude_dirs;
-  if (excludeDirs === undefined) {
-    return { ok: true, config: { scan: { excludeDirs: [] } } };
+  const includeDirsRaw = scan.include_dirs;
+  let includeDirs: string[];
+  if (includeDirsRaw === undefined) {
+    // 旧 toml 没有 include_dirs 字段 → 视为空数组（"放行所有"），
+    // 跟 v1 行为兼容（用户升级后行为不变直到主动改 toml）。
+    includeDirs = [];
+  } else if (
+    !Array.isArray(includeDirsRaw) ||
+    !includeDirsRaw.every((entry) => typeof entry === "string")
+  ) {
+    return { ok: false, reason: "scan.include_dirs 必须是字符串数组" };
+  } else {
+    includeDirs = includeDirsRaw.map((entry) => normalizeRelativePath(entry));
   }
-  if (!Array.isArray(excludeDirs) || !excludeDirs.every((entry) => typeof entry === "string")) {
+
+  const excludeDirsRaw = scan.exclude_dirs;
+  let excludeDirs: string[];
+  if (excludeDirsRaw === undefined) {
+    excludeDirs = [];
+  } else if (
+    !Array.isArray(excludeDirsRaw) ||
+    !excludeDirsRaw.every((entry) => typeof entry === "string")
+  ) {
     return { ok: false, reason: "scan.exclude_dirs 必须是字符串数组" };
+  } else {
+    excludeDirs = excludeDirsRaw.map((entry) => normalizeRelativePath(entry));
   }
 
   return {
     ok: true,
     config: {
-      scan: {
-        excludeDirs: excludeDirs.map((entry) => normalizeRelativePath(entry)),
-      },
+      scan: { includeDirs, excludeDirs },
     },
   };
 }
@@ -200,17 +312,24 @@ function decodeConfig(value: unknown):
 function fallbackConfig(): CerelayConfig {
   return {
     scan: {
+      includeDirs: [...DEFAULT_INCLUDE_DIRS],
       excludeDirs: [...DEFAULT_EXCLUDE_DIRS],
     },
   };
 }
 
-function parseFallbackDefaults(template: string): string[] {
+function parseFallbackDefaults(template: string): {
+  includeDirs: string[];
+  excludeDirs: string[];
+} {
   const decoded = decodeConfig(parse(template));
   if (!decoded.ok) {
     throw new Error(`CONFIG_TEMPLATE 无法解析为默认配置: ${decoded.reason}`);
   }
-  return decoded.config.scan.excludeDirs;
+  return {
+    includeDirs: decoded.config.scan.includeDirs,
+    excludeDirs: decoded.config.scan.excludeDirs,
+  };
 }
 
 function normalizeRelativePath(value: string): string {
@@ -224,30 +343,25 @@ function defaultConfigDir(): string {
 function fallbackTomlString(): string {
   return stringify({
     scan: {
+      include_dirs: [...DEFAULT_INCLUDE_DIRS],
       exclude_dirs: [...DEFAULT_EXCLUDE_DIRS],
     },
   });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFileError(error: unknown): boolean {
-  return errorCode(error) === "ENOENT";
-}
-
-function errorCode(error: unknown): string | undefined {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    return typeof code === "string" ? code : undefined;
-  }
-  return undefined;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: string }).code === "ENOENT"
+  );
 }
 
 function asErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
+  return error instanceof Error ? error.message : String(error);
 }

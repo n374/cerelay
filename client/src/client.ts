@@ -14,6 +14,7 @@ import { createLogger, configureLogger, flushLogger } from "./logger.js";
 import { getOrCreateDeviceId } from "./device-id.js";
 import {
   DEFAULT_EXCLUDE_DIRS,
+  DEFAULT_INCLUDE_DIRS,
   loadConfig,
   type CerelayConfig,
 } from "./config.js";
@@ -902,6 +903,7 @@ export class CerelayClient {
       });
       return {
         scan: {
+          includeDirs: [...DEFAULT_INCLUDE_DIRS],
           excludeDirs: [...DEFAULT_EXCLUDE_DIRS],
         },
       };
