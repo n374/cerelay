@@ -169,6 +169,66 @@ test("buildScopePlan 接受 exclude matcher，被排除的路径不会进入 pla
   assert.equal(plan.totalLocal, 1);
 });
 
+test("buildScopePlan 与 createScanFilter 集成：白名单过滤 dir 子项；顶级文件默认放行", async (t) => {
+  const { createScanFilter } = await import("../src/config.js");
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  // 模拟用户 ~/.claude 的真实结构：plugins/projects 是白名单内、source_analyze 是个人目录
+  await mkdir(path.join(home, ".claude", "plugins", "marketplace"), { recursive: true });
+  await mkdir(path.join(home, ".claude", "projects", "demo"), { recursive: true });
+  await mkdir(path.join(home, ".claude", "source_analyze", "secret-repo"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "settings.json"), "{}", "utf8");
+  await writeFile(path.join(home, ".claude", "CLAUDE.md"), "# rules", "utf8");
+  await writeFile(path.join(home, ".claude", "plugins", "marketplace", "list.json"), "[]", "utf8");
+  await writeFile(path.join(home, ".claude", "projects", "demo", "session.jsonl"), "{}", "utf8");
+  await writeFile(path.join(home, ".claude", "source_analyze", "secret-repo", "leak.md"), "private", "utf8");
+  await writeFile(path.join(home, ".claude", "case-b1-marker.md"), "e2e fixture marker", "utf8");
+
+  const filter = createScanFilter(["plugins", "projects"], []);
+  const plan = await buildScopePlan({
+    scope: "claude-home",
+    homedir: home,
+    remote: undefined,
+    exclude: filter,
+  });
+
+  const uploadedPaths = plan.uploads.map((item) => item.change.path).sort();
+  // 顶级文件全部放行；dir 子项只有 plugins/projects 下的进入
+  assert.deepEqual(uploadedPaths, [
+    "CLAUDE.md",                          // 顶级文件 - 默认放行
+    "case-b1-marker.md",                  // 任意顶级 marker - 默认放行（e2e fixture 关键场景）
+    "plugins/marketplace/list.json",      // 在 include 子树
+    "projects/demo/session.jsonl",        // 在 include 子树
+    "settings.json",                      // 顶级文件 - 默认放行
+  ]);
+  // 个人目录 dir 顶级 entry 通过，但子项被过滤
+  assert.ok(
+    !uploadedPaths.some((p) => p.startsWith("source_analyze/")),
+    "source_analyze 子树不该被同步（dir 不在 include 白名单 → 子项被过滤）",
+  );
+});
+
+test("buildScopePlan 与 createScanFilter 集成：include 范围内 exclude 子树仍被剪枝", async (t) => {
+  const { createScanFilter } = await import("../src/config.js");
+  const { home, cleanup } = await makeTempHome();
+  t.after(cleanup);
+  await mkdir(path.join(home, ".claude", "plugins", "cache", "old"), { recursive: true });
+  await mkdir(path.join(home, ".claude", "plugins", "cache", "fresh"), { recursive: true });
+  await writeFile(path.join(home, ".claude", "plugins", "cache", "old", "stale.json"), "old", "utf8");
+  await writeFile(path.join(home, ".claude", "plugins", "cache", "fresh", "new.json"), "new", "utf8");
+
+  const filter = createScanFilter(["plugins"], ["plugins/cache/old"]);
+  const plan = await buildScopePlan({
+    scope: "claude-home",
+    homedir: home,
+    remote: undefined,
+    exclude: filter,
+  });
+
+  const uploadedPaths = plan.uploads.map((item) => item.change.path).sort();
+  assert.deepEqual(uploadedPaths, ["plugins/cache/fresh/new.json"]);
+});
+
 test("buildScopePlan 接受 scanCache：命中时复用 sha256，并把 miss 写回缓存", async (t) => {
   const { home, cleanup } = await makeTempHome();
   t.after(cleanup);

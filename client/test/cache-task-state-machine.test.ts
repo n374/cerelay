@@ -97,6 +97,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
 
 const TEST_CONFIG: CerelayConfig = {
   scan: {
+    includeDirs: [],
     excludeDirs: ["projects"],
   },
 };

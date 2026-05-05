@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { CerelayClient } from "../src/client.js";
-import { DEFAULT_EXCLUDE_DIRS, type CerelayConfig } from "../src/config.js";
+import { DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_DIRS, type CerelayConfig } from "../src/config.js";
 import { configureLogger, createLogger } from "../src/logger.js";
 import type { CacheTaskStateMachineOptions } from "../src/cache-task-state-machine.js";
 import type { ScanCacheStore } from "../src/scan-cache.js";
@@ -96,7 +96,7 @@ test("CerelayClient disableCacheTask=true 时不装配 loadConfig/openScanCache"
     isCacheTaskDisabled: () => true,
     loadConfig: async () => {
       loadConfigCalls += 1;
-      return { scan: { excludeDirs: ["projects"] } };
+      return { scan: { includeDirs: [], excludeDirs: ["projects"] } };
     },
     openScanCache: async () => {
       openScanCacheCalls += 1;
@@ -152,6 +152,7 @@ test("CerelayClient loadConfig 抛错时 connect 仍完成，并回退默认配�
 
   assert.deepEqual(factoryOptions?.config, {
     scan: {
+      includeDirs: [...DEFAULT_INCLUDE_DIRS],
       excludeDirs: [...DEFAULT_EXCLUDE_DIRS],
     },
   });
@@ -169,6 +170,7 @@ test("CerelayClient openScanCache 抛错时 connect 仍完成", async (t) => {
 
   const config: CerelayConfig = {
     scan: {
+      includeDirs: [],
       excludeDirs: ["projects"],
     },
   };
@@ -208,6 +210,7 @@ test("CerelayClient connect 装配成功时把 config 和 scanCache 传给 state
 
   const config: CerelayConfig = {
     scan: {
+      includeDirs: [],
       excludeDirs: ["projects"],
     },
   };
@@ -252,7 +255,7 @@ test("CerelayClient.isCacheSyncActive 委托给 state machine 的 isInitialSyncA
     interactiveOutput: false,
     deviceId: "device-1",
     homedir,
-    loadConfig: async () => ({ scan: { excludeDirs: [] } }),
+    loadConfig: async () => ({ scan: { includeDirs: [], excludeDirs: [] } }),
     openScanCache: async () => makeScanCacheStore(),
     cacheTaskStateMachineFactory: () => stateMachine,
   });
