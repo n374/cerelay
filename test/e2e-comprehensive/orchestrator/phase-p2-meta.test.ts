@@ -24,7 +24,7 @@ import {
   assertF4CrossCwdIsolation,
 } from "./server-events.js";
 import { writeFixture, cleanupFixture } from "./fixtures.js";
-import { F4_CROSS_FIXTURE_FILES } from "./phase-p2.test.js";
+import { F4_CROSS_FIXTURE_FILES } from "./phase-p2-fixtures.js";
 
 const CASE_ID = "case-f4-cross-meta";
 const FIXTURES_BASE = "/workspace/fixtures";
