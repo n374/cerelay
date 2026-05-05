@@ -21,6 +21,7 @@ import {
   configPreloaderEvents,
   sessionBootstrapEvents,
   assertF4CrossCwdIsolation,
+  isUnderDir,
   type AdminEvent,
   type FileProxyReadServedDetail,
 } from "./server-events.js";
@@ -295,7 +296,25 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
     // 注: home fixture 只给了 client-a 的 runIdA,bHome 可能看不到(两个 session 共享 device 所以
     //     homeFixture 写入是 client 容器 $HOME,两个 session 的 namespace 都应挂同一个 home root)
     // 这里只做软验证(home fixture 落地时序不定),不是主断言
-    void aHome; void bHome; void aHomeJson; void bHomeJson; void aSettings; void bSettings;
+    void aHome; void bHome; void aHomeJson; void bHomeJson;
+
+    // settings.local.json:走 shadow FUSE 路径,各 session 必须只见自己 cwd 内容,不串对方
+    assert.ok(
+      aSettings.stdout.includes("SETTINGS_A_ONLY"),
+      `sessionA settings probe must contain SETTINGS_A_ONLY; got: ${aSettings.stdout.slice(0, 200)}`,
+    );
+    assert.ok(
+      !aSettings.stdout.includes("SETTINGS_B_ONLY"),
+      `sessionA settings probe must NOT contain SETTINGS_B_ONLY; got: ${aSettings.stdout.slice(0, 200)}`,
+    );
+    assert.ok(
+      bSettings.stdout.includes("SETTINGS_B_ONLY"),
+      `sessionB settings probe must contain SETTINGS_B_ONLY; got: ${bSettings.stdout.slice(0, 200)}`,
+    );
+    assert.ok(
+      !bSettings.stdout.includes("SETTINGS_A_ONLY"),
+      `sessionB settings probe must NOT contain SETTINGS_A_ONLY; got: ${bSettings.stdout.slice(0, 200)}`,
+    );
 
     // 负向 probe: session B 访问 cwdA 子树应看不到 A 的内容
     assert.ok(
@@ -393,17 +412,13 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
       since: baseline,
       timeoutMs: 10_000,
     });
-    const ancestorLeakA = planA.detail.ancestorDirs.filter((p) =>
-      p === cwdB || p.startsWith(cwdB + "/"),
-    );
+    const ancestorLeakA = planA.detail.ancestorDirs.filter((p) => isUnderDir(p, cwdB));
     assert.equal(
       ancestorLeakA.length,
       0,
       `sessionA ancestorDirs 不应包含 cwdB 子树路径; leaked: ${ancestorLeakA.join(", ")}`,
     );
-    const prefetchLeakA = planA.detail.prefetchAbsPaths.filter((p) =>
-      p === cwdB || p.startsWith(cwdB + "/"),
-    );
+    const prefetchLeakA = planA.detail.prefetchAbsPaths.filter((p) => isUnderDir(p, cwdB));
     assert.equal(
       prefetchLeakA.length,
       0,
@@ -415,17 +430,13 @@ test("F4-cross-cwd-fileproxy-isolation: 同 device 两 cwd 并发隔离", async 
       since: baseline,
       timeoutMs: 10_000,
     });
-    const ancestorLeakB = planB.detail.ancestorDirs.filter((p) =>
-      p === cwdA || p.startsWith(cwdA + "/"),
-    );
+    const ancestorLeakB = planB.detail.ancestorDirs.filter((p) => isUnderDir(p, cwdA));
     assert.equal(
       ancestorLeakB.length,
       0,
       `sessionB ancestorDirs 不应包含 cwdA 子树路径; leaked: ${ancestorLeakB.join(", ")}`,
     );
-    const prefetchLeakB = planB.detail.prefetchAbsPaths.filter((p) =>
-      p === cwdA || p.startsWith(cwdA + "/"),
-    );
+    const prefetchLeakB = planB.detail.prefetchAbsPaths.filter((p) => isUnderDir(p, cwdA));
     assert.equal(
       prefetchLeakB.length,
       0,

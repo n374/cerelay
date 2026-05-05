@@ -7,7 +7,7 @@ const TOKEN = process.env.SERVER_ADMIN_TOKEN || "cerelay_e2e-admin-token";
  * 路径前缀判断：严格按目录分隔符，避免 /proj/a 误匹配 /proj/ab/foo。
  * 只在 path === ancestor 或 path 以 ancestor + "/" 开头时返回 true。
  */
-function isUnderDir(path: string, ancestor: string): boolean {
+export function isUnderDir(path: string, ancestor: string): boolean {
   if (path === ancestor) return true;
   return path.startsWith(ancestor.endsWith("/") ? ancestor : ancestor + "/");
 }
