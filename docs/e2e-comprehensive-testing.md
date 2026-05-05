@@ -235,7 +235,7 @@ npm test
 
 **失败行为**：
 - host smoke / workspaces 任一失败：直接退出，**不进入 e2e**（节省时间，先修廉价问题）
-- e2e 失败：`run-e2e-comprehensive.sh` **不调 `compose down`**，容器残留供排查；`test/gc-test-resources.sh` 兜底回收
+- e2e 失败：默认 trap-based teardown 清掉 container 与 image（`down --volumes --rmi local --remove-orphans`），失败日志先 dump 到 `.claude/e2e-failure-<project>/` 保留排错素材；显式保留容器排错走 `KEEP_ON_FAILURE=1` opt-in（详见 §7.1）
 
 **仅跑 e2e**：`npm run test:e2e`（跳过前置 host 套件，直接进入 docker-compose）
 
@@ -395,9 +395,9 @@ test("A1-bash-basic: model triggers Bash → server relays to client → tool_re
 
 #### 7.1 失败时容器残留 / Containers Left Behind on Failure
 
-**默认行为(2026-05-02 起)**:`run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 在任何退出路径(成功 / 失败 / Ctrl+C / SIGTERM)都会 trap-based teardown,不留 container。失败时会先 dump logs 到 `.claude/e2e-failure-<project>/`(`all.log` / `server.log` / `ps.txt`)再清。
+**默认行为(2026-05-02 起,2026-05-06 起含 image 清理)**:`run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 在任何退出路径(成功 / 失败 / Ctrl+C / SIGTERM)都会 trap-based teardown,走 `down --volumes --rmi local --remove-orphans`,**同步清掉本次 build 的 6 个 image**(`mock-anthropic / server / client-{a,b,c} / orchestrator`),不留 container 也不留 image。失败时会先 dump logs 到 `.claude/e2e-failure-<project>/`(`all.log` / `server.log` / `ps.txt`)再清。
 
-**显式保留 container 排错**(老行为):`KEEP_ON_FAILURE=1 bash test/run-e2e-comprehensive.sh`,失败时容器保留供 `docker exec / docker logs` 现场调试,清理走 `docker compose -p <project> -f docker-compose.e2e.yml down --volumes`。
+**显式保留 container 排错**(老行为):`KEEP_ON_FAILURE=1 bash test/run-e2e-comprehensive.sh`,失败时容器保留供 `docker exec / docker logs` 现场调试,清理走 `docker compose -p <project> -f docker-compose.e2e.yml down --volumes --rmi local`。
 
 **实时排错(运行中)**:
 
@@ -420,15 +420,17 @@ docker exec -it <e2e-server-container> sh   # 容器内交互式排查
 
 #### 7.3 清理 / Cleanup
 
-**自动 GC**:每次 `bash test/run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 启动前,会调用 `test/cleanup-e2e-stale.sh` 扫描 `cerelay-e2e-*` / `cerelay-e2e-meta-*` compose project,把 timestamp 超过阈值(默认 30min,`CERELAY_E2E_STALE_THRESHOLD_SEC` 调)的整个 project `compose down`。这是"防 implementer 历史遗留累积"的保险——P1-B 阶段曾出现 7 套残留 33 容器同时存在的情况,3-4h 不清,根因是脚本 trap 不全导致中断/异常退出残留。
+**自动 GC**:每次 `bash test/run-e2e-comprehensive.sh` / `run-e2e-comprehensive-meta.sh` 启动前,会调用 `test/cleanup-e2e-stale.sh`,扫所有 `cerelay-e2e-*` 前缀 compose project(包括 `cerelay-e2e-<ts>` / `cerelay-e2e-meta-<ts>` / `cerelay-e2e-<slug>-<ts>`),把末尾 timestamp 超过阈值(默认 30min,`CERELAY_E2E_STALE_THRESHOLD_SEC` 调)的整 project `compose down --volumes --rmi local --remove-orphans`(2026-05-06 起含 image)。无 timestamp 的不规范 project name 视同 stale 直接清——runner 默认都生成带 ts 的 name,无 ts 是异常残留。
+
+**孤儿 image 兜底**:cleanup 跑完一轮 project GC 后,会再扫 `cerelay-e2e-*` 前缀 image,对应 compose project 已经不在 active list 的直接 `docker rmi -f`,覆盖两个场景:(a) 修复前历史 teardown 没带 `--rmi local` 留下的累积;(b) project 名字被 docker compose ls 不识别但 image 还在。
 
 **手动 GC**:`bash test/cleanup-e2e-stale.sh`(读 `CERELAY_E2E_STALE_THRESHOLD_SEC`,无参数)。
 
-**强制全清**(不看时间):
+**强制全清**(不看时间):`bash test/cleanup-e2e-stale.sh --purge-all`,跳过 timestamp 判断,把所有 `cerelay-e2e-*` project 与 image 一次性回收。等价命令:
 
 ```bash
 docker compose ls -a --format json | python3 -c "import json,sys;[print(p['Name']) for p in json.load(sys.stdin) if p['Name'].startswith('cerelay-e2e')]" | \
-  xargs -I {} docker compose -p {} -f docker-compose.e2e.yml down --volumes --remove-orphans
+  xargs -I {} docker compose -p {} -f docker-compose.e2e.yml down --volumes --rmi local --remove-orphans
 ```
 
 **对比老行为**(已废弃):2026-05-02 前 `npm run test:gc` 入口在 cerelay 项目里没实现,本节文档之前是占位。现在以 `cleanup-e2e-stale.sh` 为权威入口。

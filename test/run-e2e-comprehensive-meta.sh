@@ -35,7 +35,9 @@ dump_failure_logs() {
 }
 
 teardown() {
-  docker compose -p "$project" -f "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  # --rmi local 同步清掉本次 build 的 image,防止每次跑残留 6 个
+  # (mock-anthropic/server/client-{a,b,c}/orchestrator) 永久累积
+  docker compose -p "$project" -f "$compose_file" down --volumes --rmi local --remove-orphans >/dev/null 2>&1 || true
 }
 
 _already_handled=0
@@ -53,7 +55,7 @@ on_exit() {
       echo "[e2e-meta] KEEP_ON_FAILURE=1: containers left for inspection (project=$project)"
       echo "[e2e-meta]   docker compose -p $project -f $compose_file ps"
       echo "[e2e-meta]   docker compose -p $project -f $compose_file logs server"
-      echo "[e2e-meta]   清理:docker compose -p $project -f $compose_file down --volumes"
+      echo "[e2e-meta]   清理:docker compose -p $project -f $compose_file down --volumes --rmi local"
     else
       echo "[e2e-meta] tearing down (logs preserved at $logs_root/);设 KEEP_ON_FAILURE=1 可保留 container"
       teardown
