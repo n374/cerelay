@@ -618,7 +618,8 @@ test("C1-initial-pipeline: 1100 个文件 initial sync 跑通 pipeline + manifes
     cwd,
     timeoutMs: 120_000,
     homeFixtureBulk: {
-      pathPrefix: ".claude/c1-bulk",
+      // 放在 plugins/ 子树下 — 默认 include_dirs 涵盖 plugins，避免依赖黑名单时代的全量同步
+      pathPrefix: ".claude/plugins/c1-bulk-fixture",
       count: FILE_COUNT,
       bytesPerFile: BYTES_PER_FILE,
     },
@@ -688,7 +689,7 @@ test("C2-revision-ack: server revision >= client acked + drift <= 50", async () 
     cwd,
     timeoutMs: 60_000,
     homeFixtureBulk: {
-      pathPrefix: ".claude/c2-bulk",
+      pathPrefix: ".claude/plugins/c2-bulk-fixture",
       count: FILE_COUNT,
       bytesPerFile: BYTES_PER_FILE,
     },

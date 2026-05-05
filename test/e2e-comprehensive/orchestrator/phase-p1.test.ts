@@ -165,15 +165,16 @@ test("C4-large-skipped(skipped 半段): > 1MB 文件被 manifest 标记 skipped"
 
   // homeFixtureBulk count=1 + bytesPerFile=1.5MB 触发 skipped。
   // agent applyHomeFixtureBulk 写 ${HOME}/${pathPrefix}/bulk_000000.txt
-  // → 完整路径 ~/.claude/c4-large/bulk_000000.txt
-  // → cache scope=claude-home, relPath=c4-large/bulk_000000.txt
+  // → 完整路径 ~/.claude/plugins/c4-large-fixture/bulk_000000.txt
+  // → cache scope=claude-home, relPath=plugins/c4-large-fixture/bulk_000000.txt
+  // (放在 plugins/ 子树下避开 default include_dirs 白名单过滤)
   const LARGE_BYTES = 1_500_000; // 1.5 MB > MAX_FILE_BYTES=1MB
   const result = await clients.run("client-a", {
     prompt: "trigger cache sync with one large file [C4-MARKER]",
     cwd,
     timeoutMs: 60_000,
     homeFixtureBulk: {
-      pathPrefix: ".claude/c4-large",
+      pathPrefix: ".claude/plugins/c4-large-fixture",
       count: 1,
       bytesPerFile: LARGE_BYTES,
     },
@@ -197,7 +198,7 @@ test("C4-large-skipped(skipped 半段): > 1MB 文件被 manifest 标记 skipped"
   const entry = await cacheAdmin.lookupEntry({
     deviceId: result.deviceId,
     scope: "claude-home",
-    relPath: "c4-large/bulk_000000.txt",
+    relPath: "plugins/c4-large-fixture/bulk_000000.txt",
   });
   assert.ok(
     entry,
