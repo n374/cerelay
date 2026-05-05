@@ -392,15 +392,15 @@ PR 1 验收(2026-05-03 闭环):
   - Minor #2 dump:`assertF4CrossCwdIsolation` 失败时 dump 完整 fileProxy + config-preloader + session.bootstrap probe 摘要
 - [x] e2e runner trap-based cleanup(commit `4292069`,顺手修)
 
-PR 2 验收:
-- [ ] e2e 27/27 全绿(P0 16 + P1-A 2 + P1-B 8 + P2 1)
-- [ ] meta 4/4 全绿(P0 3 + P2 1)
-- [ ] 上述 server / client unit / typecheck 同步全绿
-- [ ] Codex 终审通过
+PR 2 验收(2026-05-05 闭环):
+- [x] e2e 30/30 全绿(P0 16 + P1-A 2 + P1-B 11 + P2 1;baseline 实际 29 而不是 plan 写的 26,P2 落地后 30/30)
+- [x] meta 4/4 全绿(P0 3 + P2 1)
+- [x] server / client unit / typecheck 同步全绿
+- [ ] Codex 终审通过(T13 启动)
 
 整体验收:
-- [ ] §6 守护意图自查全部 ❌ 不中(除诚实声明的 (c) 受限)
-- [ ] `docs/e2e-comprehensive-testing.md` §2.3 P2 backlog 中 `F4-cross-cwd-fileproxy-isolation` 行从 🅿️ 加固待补 升级为 ✅ 落地
+- [x] §6 守护意图自查全部 ❌ 不中(除诚实声明的 (c) 受限——通过 `configPreloaderEvents.plan` 守计算计划层,不靠真实 ancestor FUSE read,INF-12 跟踪)
+- [x] `docs/e2e-comprehensive-testing.md` §2.3 P2 backlog 中 `F4-cross-cwd-fileproxy-isolation` 行从 🅿️ 加固待补 升级为 ✅ 落地
 
 ## 10. 相关引用
 
