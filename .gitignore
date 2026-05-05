@@ -36,3 +36,6 @@ __pycache__/
 # Git worktrees
 .worktrees/
 
+
+# E2E failure dumps (大量 server 日志 + path 敏感信息，不入 git)
+.claude/e2e-failure-*/

@@ -1,0 +1,1873 @@
+{
+  "events": [
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993683
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.config.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/settings.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777705182
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/remote-settings.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/Documents/Code/cerelay-capture-cwd/.claude/settings.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/backups",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993643
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/backups",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/backups/.claude.json.backup.1777993704576",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/backups/.claude.json.backup.1777993704576",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/backups/.claude.json.backup.1777993704576",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/backups",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/backups/.claude.json.backup.1777991395858",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777991400
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/policy-limits.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777177316
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/known_marketplaces.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087958
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777732690
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1776582673
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/cache",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1773329532
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/.claude",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777735024
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/cache/changelog.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776701796
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/bytedcli",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/agents",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/bytedcli-tce-single-cluster-deploy",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-base",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-calendar",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-contact",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-doc",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-drive",
+      "result": "missing"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/commands",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-event",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands/analyze-source.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1773762258
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands/cp.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087958
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-im",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands/mr.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/superpowers-marketplace",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087958
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-mail",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands/test-doc.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1775304588
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/superpowers-marketplace/.claude-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087958
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/openai-codex",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087209
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-minutes",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/commands/weekly.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1775304588
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/superpowers-marketplace/.claude-plugin/marketplace.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087958
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/openai-codex/.claude-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087209
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-openapi-explorer",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/openai-codex/.claude-plugin/marketplace.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087209
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-shared",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-sheets",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-skill-maker",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-task",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-vc",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/CLAUDE.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777654565
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-whiteboard",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-wiki",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-workflow-meeting-summary",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/lark-workflow-standup-report",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777636619
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/tech-doc-writing",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777637765
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/installed_plugins.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087402
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1773331950
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777695842
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777992548
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/rules",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/.claude/SKILL.md",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636503
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/tech-doc-writing/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777637790
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/.claude-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/bytedcli-tce-single-cluster-deploy/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.claude-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/agent-dispatch.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776600161
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/.claude-plugin/plugin.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.claude-plugin/plugin.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/agent-workflow-detail.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777637790
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/doc-conventions.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777992548
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/git-conventions.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/go-version.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1775329356
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/review-workflow.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777654565
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/commands",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/output-styles",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/rules/source-analyze.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1775304588
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/output-styles",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/agents",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/agents",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/themes",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/themes",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/hooks",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/hooks",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/hooks/hooks.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/hooks/hooks.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/monitors",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/monitors",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/settings.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/settings.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/.mcp.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.mcp.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/SKILL.md",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/SKILL.md",
+      "result": "missing"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/commands",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/agents",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/agents",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/agents/code-reviewer.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/commands/brainstorm.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/agents/codex-rescue.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/adversarial-review.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/commands/execute-plan.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/brainstorming",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/cancel.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-result-handling",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/commands/write-plan.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/dispatching-parallel-agents",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/rescue.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/gpt-5-4-prompting",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/executing-plans",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/finishing-a-development-branch",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/gpt-5-4-prompting/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-result-handling/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/result.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/receiving-code-review",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/review.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/requesting-code-review",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/setup.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/subagent-driven-development",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/commands/status.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/systematic-debugging",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/test-driven-development",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/using-git-worktrees",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/using-superpowers",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/verification-before-completion",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/writing-plans",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/writing-skills",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/brainstorming/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/verification-before-completion/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/systematic-debugging/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/finishing-a-development-branch/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/writing-skills/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/using-git-worktrees/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/receiving-code-review/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/test-driven-development/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/executing-plans/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/writing-plans/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/dispatching-parallel-agents/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/subagent-driven-development/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/using-superpowers/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/skills/requesting-code-review/SKILL.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777964300
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.lsp.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/sessions",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993684
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/.lsp.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/installed_plugins_v2.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/.orphaned_at",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.orphaned_at",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/mcp-needs-auth-cache.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/data",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777122286
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/data/codex-openai-codex",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777127635
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/session-env",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993683
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/data/superpowers-superpowers-marketplace",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777122286
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/session-env/37aae116-ce9c-46f8-87a1-acb9e6730ad3",
+      "result": "missing"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/session-env/37aae116-ce9c-46f8-87a1-acb9e6730ad3",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/sessions/86.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/sessions/86.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/sessions/86.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/hooks/run-hook.cmd",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/sessions",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/hooks/session-start",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/session-lifecycle-hook.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.codex",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/CHANGELOG.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087449
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.codex-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/LICENSE",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/process.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087422
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.cursor-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/NOTICE",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.git",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/app-server.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087436
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/prompts",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.gitattributes",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/broker-lifecycle.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087449
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.github",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/schemas",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777087404
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/state.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.gitignore",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/workspace.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.opencode",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/.version-bump.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/AGENTS.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/CLAUDE.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/CODE_OF_CONDUCT.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/GEMINI.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/LICENSE",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/README.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/RELEASE-NOTES.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/assets",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/docs",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/gemini-extension.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/package.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/scripts",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/broker-endpoint.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/superpowers-marketplace/superpowers/5.0.7/tests",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777088133
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/git.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/lib/fs.mjs",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777087405
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/session-env/37aae116-ce9c-46f8-87a1-acb9e6730ad3/sessionstart-hook-0.sh",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/session-env/37aae116-ce9c-46f8-87a1-acb9e6730ad3/sessionstart-hook-0.sh",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/ide",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/output-styles",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993704
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/memory",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/memory",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777993704
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/memory",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/.claude",
+      "result": "ok"
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/.claude/settings.local.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777735024
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.DS_Store",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777188436
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/37aae116-ce9c-46f8-87a1-acb9e6730ad3.jsonl",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.claude",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1774283295
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/bytedcli-tce-single-cluster-deploy",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.gitignore",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777645866
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/history.jsonl",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993650
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/README.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777637917
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.fuse_hidden000000f600000001",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777618665
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/file-history",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777964300
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/paste-cache",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1776692023
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.gitmodules",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1774279411
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/.git",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777975059
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plans",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777637947
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/memory",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777637765
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/proxy-data",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1775322778
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/brownfield.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636619
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/repos",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1773758161
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/examples",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777636905
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/scripts",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777176870
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777636839
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/proxy",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1775322823
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/workflow.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636568
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/tech-doc-writing",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/telemetry",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777637946
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/source_analyze",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1776582673
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/shell-snapshots",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777992337
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/tasks",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777699583
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/examples",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/examples/minimal-change.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636905
+    },
+    {
+      "op": "readdir",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates",
+      "result": "ok"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/contracts.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636838
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/proposal.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636722
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/quickstart.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636839
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/spec-delta.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636780
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/plan.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636722
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/data-model.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636784
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/tasks.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636723
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/project.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636719
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/research.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636783
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/constitution.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636717
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/spec-living.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636782
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/checklist.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636839
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/skills/spec-driven-docs/templates/adr.md",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777636782
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/flagged-plugins.json",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/claude-plugins-official",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777083348
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777083348
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777083348
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/37aae116-ce9c-46f8-87a1-acb9e6730ad3.jsonl",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993706
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/projects/-Users-n374-Documents-Code-cerelay-capture-cwd/37aae116-ce9c-46f8-87a1-acb9e6730ad3.jsonl",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1777993707
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/scripts/session-summary.sh",
+      "result": "ok",
+      "isDir": false,
+      "mtime": 1773768800
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/logs",
+      "result": "missing"
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/data/codex-openai-codex/state",
+      "result": "ok",
+      "isDir": true,
+      "mtime": 1777653539
+    },
+    {
+      "op": "getattr",
+      "path": "/Users/devuser/.claude/plugins/data/codex-openai-codex/state/cerelay-capture-cwd-25fcebc652015790",
+      "result": "missing"
+    }
+  ]
+}
