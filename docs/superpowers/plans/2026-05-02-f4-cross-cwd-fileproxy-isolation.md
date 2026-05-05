@@ -725,19 +725,22 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```typescript
 // session.bootstrap.plan probe(F4 P2 不变量 d 守护)
 this.adminEvents?.record("session.bootstrap.plan", sessionId, {
-  sessionId,
-  deviceId,
-  clientCwd: message.cwd,
-  runtimeRoot: runtime.runtimeRoot,
-  fileProxyMountPoint: fileProxy.mountPoint,
-  projectClaudeBindTarget: `${message.cwd}/.claude`,  // 与 claude-session-runtime.ts:328 mount --bind 目标一致
+  deviceId: message.deviceId ?? "",
+  clientCwd: message.cwd || ".",
+  runtimeRoot: runtime.rootDir,
+  fileProxyMountPoint: fileProxy?.mountPoint ?? "",
+  // FUSE source path（spec §5.1）：正常 = `${cwd}/.claude`，toggle / race 错挂时暴露差异。
+  // getter 直接读 FileProxyManager.roots["project-claude"]——单一 source of truth，
+  // 消除 server.ts 重复判 toggle 的逻辑漂移风险。
+  // 注：namespace mount --bind 目标始终是 $CERELAY_WORK_DIR/.claude，此字段反映 FUSE source，语义不同。
+  projectClaudeBindTarget: fileProxy?.getProjectClaudeFuseSource() ?? `${message.cwd || "."}/.claude`,
 });
 ```
 
 具体取值:
-- `runtime.runtimeRoot`:`createClaudeSessionRuntime` 返回对象的属性(若无则改读 `:1110/1111` 周围生成的 runtimeRoot 变量)
-- `fileProxy.mountPoint`:`FileProxyManager` 实例的 mountPoint 字段(若无暴露则需要在 `FileProxyManager` 加 getter)
-- `projectClaudeBindTarget`:与 bootstrap shell `claude-session-runtime.ts:328` 一致拼接
+- `runtime.rootDir`:`createClaudeSessionRuntime` 返回对象的 `rootDir` 属性
+- `fileProxy?.mountPoint`:`FileProxyManager` 实例的 mountPoint 字段（optional chaining 处理 mount namespace 关闭时 fileProxy=undefined）
+- `projectClaudeBindTarget`:**FUSE source path**，通过 `fileProxy.getProjectClaudeFuseSource()` getter 读取（单一 source of truth）；fallback 到 `${cwd}/.claude`
 
 - [ ] **Step 7.3: typecheck + server unit + e2e 回归**
 

@@ -342,6 +342,16 @@ export class FileProxyManager {
   }
 
   /**
+   * 返回 project-claude FUSE source 路径（即 `this.roots["project-claude"]` 当前值）。
+   * 正常情况下 = `${this.clientCwd}/.claude`；e2e meta 模式 toggle 命中时会被错挂
+   * 到另一 cwd——session.bootstrap.plan emit 用此 getter 反映真实状态，assertF4
+   * 据此守"FUSE source 不串台"。
+   */
+  public getProjectClaudeFuseSource(): string {
+    return this.roots["project-claude"];
+  }
+
+  /**
    * 将 root + relPath 拼成 client 本机物理路径（用于 admin event detail）。
    * this.roots[root] 是 client 侧该 root 的绝对路径；relPath 为空串时直接返回 root 路径。
    */

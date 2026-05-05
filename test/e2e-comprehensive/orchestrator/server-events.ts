@@ -191,6 +191,12 @@ export interface ConfigPreloaderPlanDetail {
 /**
  * F4 P2: SessionBootstrap 启动计划事件，携带 session 初始化关键路径。
  * 用于断言"每个 session 有独立的 runtimeRoot / mountPoint，彼此不共享"。
+ *
+ * `projectClaudeBindTarget` 字段语义：**FUSE source path**（即 server 侧
+ * `FileProxyManager.roots["project-claude"]` 的当前值），不是 namespace 内
+ * `mount --bind` 的目标。两者在正常情况下 = `${cwd}/.claude`，但 toggle / race
+ * 错挂 FUSE source 时会暴露差异——这正是 (d) 不变量"project-claude FUSE source
+ * 严格按 session 自己 cwd"的守护点。
  */
 export interface SessionBootstrapPlanDetail {
   // sessionId 由 AdminEvent 顶层携带，detail 不重复（避免与顶层冗余 + 类型契约冲突，

@@ -159,6 +159,11 @@ detail:
   clientCwd: string;
   runtimeRoot: string;
   fileProxyMountPoint: string;
+  // FUSE source path：即 server 侧 FileProxyManager.roots["project-claude"] 的当前值。
+  // 正常情况下 = `${cwd}/.claude`；toggle / race 错挂时暴露差异——这正是 (d) 不变量
+  // "project-claude FUSE source 严格按 session 自己 cwd"的守护点。
+  // 注：namespace 内 `mount --bind` 目标始终是 $CERELAY_WORK_DIR/.claude（不随 toggle 变），
+  // 此字段反映 FUSE source，不是 bind mount 目标——两者语义不同。
   projectClaudeBindTarget: string;
 }
 ```
