@@ -2,7 +2,7 @@
 
 **日期**:2026-05-02
 **作者**:Claude(Opus 4.7)× Codex(gpt-5.4-codex)方案共创
-**状态**:待用户批准
+**状态**:✅ 完整交付(2026-05-05);PR1+PR2 双方 Codex 终审通过;13 task 全部闭环
 
 ## 1. 背景与目标
 
@@ -396,7 +396,7 @@ PR 2 验收(2026-05-05 闭环):
 - [x] e2e 30/30 全绿(P0 16 + P1-A 2 + P1-B 11 + P2 1;baseline 实际 29 而不是 plan 写的 26,P2 落地后 30/30)
 - [x] meta 4/4 全绿(P0 3 + P2 1)
 - [x] server / client unit / typecheck 同步全绿
-- [ ] Codex 终审通过(T13 启动)
+- [x] Codex 终审 Conditional Approve(0 critical / 1 important / 0 minor;Important = (b) shared cache 命中污染 home-clientCwd 强断言缺失 → commit `4d99bd4` 已修)
 
 整体验收:
 - [x] §6 守护意图自查全部 ❌ 不中(除诚实声明的 (c) 受限——通过 `configPreloaderEvents.plan` 守计算计划层,不靠真实 ancestor FUSE read,INF-12 跟踪)
