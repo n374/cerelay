@@ -2,30 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **文档规范**：以 `~/.claude/rules/doc-conventions.md` 为准（**纯中文**，唯一例外是 git commit message / MR title）。Spec-Driven 文档（`project.md` / `constitution.md` / `specs/` / `changes/` / `archive/` / `decisions/`）放在 [`docs/`](./docs/README.md) 下，不带 `openspec/` 前缀（项目级覆盖了 `~/.claude/skills/spec-driven-docs/SKILL.md` 的默认目录结构）。新增非 spec-driven 类 sub-doc 暂在 [`docs/architecture.md` §11 子文档索引](./docs/architecture.md#11-子文档索引--sub-documents-index) 登记，等 `docs-restructure` change 落地后会被新结构替代。
-
-## Spec-Driven 目录覆盖 / Spec-Driven Layout Override
-
-本项目对 `~/.claude/skills/spec-driven-docs/SKILL.md` 的默认目录结构做了如下覆盖：
-
-| SKILL 默认 | 本项目实际 | 备注 |
-|---|---|---|
-| `openspec/project.md` | `docs/project.md` | 去掉 `openspec/` 前缀 |
-| `openspec/memory/constitution.md` | `docs/constitution.md` | 同时去掉 `memory/` 中间层 |
-| `openspec/specs/<cap>/spec.md` | `docs/specs/<cap>/spec.md` | — |
-| `openspec/changes/<name>/` | `docs/changes/<name>/` | — |
-| `openspec/archive/<dated>/` | `docs/archive/<dated>/` | — |
-| `openspec/decisions/NNNN-*.md` | `docs/decisions/NNNN-*.md` | — |
-
-`docs/superpowers/`（superpowers skill 产出，按日期前缀的 specs/plans）与本流程**正交**，维持现状。
+> **文档规范**：项目所有 `docs/` 下文档遵循 doc-init skill（`~/.claude/skills/doc-init/AGENTS.md`），项目特有扩展在 [`docs/AGENTS.md`](./docs/AGENTS.md)。**纯中文**（唯一例外是 git commit message / MR title）。新增内容按 doc-init 标准骨架进对应位置：架构 → [`docs/architecture/`](./docs/architecture/README.md)（README + modules/）；运维 SOP → [`docs/operations/`](./docs/operations/README.md)；测试 → [`docs/testing/`](./docs/testing/README.md)；项目 worldview / 治理 → [`docs/overview/`](./docs/overview/)（project / constitution / glossary）；能力规范 → [`docs/specs/<cap>/`](./docs/specs/)；进行中变更 → [`docs/changes/<slug>/`](./docs/changes/)；归档 → [`docs/archive/YYYY-MM-DD-<slug>/`](./docs/archive/)；决策 → [`docs/decisions/`](./docs/decisions/)。
 
 阅读入口：[`docs/README.md`](./docs/README.md)。
 
+> **历史说明**：项目曾对 `~/.claude/skills/spec-driven-docs/SKILL.md` 与 superpowers skill 默认路径做过扁平化覆盖（`docs/project.md` / `docs/constitution.md` / `docs/superpowers/`）。2026-05-11 docs-restructure 后全部撤回，统一对齐 doc-init 标准骨架；superpowers 历史产出已按 topic 归档到 [`docs/archive/`](./docs/archive/)。未来再用 superpowers `brainstorming` / `writing-plans` 工作流时**必须 override**默认路径到 `docs/changes/<slug>/`（详见 [`docs/AGENTS.md`](./docs/AGENTS.md) 「与外部 skill 的集成约束」段），禁止再创建 `docs/superpowers/` 子树。
+
 ## E2E 综合测试覆盖审计 / E2E Comprehensive Test Coverage Audit
 
-> **强制约束**：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开 [`docs/e2e-comprehensive-testing.md`](./docs/e2e-comprehensive-testing.md) §2 覆盖矩阵，按下面三问做一次审计；不允许"功能合入但矩阵未审计"，review 阶段把这条作为硬卡点。
+> **强制约束**：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开 [`docs/testing/e2e-comprehensive-testing.md`](./docs/testing/e2e-comprehensive-testing.md) §2 覆盖矩阵，按下面三问做一次审计；不允许"功能合入但矩阵未审计"，review 阶段把这条作为硬卡点。
 >
-> **Mandatory**: After every feature dev / update / fix (before commit), open [`docs/e2e-comprehensive-testing.md`](./docs/e2e-comprehensive-testing.md) §2 coverage matrix and answer the three questions below. "Feature merged without coverage audit" is not allowed — reviewers MUST treat this as a hard blocker.
+> **Mandatory**: After every feature dev / update / fix (before commit), open [`docs/testing/e2e-comprehensive-testing.md`](./docs/testing/e2e-comprehensive-testing.md) §2 coverage matrix and answer the three questions below. "Feature merged without coverage audit" is not allowed — reviewers MUST treat this as a hard blocker.
 
 1. 本次变更是否引入了**新的协议字段、新的工具、新的拓扑、新的隔离边界、新的 cache 维度**之一？
    _Did this change introduce a new protocol field, tool, topology, isolation boundary, or cache dimension?_
@@ -176,7 +163,17 @@ cd server && npm test -- test/session.test.ts
 
 # Node.js 原生测试运行器的其他选项
 cd server && node --import tsx --test --test-concurrency=1 test/**/*.test.ts
+
+# E2E 集成测试（位于 server/test/e2e-*.test.ts，无独立 npm script）
+# 单独跑某个 e2e（示例：FileAgent / shadow MCP bash / 真实 claude CLI）
+cd server && node --import tsx --test --test-concurrency=1 test/e2e-file-agent.test.ts
+cd server && node --import tsx --test --test-concurrency=1 test/e2e-mcp-shadow-bash.test.ts
+cd server && node --import tsx --test --test-concurrency=1 test/e2e-real-claude-bash.test.ts
+# 全部 e2e 一把跑
+cd server && node --import tsx --test --test-concurrency=1 'test/e2e-*.test.ts'
 ```
+
+E2E 覆盖矩阵的硬卡点见 [`docs/testing/e2e-comprehensive-testing.md`](./docs/testing/e2e-comprehensive-testing.md) §2；新加 case 要在矩阵里登记。
 
 **注意 / Note**: 测试使用 `--test-concurrency=1` 防止并发干扰。
 
@@ -269,8 +266,9 @@ cerelay/
 - `settings.local.json` 必须继续作为项目级 hook 配置注入到 `{cwd}/.claude/settings.local.json`。
 - Server 侧凭证必须作为 `home-claude/.credentials.json` shadow file 暴露给 runtime，且读写、truncate 都应作用在 Server 侧本地凭证文件。
 - 凭证的真实存放位置为 `${CERELAY_DATA_DIR:-/var/lib/cerelay}/credentials/default/.credentials.json`（由 docker-compose 的 `cerelay-data` named volume 持久化）。首次启动文件不存在是允许的——CC `login` 会通过 FUSE create 创建该文件；shadow file 映射必须**总是注入**，不得因为文件不存在就跳过，否则写入会穿透到 Client 侧，违反隔离约束。
-- Data 目录（`${CERELAY_DATA_DIR:-/var/lib/cerelay}`）还用于存放 Client 文件同步缓存（`client-cache/<deviceId>/<cwdHash>/`），禁止把业务数据写到容器根文件系统其他位置。
-- `~/.claude/settings.json` 中的"登录态字段"——`env.ANTHROPIC_BASE_URL` / `env.ANTHROPIC_API_KEY` / `env.ANTHROPIC_AUTH_TOKEN` / 顶层 `apiKeyHelper`——必须经 `server/src/claude-settings-redaction.ts` 在 server → CC 出口处过滤后才能进入 namespace。三处出口（启动期 snapshot 预热 / 运行时 cache 命中 / 运行时 Client 穿透）**必须全部 redact**，不得依赖 Client 侧清洁。Client 端 settings.json 原文不变、cache blob 也保留 Client 原文不过滤，过滤只发生在 server → namespace 最后一公里；这样 Client 改动经 cache delta 同步后再次读取仍然是过滤版。Login-state fields in `~/.claude/settings.json` MUST be redacted at the server→CC egress (3 paths) — never trust Client-side cleanliness. 详见 `docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md`。**`~/.claude.json` 中的同类字段（`apiKeyHelper` / `oauthAccount` 等）暂不过滤** / not yet handled，后续若发现实际泄漏再扩展，参考 spec §9.1。
+- Data 目录（`${CERELAY_DATA_DIR:-/var/lib/cerelay}`）还用于存放 Client 文件同步缓存（device-only 后路径为 `client-cache/<deviceId>/`，不再有 `<cwdHash>` 子目录；细节见下文「Client 文件缓存」段），禁止把业务数据写到容器根文件系统其他位置。
+- `~/.claude/settings.json` 中的"登录态字段"——`env.ANTHROPIC_BASE_URL` / `env.ANTHROPIC_API_KEY` / `env.ANTHROPIC_AUTH_TOKEN` / 顶层 `apiKeyHelper`——必须经 `server/src/claude-settings-redaction.ts` 在 server → CC 出口处过滤后才能进入 namespace。三处出口（启动期 snapshot 预热 / 运行时 cache 命中 / 运行时 Client 穿透）**必须全部 redact**，不得依赖 Client 侧清洁。Client 端 settings.json 原文不变、cache blob 也保留 Client 原文不过滤，过滤只发生在 server → namespace 最后一公里；这样 Client 改动经 cache delta 同步后再次读取仍然是过滤版。Login-state fields in `~/.claude/settings.json` MUST be redacted at the server→CC egress (3 paths) — never trust Client-side cleanliness. 详见 `docs/archive/2026-04-30-shadow-claude-settings-redaction/design.md`。
+  - **TODO（未结安全口子）**：`~/.claude.json` 中的同类字段（`apiKeyHelper` / `oauthAccount` 等）目前**暂不过滤** / not yet handled。tracker：上述 spec §9.1（包含触发条件与扩展点）。若实现该过滤，请同步更新本段并在 spec §9.1 里标注完成日期 + change 链接，再删除本 TODO。
 
 ```typescript
 // 关键调用位置：session.ts 中的 createSessionRuntime()
@@ -303,7 +301,7 @@ hooks: {
 
 **文件**: `server/src/mcp-routed/`, `server/src/mcp-ipc-host.ts`, `server/src/mcp-cc-injection.ts`
 
-**目标**：绕开 PreToolUse hook 的协议硬约束（deny 分支必然 `tool_result.is_error: true`），让模型看到的工具结果 `is_error` 由 cerelay 显式控制。详见 `docs/plan-d-mcp-shadow-tools.md`。
+**目标**：绕开 PreToolUse hook 的协议硬约束（deny 分支必然 `tool_result.is_error: true`），让模型看到的工具结果 `is_error` 由 cerelay 显式控制。详见 [`docs/architecture/modules/shadow-mcp.md`](./docs/architecture/modules/shadow-mcp.md)（设计原稿归档于 [`docs/archive/2026-05-11-plan-d-mcp-shadow-tools/design.md`](./docs/archive/2026-05-11-plan-d-mcp-shadow-tools/design.md)）。
 
 **架构**：
 
@@ -372,7 +370,7 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
 
 **文件**: `server/src/file-agent/`（FileAgent 底座 + ConfigPreloader 上层）, `client/src/cache-sync.ts`, `client/src/device-id.ts`
 
-> **架构（2026-05-02 起 device-only）**：缓存维度从 `(deviceId, cwd)` 收敛到 `deviceId`。FileAgent（`server/src/file-agent/index.ts`）作为 per-device 单例底座，对外暴露 `read / stat / readdir / prefetch + ttlMs` 四个接口；ConfigPreloader（`server/src/config-preloader.ts`）作为启动期预热模块，FUSE Host（`server/src/file-proxy-manager.ts`）共享 store 命中。详见 plan `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md`。
+> **架构（2026-05-02 起 device-only）**：缓存维度从 `(deviceId, cwd)` 收敛到 `deviceId`。FileAgent（`server/src/file-agent/index.ts`）作为 per-device 单例底座，对外暴露 `read / stat / readdir / prefetch + ttlMs` 四个接口；ConfigPreloader（`server/src/config-preloader.ts`）作为启动期预热模块，FUSE Host（`server/src/file-proxy-manager.ts`）共享 store 命中。详见 plan `docs/archive/2026-05-02-file-agent-and-config-preloader/plan.md`。
 
 - 目标：降低 Client 每次连接的启动开销 + 让同一 device 跨 cwd 共享 manifest 与 blob 池
 - 存储：`${CERELAY_DATA_DIR}/client-cache/<deviceId>/`（device-only，**不再有 cwdHash 子目录**）
@@ -397,7 +395,7 @@ CC PTY ──stdio JSON-RPC──► cerelay-routed/index.ts (per-session 子进
 
 > **2026-05-05 起语义反转**：默认配置由"列黑名单跳过若干目录"改为"列白名单只同步若干目录"。两个字段并存：先按 `include_dirs` 通过，再按 `exclude_dirs` 剪枝。
 
-- `include_dirs` 默认列表：CC 启动期会 readdir/getattr 的顶级目录与单文件——`plugins`、`projects`、`sessions`、`backups`、`skills`、`commands`、`agents`、`shell-snapshots`、`session-env`、`file-history`、`paste-cache`、`cache`、`tasks`、`todos`、`telemetry`、`statsig`、`ide`、`settings.json`、`settings.local.json`、`CLAUDE.md`、`CLAUDE.local.md`、`.credentials.json`、`history.jsonl`。**该列表来自一次真实 CC 容器 capture（`CERELAY_CAPTURE_SEED` 模式）的访问名单**，避免凭印象 hand-curate；capture 数据归档于 `.claude/seed-capture-2026-05-05.json`
+- `include_dirs` 默认列表的**权威源**是 `client/src/config.ts` 中的 `DEFAULT_INCLUDE_DIRS`（由 `templateDefaults.includeDirs` 推导），覆盖 CC 启动期会 readdir/getattr 的顶级目录与单文件（`plugins` / `projects` / `sessions` / `backups` / `skills` / `commands` / `agents` / `shell-snapshots` / `settings.json` / `settings.local.json` / `CLAUDE.md` / `.credentials.json` 等等——以代码为准，本文档不再罗列以避免漂移）。**该列表来自一次真实 CC 容器 capture（`CERELAY_CAPTURE_SEED` 模式）的访问名单**，避免凭印象 hand-curate；capture 数据归档于 `.claude/seed-capture-2026-05-05.json`。改默认列表必须改 `templateDefaults` + 跑 `client/test/config.test.ts`。
 - `exclude_dirs` 默认空数组——黑名单语义保留，留给用户在 include 范围内补充剪枝（例如 `plugins/cache/old-stuff`）
 - **空 include_dirs = 放行所有**：旧 toml（升级前没有 `include_dirs` 字段的 client）解析时 `includeDirs=[]`，过滤器视为不限制范围 → 行为与 v1 完全等价。新装/重置 toml 时才走默认白名单
 - 过滤实现（`createScanFilter`）：dir/file 同一套规则——relPath 在某个 include prefix 之下、或者是某个 include prefix 的祖先（保证 walkDir 递归得进 include 子树），并且不在任何 exclude 子树之下，才被收录
@@ -603,7 +601,7 @@ CERELAY_ENABLE_MOUNT_NAMESPACE=false npm run server:up
 ## 相关文档 / Related Documentation
 
 - `README.md`: 项目总体介绍和快速开始
-- `.claude/ROADMAP.md`: 功能路线图
+- `docs/operations/roadmap.md`: 功能路线图
 - `docker-compose.yml`: 容器配置详解
 - `Dockerfile`: 镜像构建步骤
 

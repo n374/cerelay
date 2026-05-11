@@ -1,8 +1,12 @@
+<!-- doc-init template version: v1.0 -->
 # constitution.md — Cerelay 项目宪法
+
+> **Owner**: 项目架构组
+> **Reviewers**: 全员（修改红线需要 ≥2 人 review + ADR 记录）
 
 > 本文件定义项目的**治理原则与红线**：测试要求、隔离边界、安全约束、协作流程。
 >
-> 与 `project.md` 的区别：project.md 描述事实（系统是什么样），本文件描述要求（系统必须遵守什么）。
+> 与 [`project.md`](./project.md) 的区别：project.md 描述事实（系统是什么样），本文件描述要求（系统必须遵守什么）。
 >
 > **修改规则**：本文件每一条原则都应有出处（用户共识 / 实际事故 / 上游规范）。新增 / 修改 / 删除原则必须通过 change 流程并记录到 ADR。
 
@@ -10,7 +14,7 @@
 
 ### 1.1 E2E 综合测试覆盖审计（硬卡点）
 
-**强制约束**：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开 `docs/e2e-comprehensive-testing.md` §2 覆盖矩阵，按以下三问审计；不允许"功能合入但矩阵未审计"。
+**强制约束**：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开 [`../testing/e2e-comprehensive-testing.md`](../testing/e2e-comprehensive-testing.md) §2 覆盖矩阵，按以下三问审计；不允许"功能合入但矩阵未审计"。
 
 1. 本次变更是否引入了**新的协议字段、新的工具、新的拓扑、新的隔离边界、新的 cache 维度**之一？
 2. 如果是，§2.1 / §2.2 / §2.3 是否已有 case 覆盖？
@@ -102,7 +106,7 @@
 
 ### 4.1 Spec-Driven Docs 流程
 
-所有非豁免任务必须按 `~/.claude/skills/spec-driven-docs/SKILL.md` 与 `workflow.md` 执行：proposal → clarify → plan → tasks → implement → verify → archive。
+所有非豁免任务必须按 doc-init skill（`~/.claude/skills/doc-init/AGENTS.md` + `workflow.md`）执行：proposal → design → tasks → spec-delta → archive。详见项目 [`../AGENTS.md`](../AGENTS.md)。
 
 豁免清单：
 - bug 修复 / typo / 纯格式调整
@@ -149,5 +153,5 @@
 | 1.1 E2E 三问 | 项目 CLAUDE.md 顶部硬卡点条款 |
 | 2.1 / 2.2 / 2.3 隔离边界 | F4 P2 cross-cwd-fileproxy-isolation 收尾后的事实约束 + Plan D 双路径不变量 |
 | 3.x 红线 | 用户全局 CLAUDE.md `~/.claude/CLAUDE.md` 红线禁令 |
-| 4.1 / 4.2 / 4.3 流程 | `~/.claude/skills/spec-driven-docs/` + `~/.claude/rules/review-workflow.md` + `~/.claude/rules/doc-conventions.md` |
-| 5.x 变更管理 | spec-driven-docs SKILL.md 文档放置铁律 |
+| 4.1 / 4.2 / 4.3 流程 | `~/.claude/skills/doc-init/AGENTS.md` + `~/.claude/rules/review-workflow.md` + `~/.claude/rules/git-conventions.md` |
+| 5.x 变更管理 | doc-init skill AGENTS.md §5-§7 |

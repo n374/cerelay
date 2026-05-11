@@ -1,8 +1,12 @@
+<!-- doc-init template version: v1.0 -->
 # project.md — Cerelay 项目 Worldview
+
+> **Owner**: 项目 Tech Lead
+> **Reviewers**: 架构组
 
 > 本文件定义项目的"世界观"：技术栈版本、架构铁律、模块划分、已知技术债。所有 change 在 plan 阶段必须对照本文件做约束检查。
 >
-> 与 `constitution.md`（治理原则）的区别：本文件描述**事实现状**（系统是什么样），constitution 描述**主观要求**（系统必须遵守什么）。
+> 与 [`constitution.md`](./constitution.md)（治理原则）的区别：本文件描述**事实现状**（系统是什么样），constitution 描述**主观要求**（系统必须遵守什么）。
 
 ## 1. 技术栈版本
 
@@ -88,7 +92,7 @@ Client（client/）         Server（server/）             Claude Code CLI
 | # | 描述 | 触达条件 |
 |---|---|---|
 | TD-1 | `~/.claude.json` 中的登录态字段（`apiKeyHelper` / `oauthAccount` 等）暂未做 redaction，仅 `~/.claude/settings.json` 做了 | 出现实际泄漏证据 / 用户主动要求覆盖 |
-| TD-2 | `docs/` 顶层 6 份既有文档（`architecture.md` 等）未按 Spec-Driven 模型组织 | 独立 change `docs-restructure` 启动时 |
+| ~~TD-2~~ | ~~`docs/` 顶层 6 份既有文档未按 Spec-Driven 模型组织~~ | ✅ **Resolved 2026-05-11**：docs-restructure 完成，所有顶层文档按 doc-init 标准骨架重组（architecture/ + operations/ + testing/ + overview/） |
 | TD-3 | living spec 仅覆盖 2 个 capability（`shadow-mcp-tools` / `client-config-sync`），其他能力未反向生成 | 后续 change 触达对应能力时通过 baseline change 反向补齐 |
 | TD-4 | Mini permission engine 仅支持 `Bash(prefix:*)` / exact / tool-level 三种规则形式，CC 未来若引入 regex / env-var 替换需要扩展 | CC 升级到带新 permission 语法的版本时 |
 | TD-5 | shadow-mcp-tools NFR-1 降级安全（MCPIpcHost 启动失败仅 warn 不阻塞 session）无显式 e2e 守护，依赖代码 try/catch 实现 | 后续 change 触达 `server/src/mcp-ipc-host.ts` 时补 e2e；来源 baseline-shadow-mcp-clientcache BD-1 |
