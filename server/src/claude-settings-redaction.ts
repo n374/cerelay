@@ -14,7 +14,7 @@ import type { CacheScope } from "./protocol.js";
  *   - 原文无登录态字段：byte-equal 返回，避免重新序列化引入字段顺序/缩进漂移
  *   - 命中：JSON.stringify minify + trailing whitespace 补齐 size，让 stat 路径无需改动
  *
- * 详见 docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md
+ * 详见 docs/archive/2026-04-30-shadow-claude-settings-redaction/design.md
  *
  * 未尽事项（不在本次范围）：
  *   ~/.claude.json 也可能含 apiKeyHelper / oauthAccount 等登录态字段，

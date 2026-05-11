@@ -6,8 +6,8 @@
 //   ((a) fileProxy 三 root 内容不串、(b) 共享 ClientCacheStore 命中污染、
 //   (c) cwd-ancestor walk 计算计划不串、(d) project-claude bind mount 严格按 session cwd)
 //
-// Spec:docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md
-// Plan:docs/superpowers/plans/2026-05-02-f4-cross-cwd-fileproxy-isolation.md Task 10
+// Spec:docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md
+// Plan:docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/plan.md Task 10
 // ============================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";

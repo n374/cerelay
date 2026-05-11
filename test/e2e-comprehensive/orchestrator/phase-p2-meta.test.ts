@@ -11,7 +11,7 @@
 //   assertF4CrossCwdIsolation (d) 检查 sessionB.projectClaudeBindTarget !== cwdB/.claude
 //   → 捕获串台 → throw。不需要 serverExec.run cat probe，spawn.ready 后立即可断言。
 //
-// Spec: docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md §5.4
+// Spec: docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md §5.4
 // ============================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -1,7 +1,7 @@
 # ============================================================
 # Cerelay — E2E 综合测试编排
 # 拓扑：orchestrator + mock-anthropic + server + client-a + client-b + client-c
-# 详见 docs/e2e-comprehensive-testing.md §3
+# 详见 docs/testing/e2e-comprehensive-testing.md §3
 #
 # client-c 专用于 C4-truncated case：通过 CERELAY_E2E_MAX_SCOPE_BYTES
 # 把 cache scope budget 从 100MB 降到 256KB，让 fixture 触发 truncated

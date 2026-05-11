@@ -73,7 +73,7 @@ export const mockAdmin = {
 // ---- 常用剧本 builders ----
 // 注意：events[*].kind 直接对应 SSE wire-format 的 event: 名（content_block_delta 是
 // Anthropic 规范名，data payload 内 delta.type 区分 text_delta / input_json_delta）。
-// 详见 docs/e2e-comprehensive-testing.md §3.2 SSE event 命名说明。
+// 详见 docs/testing/e2e-comprehensive-testing.md §3.2 SSE event 命名说明。
 
 export function scriptToolUse(opts: { toolName: string; toolUseId: string; input: Record<string, unknown> }): ScriptDef["respond"] {
   return {

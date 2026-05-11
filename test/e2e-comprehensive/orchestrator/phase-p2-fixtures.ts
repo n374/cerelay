@@ -5,7 +5,7 @@
 // 之前 phase-p2-meta.test.ts `import { F4_CROSS_FIXTURE_FILES } from './phase-p2.test.js'`
 // 会让 phase-p2 主 case 的 test() 也在 meta script 进程内注册执行,造成 isolation 污染。
 //
-// Spec:docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md §5.2
+// Spec:docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md §5.2
 // ============================================================
 
 /**

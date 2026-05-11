@@ -7,7 +7,7 @@
  * - 那个测试验"redact 输出字节正确"
  * - 本测试验"site 字段精确等值 + bypass on 时切到 redact.bypassed event"
  *
- * 设计依据：docs/e2e-comprehensive-testing.md §11.1 C2——e2e 不可稳定触发
+ * 设计依据：docs/testing/e2e-comprehensive-testing.md §11.1 C2——e2e 不可稳定触发
  * cache-hit / passthrough 两种 site，降级 server 单测覆盖。
  */
 

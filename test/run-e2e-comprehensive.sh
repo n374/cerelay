@@ -1,7 +1,7 @@
 #!/bin/sh
 # ============================================================
 # Cerelay E2E 综合测试入口
-# 详见 docs/e2e-comprehensive-testing.md §3.5
+# 详见 docs/testing/e2e-comprehensive-testing.md §3.5
 # ============================================================
 set -eu
 

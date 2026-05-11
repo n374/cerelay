@@ -1,6 +1,6 @@
 // P0-B-4 meta-tests：故意引入 regression 验证 P0 主套件能拦住。
 //
-// docs/e2e-comprehensive-testing.md §8 Testing the Test Infrastructure 列三类：
+// docs/testing/e2e-comprehensive-testing.md §8 Testing the Test Infrastructure 列三类：
 //   - meta-ifs-bug: 注入 IFS bug → B4/D3 该抓到（断言在 set -u 下崩）
 //   - meta-redact-leak: 关掉 redact → E1 该抓到（断言 redact event 触发）
 //   - meta-deviceid-collision: 让 client-a / client-b 共用同 deviceId → F3 该抓到

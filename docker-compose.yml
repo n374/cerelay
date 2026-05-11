@@ -45,7 +45,7 @@ services:
       - CERELAY_DATA_DIR=${CERELAY_DATA_DIR:-/var/lib/cerelay}
       # Plan D shadow MCP tools 总开关（默认 true）。设为 false/0/no/off 可
       # 回退到 legacy PreToolUse hook 路径（is_error 协议硬约束 = true）。
-      # 详见 docs/plan-d-mcp-shadow-tools.md 与 CLAUDE.md "Shadow MCP Tools" 章节。
+      # 详见 docs/architecture/modules/shadow-mcp.md 与 CLAUDE.md "Shadow MCP Tools" 章节。
       - CERELAY_ENABLE_SHADOW_MCP=${CERELAY_ENABLE_SHADOW_MCP:-true}
 
     # 端口映射：宿主机端口 → 容器内端口

@@ -1,5 +1,5 @@
 // FileAgent 对外接口与结果类型定义。
-// 参考 docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md §3.1。
+// 参考 docs/archive/2026-05-02-file-agent-and-config-preloader/plan.md §3.1。
 //
 // 设计原则（plan §2）：
 //   P2 接口窄面：只暴露 read / stat / readdir / prefetch + ttlMs

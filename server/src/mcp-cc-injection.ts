@@ -165,7 +165,7 @@ export function buildShadowMcpInjectionArgs(
  * 文案是 SDK 兜底 `<tool_use_error>...is not enabled in this context...</tool_use_error>`，
  * 而不是这里返回的字符串。本函数只在真模型场景下被命中，由
  * `server/test/e2e-real-claude-bash.test.ts` 守护。详见
- * `docs/e2e-comprehensive-testing.md` §12.2 INF-10 行的 ❌ Won't fix 探索结论。
+ * `docs/testing/e2e-comprehensive-testing.md` §12.2 INF-10 行的 ❌ Won't fix 探索结论。
  */
 export function buildShadowFallbackReason(builtinName: string): string | null {
   const shadow = SHADOW_TOOLS.find((tool) => tool.builtinName === builtinName);

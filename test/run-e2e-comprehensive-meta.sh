@@ -1,7 +1,7 @@
 #!/bin/sh
 # ============================================================
 # Cerelay E2E meta-tests 入口（仅手动触发）
-# docs/e2e-comprehensive-testing.md §8 Testing the Test Infrastructure
+# docs/testing/e2e-comprehensive-testing.md §8 Testing the Test Infrastructure
 #
 # 跑 phase-p0-meta.test.ts：故意引入 regression（IFS bug / redact-leak /
 # deviceid-collision），验证主套件 phase-p0 能拦住对应失效场景。

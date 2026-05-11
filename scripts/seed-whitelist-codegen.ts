@@ -93,7 +93,7 @@ function main(): void {
   out.push(`// Capture source: ${path.basename(inputPath)}`);
   out.push("//");
   out.push(`// 重新生成: node --import tsx scripts/seed-whitelist-codegen.ts <capture.json> > server/src/seed-whitelist.ts`);
-  out.push(`// Capture 流程见 docs/superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md §10.2`);
+  out.push(`// Capture 流程见 docs/archive/2026-05-01-access-ledger-driven-cache/design.md §10.2`);
   out.push("");
   out.push(`import type { SyncPlan } from "./protocol.js";`);
   out.push("");

@@ -1,5 +1,5 @@
 // ============================================================
-// P1 阶段 e2e case（详见 docs/e2e-comprehensive-testing.md §2.2 / §5）
+// P1 阶段 e2e case（详见 docs/testing/e2e-comprehensive-testing.md §2.2 / §5）
 //
 // P1-A 当前批次（无基础设施改动、纯测试代码即可 honest 落地）：
 //   - A5-fallback-guidance：shadow MCP 启用 + 内置 Bash 被 deny → 脚本化下一轮

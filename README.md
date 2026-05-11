@@ -4,9 +4,9 @@
 
 **Cerelay** lets you run a centralized Claude Code service remotely, then connect to it from your local machine via the `cerelay` CLI. Tool calls always run locally — your files, shell, and git stay on your machine while the remote handles the model and PTY.
 
-> 想了解 Cerelay 的内部架构、技术选型、核心机制？请看 [`docs/architecture.md`](./docs/architecture.md)。
+> 想了解 Cerelay 的内部架构、技术选型、核心机制？请看 [`docs/architecture/README.md`](./docs/architecture/README.md)。
 >
-> Looking for the internal architecture, technology choices, or implementation details? See [`docs/architecture.md`](./docs/architecture.md).
+> Looking for the internal architecture, technology choices, or implementation details? See [`docs/architecture/README.md`](./docs/architecture/README.md).
 
 ---
 
@@ -79,7 +79,7 @@ npm run server:down        # 停止容器
 
 容器使用 `cerelay-data` named volume 持久化登录凭证。首次启动凭证为空，连上 Client 后执行 `claude login` 即可。
 
-> 容器化部署的完整指南（卷映射、镜像构建、SOCKS5 代理细节）见 [`docs/brain-docker.md`](./docs/brain-docker.md)。
+> 容器化部署的完整指南（卷映射、镜像构建、SOCKS5 代理细节）见 [`docs/operations/brain-docker.md`](./docs/operations/brain-docker.md)。
 
 #### 本地直跑 / Run Locally
 
@@ -239,13 +239,13 @@ CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
 
 容器内所有公网出站流量都经由 sing-box TUN 走 SOCKS5；代理异常或 sing-box 退出时容器会自动断开，由 Docker 重启策略接管。依赖 Linux 容器能力（`NET_ADMIN`、`/dev/net/tun`、`nftables`）。
 
-> 完整代理参数（DNS、UDP 策略、TUN 段等）见 [`docs/brain-docker.md`](./docs/brain-docker.md) 与 [`docs/architecture.md` §8](./docs/architecture.md#8-系统级环境变量--system-level-environment-variables)。
+> 完整代理参数（DNS、UDP 策略、TUN 段等）见 [`docs/operations/brain-docker.md`](./docs/operations/brain-docker.md) 与 [`docs/architecture/README.md` §8](./docs/architecture/README.md#8-系统级环境变量--system-level-environment-variables)。
 
 ---
 
 ## 用户环境变量 / User-facing Environment Variables
 
-> 这里只列与"使用 cerelay"直接相关的变量。系统级 / 部署调试相关变量见 [`docs/architecture.md` §8](./docs/architecture.md#8-系统级环境变量--system-level-environment-variables)。
+> 这里只列与"使用 cerelay"直接相关的变量。系统级 / 部署调试相关变量见 [`docs/architecture/README.md` §8](./docs/architecture/README.md#8-系统级环境变量--system-level-environment-variables)。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -272,7 +272,7 @@ CERELAY_SOCKS_PROXY=proxy.example.com:1080:user:pass npm run server:up
 cerelay acp --server localhost:8765 --cwd /your/project
 ```
 
-完整的协议字段、初始化握手、编辑器配置示例见 [`docs/acp-editor-integration.md`](./docs/acp-editor-integration.md)。
+完整的协议字段、初始化握手、编辑器配置示例见 [`docs/architecture/modules/acp-editor-integration.md`](./docs/architecture/modules/acp-editor-integration.md)。
 
 ---
 
@@ -281,11 +281,11 @@ cerelay acp --server localhost:8765 --cwd /your/project
 | 文档 | 受众 | 内容 |
 |---|---|---|
 | `README.md`（本文档） | **用户** | 怎么跑、怎么连、鉴权、代理、能力总览 |
-| [`docs/architecture.md`](./docs/architecture.md) | 贡献者 / 开发者 | 架构总览、技术选型、核心机制、系统级 env vars |
-| [`docs/brain-docker.md`](./docs/brain-docker.md) | 部署者 | Docker 部署指南、卷与镜像、SOCKS5 代理细节 |
-| [`docs/acp-editor-integration.md`](./docs/acp-editor-integration.md) | 编辑器集成者 | ACP stdio 协议、Zed / VS Code 配置 |
-| [`docs/plan-d-mcp-shadow-tools.md`](./docs/plan-d-mcp-shadow-tools.md) | 贡献者 | Shadow MCP 设计（绕开 hook deny 协议约束） |
-| [`docs/plan-acp-relay.md`](./docs/plan-acp-relay.md) | 贡献者 | ACP relay 设计 |
+| [`docs/architecture/README.md`](./docs/architecture/README.md) | 贡献者 / 开发者 | 架构总览、技术选型、核心机制、系统级 env vars |
+| [`docs/operations/brain-docker.md`](./docs/operations/brain-docker.md) | 部署者 | Docker 部署指南、卷与镜像、SOCKS5 代理细节 |
+| [`docs/testing/e2e-comprehensive-testing.md`](./docs/testing/e2e-comprehensive-testing.md) | 贡献者 / QA | 全链路 e2e 覆盖矩阵 + 三阶段 case |
+| [`docs/architecture/modules/shadow-mcp.md`](./docs/architecture/modules/shadow-mcp.md) | 贡献者 | Shadow MCP 设计（绕开 hook deny 协议约束）；历史归档见 [`docs/archive/2026-05-11-plan-d-mcp-shadow-tools/`](./docs/archive/2026-05-11-plan-d-mcp-shadow-tools/) |
+| [`docs/architecture/modules/acp-editor-integration.md`](./docs/architecture/modules/acp-editor-integration.md) | 编辑器集成者 | ACP stdio 协议、Zed / VS Code 配置（⚠️ 历史文档，ACP 路径当前未在 main 启用） |
 | [`CLAUDE.md`](./CLAUDE.md) | AI 协作 | 项目级 AI 协作规范、强制约束 |
 
 ---

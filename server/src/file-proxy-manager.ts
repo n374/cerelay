@@ -334,7 +334,7 @@ export class FileProxyManager {
    * gate 关闭时 thunk 不被调用,decode 不发生。
    *
    * Codex T8 终审 Minor #1: 防止 detail 参数 eager evaluate 浪费生产 CPU。
-   * Spec: docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md §5.4
+   * Spec: docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md §5.4
    */
   private computeContentSha256(getBytes: () => Buffer | string): string | undefined {
     if (process.env.CERELAY_ADMIN_EVENTS !== "true") return undefined;
