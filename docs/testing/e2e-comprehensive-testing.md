@@ -15,7 +15,7 @@
 | **拦住"手动跑才发现"的 regression** | 例：bootstrap.sh 在 `set -u` 下访问 unset 的 `$IFS` 直接挂 PTY，仅当 `CERELAY_ANCESTOR_DIRS` 非空才触发——单测无法覆盖，必须真启动 server + 真发起 PTY session 才暴露 |
 | **把"协议链路"变成 first-class 测试对象** | 现有 e2e 多是"server-only + 测试内手搓 hook bridge"，没有任何一个测试是"真 server 进程 + 真 client 进程 + 走完整 ws"。本套件填补此缺口 |
 | **多 device / 多 client 拓扑** | F3 场景（多 deviceId 同连）只有跨容器才能 honest 测试（独立 host fs / 独立网络栈 / 独立 device-id 文件） |
-| **强制覆盖审计** | 任何功能开发 / 更新完成后必须同步评估本套件覆盖矩阵能否扩展。审计约束写在 [`../CLAUDE.md`](../CLAUDE.md) |
+| **强制覆盖审计** | 任何功能开发 / 更新完成后必须同步评估本套件覆盖矩阵能否扩展。审计约束写在 [`../../CLAUDE.md`](../../CLAUDE.md) |
 
 #### 1.2 与现有 e2e 测试的边界 / Boundary vs Existing E2E
 
@@ -99,8 +99,8 @@
 |---|---|---|---|
 | H. 韧性 / Resiliency | H1-ws-reconnect | 🅿️ 需求池 | client ↔ server WebSocket 断网后**自动重连并续 session**。当前 client 断网行为是 session 终止；功能尚未实现。落地后本 case 验断网 N 秒内重连后能继续既有 PTY session（包括 in-flight tool_call 的接续/取消语义）。Triggered when product implements WS auto-reconnect with session resumption |
 | H. 韧性 / Resiliency | H2-server-restart | 🅿️ 需求池 | server 进程重启后 client 端 session **状态恢复**（PTY、cache、credentials 全链路）。当前 server 重启 ≡ 全 session 清空；功能尚未实现。落地后本 case 验 server SIGTERM → 重启 → client 仍能续 session |
-| F. 隔离 / Isolation | F4-cross-cwd-fileproxy-isolation | ✅ 落地 (2026-05-05) | F4-same-device-multi-cwd P1-B 落地版只守 3 条浅层不变量(sessionId 唯一 / cwd 字段对齐 / deviceId 共享)。本 P2 case 补 4 条 cross-cwd 隔离深度不变量:(a) fileProxy 三 root 内容不串(措辞已按代码现状校正,见 spec §2);(b) FileAgent / 共享 ClientCacheStore 命中不被另一 cwd 访问污染;(c) cwd-ancestor walk **计算计划**不串台(真实 ancestor FUSE read 守不住,见 INF-12);(d) project-claude bind mount 严格按 session cwd。**设计**:`docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md`(Claude × Codex 共创,含三处规格事实纠偏 + 5 处补强 + 守护意图自查表)。**拆分**:基础设施 PR(扩 admin event detail + ConfigPreloader/session.bootstrap probe + orchestrator helper) + 测试 PR(phase-p2.test.ts + meta failure case + fixture)。Hardening with full Claude × Codex spec — see the design doc; splits into observability infra PR + test PR |
-| INF. 产品缺口 / Product Gap | INF-12-cwd-ancestor-root-registration | 🅿️ 待独立需求 | `FileProxyManager.roots`(`server/src/file-proxy-manager.ts:258/261`)只注册 home-claude / home-claude-json / project-claude 三个 root,**未注册** `cwd-ancestor-N`,但 daemon(`fuse-host-script.ts:451/568/634`)和 bootstrap(`claude-session-runtime.ts:331/348`)都引用了该 root 形态——半成品 / 历史遗留。**含义**:`read /cwd-ancestor-N/CLAUDE.md` FUSE 路径在当前代码下走不到底。**影响**:F4-cross-cwd-fileproxy-isolation P2 case 不变量 (c) 只能守"计算计划不串台",不能守"真实 ancestor FUSE read"。**修复方向**:先调研产品意图(为什么没注册——漏掉?有意为之?),再决定是否在 `FileProxyManager` 构造时用 `computeAncestorChain` 注册 ancestor root。详见 `docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md` §8。**优先级**:用户确认后续单独需求处理,F4-cross-cwd P2 case 落地不阻塞此 INF。 / Daemon and bootstrap reference `cwd-ancestor-N` roots that server never registers — half-finished product behavior; awaits dedicated investigation+fix |
+| F. 隔离 / Isolation | F4-cross-cwd-fileproxy-isolation | ✅ 落地 (2026-05-05) | F4-same-device-multi-cwd P1-B 落地版只守 3 条浅层不变量(sessionId 唯一 / cwd 字段对齐 / deviceId 共享)。本 P2 case 补 4 条 cross-cwd 隔离深度不变量:(a) fileProxy 三 root 内容不串(措辞已按代码现状校正,见 spec §2);(b) FileAgent / 共享 ClientCacheStore 命中不被另一 cwd 访问污染;(c) cwd-ancestor walk **计算计划**不串台(真实 ancestor FUSE read 守不住,见 INF-12);(d) project-claude bind mount 严格按 session cwd。**设计**:`docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md`(Claude × Codex 共创,含三处规格事实纠偏 + 5 处补强 + 守护意图自查表)。**拆分**:基础设施 PR(扩 admin event detail + ConfigPreloader/session.bootstrap probe + orchestrator helper) + 测试 PR(phase-p2.test.ts + meta failure case + fixture)。Hardening with full Claude × Codex spec — see the design doc; splits into observability infra PR + test PR |
+| INF. 产品缺口 / Product Gap | INF-12-cwd-ancestor-root-registration | 🅿️ 待独立需求 | `FileProxyManager.roots`(`server/src/file-proxy-manager.ts:258/261`)只注册 home-claude / home-claude-json / project-claude 三个 root,**未注册** `cwd-ancestor-N`,但 daemon(`fuse-host-script.ts:451/568/634`)和 bootstrap(`claude-session-runtime.ts:331/348`)都引用了该 root 形态——半成品 / 历史遗留。**含义**:`read /cwd-ancestor-N/CLAUDE.md` FUSE 路径在当前代码下走不到底。**影响**:F4-cross-cwd-fileproxy-isolation P2 case 不变量 (c) 只能守"计算计划不串台",不能守"真实 ancestor FUSE read"。**修复方向**:先调研产品意图(为什么没注册——漏掉?有意为之?),再决定是否在 `FileProxyManager` 构造时用 `computeAncestorChain` 注册 ancestor root。详见 `docs/archive/2026-05-02-f4-cross-cwd-fileproxy-isolation/design.md` §8。**优先级**:用户确认后续单独需求处理,F4-cross-cwd P2 case 落地不阻塞此 INF。 / Daemon and bootstrap reference `cwd-ancestor-N` roots that server never registers — half-finished product behavior; awaits dedicated investigation+fix |
 
 ---
 
@@ -377,7 +377,7 @@ test("A1-bash-basic: model triggers Bash → server relays to client → tool_re
 
 ### 6. 强制约束 / Mandatory Audit
 
-> 详见 [`../CLAUDE.md`](../CLAUDE.md) 的 "E2E 综合测试覆盖审计" 节。
+> 详见 [`../../CLAUDE.md`](../../CLAUDE.md) 的 "E2E 综合测试覆盖审计" 节。
 
 简述：任何功能开发 / 更新 / 修复完成后（commit 前），必须打开本文档 §2 覆盖矩阵，回答以下三问：
 
@@ -500,7 +500,7 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 
 | # | 案例 / 文件 | 问题 | 修正方向 |
 |---|---|---|---|
-| C1 | B1/B2/B3/D1/D2 in `phase-p0.test.ts` | 用 `mcp__cerelay__read/bash` 走的是 client-routed（[pty-session.ts](../server/src/pty-session.ts) `executeToolViaClient` rewrite 到 client home/cwd 后转发 client 执行），**根本没碰 server FUSE / namespace 链路**。case 名字对得上 matrix，断言走在 client 端原文。 | 不能用 shadow MCP 工具作为主断言。新增 file-proxy 结构化 admin event（按 root + relPath），断言访问真的经过 `home-claude` / `home-claude-json` / `project-claude` FUSE root，而不是 client 本地直读。 |
+| C1 | B1/B2/B3/D1/D2 in `phase-p0.test.ts` | 用 `mcp__cerelay__read/bash` 走的是 client-routed（[pty-session.ts](../../server/src/pty-session.ts) `executeToolViaClient` rewrite 到 client home/cwd 后转发 client 执行），**根本没碰 server FUSE / namespace 链路**。case 名字对得上 matrix，断言走在 client 端原文。 | 不能用 shadow MCP 工具作为主断言。新增 file-proxy 结构化 admin event（按 root + relPath），断言访问真的经过 `home-claude` / `home-claude-json` / `project-claude` FUSE root，而不是 client 本地直读。 |
 | C2 | E1 in `phase-p0.test.ts` | 只断言"至少一次 `file-proxy.settings.redacted` event"，没覆盖 matrix 要求的 snapshot / cache-hit / passthrough **三处出口都 redact**。当前 admin event 已经标 `site`，但断言没强制三类 site 都出现。 | 拆 E1 为可稳定触发三个 site 的子断言：分别强制走 snapshot / cache-hit / passthrough 路径，断言对应 site event 出现且没有 `redact.bypassed`。e2e 不可稳定触发的出口必须降级 matrix + 补 server 单测。 |
 | C3 | F3 in `phase-p0.test.ts` | 只验 deviceId 不同 + 两边 manifest 非空 + revision > 0，**没真验证内容隔离**。如果 server 错误地用全局 manifest 或串写，本断言仍能过。 | 给 `/admin/cache` 增加按 `deviceId + scope + relPath` 查单项摘要（size / sha256）。F3 双边写同 relPath（`.claude/CLAUDE.md`）但内容不同，断言 A/B 查到不同 hash 且互查不到对方。 |
 | C4 | meta-deviceid-collision in `phase-p0-meta.test.ts` | 只验"两侧指向同一 manifest"，没有镜像 F3 失败条件。即使 F3 把核心隔离断言删了，本 meta 仍能过。反向断言失效。 | 抽出 `assertF3Isolation()` 公共断言，主套件 F3 期望 pass，meta collision 下期望 throw。 |
@@ -509,10 +509,10 @@ meta-test 不在常规 `npm test` 跑（会污染主套件），只在 `npm run 
 
 | # | 文件 | 问题 | 修正方向 |
 |---|---|---|---|
-| I1 | [`server/src/server.ts`](../server/src/server.ts) `/admin/cache` | 没 `CERELAY_ADMIN_EVENTS=true` gate；只要 admin token 在生产端口暴露即可枚举任意 deviceId 的 revision / scope 统计。**这是 P0-B 引入的真实 production safety bug**。 | 跟 `/admin/test-toggles` 一致 gate 到 `CERELAY_ADMIN_EVENTS=true`，或引入独立 `CERELAY_E2E_ADMIN=true`；生产默认 404/403。 |
+| I1 | [`server/src/server.ts`](../../server/src/server.ts) `/admin/cache` | 没 `CERELAY_ADMIN_EVENTS=true` gate；只要 admin token 在生产端口暴露即可枚举任意 deviceId 的 revision / scope 统计。**这是 P0-B 引入的真实 production safety bug**。 | 跟 `/admin/test-toggles` 一致 gate 到 `CERELAY_ADMIN_EVENTS=true`，或引入独立 `CERELAY_E2E_ADMIN=true`；生产默认 404/403。 |
 | I2 | 本文档 §4.2 | 文档声称 admin 路由仅在 `CERELAY_ADMIN_EVENTS=true` 挂载、独立 8766 端口；实际 `server/src/server.ts` 主端口直接挂 `/admin/*`，`/admin/events` 只是 disabled 时回空。 | 同步 §4.2 安全模型：哪些路由生产存在、哪些 disabled 回空、哪些 e2e-only endpoint 有 gate。 |
-| I3 | [`server/src/test-toggles.ts`](../server/src/test-toggles.ts) | 故意放水 toggle 被生产代码 import 到 `file-proxy-manager.ts` / `claude-session-runtime.ts`。当前远程开启路径被 gate 挡住，但生产代码路径**永久读取测试状态**。 | 改 DI：toggle 作为构造参数注入到 e2e server；或改名 `E2eFaultInjection` + 单测断言 `CERELAY_ADMIN_EVENTS !== "true"` 时 POST 无法改变行为。 |
-| I4 | [`test/e2e-comprehensive/mock-anthropic/index.ts`](../test/e2e-comprehensive/mock-anthropic/index.ts) `flattenToolResults` | 字段名表示"当前请求 toolResults"，实际累计所有历史 user 消息，导致测试靠 `.at(-1)` 绕语义。 | 拆两个字段：`toolResultsAll` + `toolResultsCurrentTurn`。测试用 current turn；保留旧字段需改名或文档化。 |
+| I3 | [`server/src/test-toggles.ts`](../../server/src/test-toggles.ts) | 故意放水 toggle 被生产代码 import 到 `file-proxy-manager.ts` / `claude-session-runtime.ts`。当前远程开启路径被 gate 挡住，但生产代码路径**永久读取测试状态**。 | 改 DI：toggle 作为构造参数注入到 e2e server；或改名 `E2eFaultInjection` + 单测断言 `CERELAY_ADMIN_EVENTS !== "true"` 时 POST 无法改变行为。 |
+| I4 | [`test/e2e-comprehensive/mock-anthropic/index.ts`](../../test/e2e-comprehensive/mock-anthropic/index.ts) `flattenToolResults` | 字段名表示"当前请求 toolResults"，实际累计所有历史 user 消息，导致测试靠 `.at(-1)` 绕语义。 | 拆两个字段：`toolResultsAll` + `toolResultsCurrentTurn`。测试用 current turn；保留旧字段需改名或文档化。 |
 | I5 | §2.1 A3 matrix | matrix 写 `Glob '**/*.md'`，实现 `phase-p0.test.ts` 改成 `*.md` 走 basename 匹配。 | 要么修 client glob 支持 `**/*.md` 并按 matrix 测，要么 matrix 显式写"basename glob 语义"。 |
 
 #### 11.3 Nit（细节 / Minor）

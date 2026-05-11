@@ -1,4 +1,12 @@
+<!-- doc-init template version: v1.0 -->
 # ACP 编辑器集成指南 / ACP Editor Integration Guide
+
+> **Owner**: client 维护者
+> **Reviewers**: 全员
+
+> ⚠️ **历史文档 / Historical**：ACP 路径当前未在 main 上启用——`client/src/` 已无 ACP 实现（仅 `client/dist/acp` 是历史构建残留）。文中提到的 `cerelay-hand` 命令亦为旧命名（现客户端代码位于 `client/`）。本文保留作为协议参考与 ACP relay 重新启动时的起点；最新 ACP relay 设计见 [`../../archive/2026-05-11-plan-acp-relay/design.md`](../../archive/2026-05-11-plan-acp-relay/design.md)。
+>
+> ⚠️ **Historical**: ACP path is currently disabled on main — `client/src/` no longer ships ACP code (only `client/dist/acp` remains as a build artifact). The `cerelay-hand` command name is also legacy (client code now lives in `client/`). Kept as protocol reference and a starting point if ACP relay is revived.
 
 ## 概述 / Overview
 

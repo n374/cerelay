@@ -1,4 +1,8 @@
+<!-- doc-init template version: v1.0 -->
 # Spec Delta: shadow-mcp-permission
+
+> **Owner**: server 架构组
+> **Reviewers**: 全员
 
 > 位置：`docs/changes/shadow-mcp-permission-integration/specs/shadow-mcp-permission/spec.md`
 > 角色：本 change 对 `shadow-mcp-permission` capability 的**变更声明**（ADDED 完整 capability）。归档时合并到 `docs/specs/shadow-mcp-permission/spec.md`。
@@ -178,7 +182,7 @@ The system MUST 在用户选"Always 允许"时，把规则以 **CC 原生格式*
 
 ### Requirement: 写回路径与 redaction 不变量兼容
 
-The system SHALL 在写回 `settings.local.json` 时遵守现有 redaction 不变量（详见 `docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md`）：
+The system SHALL 在写回 `settings.local.json` 时遵守现有 redaction 不变量（详见 `docs/archive/2026-04-30-shadow-claude-settings-redaction/design.md`）：
 
 - 写回路径走 client-routed Write tool（不直接写容器内 FUSE shadow file）
 - 写完后 cache delta 通过 watcher 自动同步回 server
@@ -234,4 +238,4 @@ The system MUST 在以下场景下做到**0 次审批弹窗**（既不弹 elicit
 
 - 本 capability 依赖 `shadow-mcp-tools` 的 dispatch 链路（在派发到 client 之前做 permission check）
 - 本 capability 间接依赖 `client-config-sync` 的 `settings.json` / `settings.local.json` 同步（mini engine 从 cache 读规则集）
-- redaction 不变量参考 `docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md`
+- redaction 不变量参考 `docs/archive/2026-04-30-shadow-claude-settings-redaction/design.md`

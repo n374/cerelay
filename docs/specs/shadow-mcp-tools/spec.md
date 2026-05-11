@@ -1,10 +1,14 @@
+<!-- doc-init template version: v1.0 -->
 # Capability: shadow-mcp-tools
+
+> **Owner**: server 架构组
+> **Reviewers**: 全员（涉及双路径不变量与协议硬约束，修改 living spec 必须经 change archive 阶段）
 
 > 位置：`docs/specs/shadow-mcp-tools/spec.md`
 > 角色：本 capability 的 **living spec**（source of truth）。**只在归档阶段被修改**。
-> 历史变更可在 `docs/archive/` 中追溯。
+> 历史变更可在 [`../../archive/`](../../archive/) 中追溯。
 >
-> **Baseline 反向生成**于 2026-05-05，代码版本 `54f69d3`，由 change `baseline-shadow-mcp-clientcache` 产生。
+> **Baseline 反向生成**于 2026-05-05，代码版本 `54f69d3`，由 change `baseline-shadow-mcp-clientcache` 产生（已归档于 [`../../archive/2026-05-05-baseline-shadow-mcp-clientcache/`](../../archive/2026-05-05-baseline-shadow-mcp-clientcache/)）。
 
 ## 概述
 
@@ -385,7 +389,7 @@ The system MUST 让 routed 子进程的 IPC 客户端在以下异常场景下立
 
 | 日期 | Change | 变更摘要 |
 |---|---|---|
-| 2026-05-05 | [baseline-shadow-mcp-clientcache](../../changes/baseline-shadow-mcp-clientcache/) | Baseline 反向生成首次创建 |
+| 2026-05-05 | [baseline-shadow-mcp-clientcache](../../archive/2026-05-05-baseline-shadow-mcp-clientcache/) | Baseline 反向生成首次创建 |
 
 ---
 

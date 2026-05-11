@@ -107,7 +107,7 @@ ToolRelay.dispatch → ws → client tool 本机执行 → 回程渲染 (is_erro
 - C 不存在公开 API，反向工程不在 100% userland 范畴
 - A 覆盖 95% 实战需求（用户 settings 里 prefix:* 是绝对主流）
 - 不识别的规则（如 regex）降级为 unmatched 而非抛错——保守路径
-- **登记债务**：CC 升级新语法时本 engine 需扩展（已记入 `docs/project.md` §4 TD-4）
+- **登记债务**：CC 升级新语法时本 engine 需扩展（已记入 `docs/overview/project.md` §4 TD-4）
 
 ### D-3: 写回 prefix 粒度——取首两 token
 
@@ -225,7 +225,7 @@ ToolRelay.dispatch → ws → client tool 本机执行 → 回程渲染 (is_erro
 - **Tasks 阶段**：把 OQ-1 / OQ-2 列为 spike 任务（先做，结果回填本 plan 与 spec delta），其余功能按本 plan 模块切分拆任务
 - **Implement 阶段**：按"先 spike → 改 spec / plan（如需）→ 实现 engine → 集成 dispatcher → e2e 验证"顺序
 - **Verify 阶段**：双人对齐评审 + 验收三个 success metric（命中无打扰 / Always 写回生效 / 跨场景一致性）
-- **Archive 阶段**：合并三份 spec delta 到 living spec；新建 `docs/specs/shadow-mcp-permission/spec.md`；更新 `docs/project.md` 移除 TD-4（如本 change 真的覆盖了完整范围）
+- **Archive 阶段**：合并三份 spec delta 到 living spec；新建 `docs/specs/shadow-mcp-permission/spec.md`；更新 `docs/overview/project.md` 移除 TD-4（如本 change 真的覆盖了完整范围）
 
 ---
 

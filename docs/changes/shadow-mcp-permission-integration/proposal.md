@@ -43,7 +43,7 @@ Plan D Shadow MCP（详见 [`docs/specs/shadow-mcp-tools/spec.md`](../../specs/s
 - **不动 hook 路径架构**。保留 hook fallback 作为 shadow MCP 不可用时的兜底（参见 `docs/specs/shadow-mcp-tools/spec.md` Fallback 引导文案 Requirement），不试图用 hook + `updatedInput` 改写复读机方案替代 shadow MCP。
 - **不替换 FUSE / cache 架构**。`settings.json` 仍走现有 FileAgent + ConfigPreloader 路径。
 - **不修 CC binary**。100% userland 解决；任何"如果 CC 加个 X 就更好了"的方向不在本 change。
-- **不处理 `~/.claude.json` 的 `apiKeyHelper` / `oauthAccount` 等登录态字段**。`docs/project.md` §4 TD-1 已登记，与本 change 正交。
+- **不处理 `~/.claude.json` 的 `apiKeyHelper` / `oauthAccount` 等登录态字段**。`docs/overview/project.md` §4 TD-1 已登记，与本 change 正交。
 - **不引入新 client → server 协议字段**。本 change 完全在 server / cerelay-routed 进程内闭环，client 侧零改动。
 - **不处理 `permissions.deny` 的全部语义**。仅识别和尊重 deny 优先于 allow 的基本顺序；deny pattern 复杂语法同 mini engine 支持范围。
 
@@ -113,4 +113,4 @@ Plan D Shadow MCP（详见 [`docs/specs/shadow-mcp-tools/spec.md`](../../specs/s
 **关联文档**:
 - [`docs/specs/shadow-mcp-tools/spec.md`](../../specs/shadow-mcp-tools/spec.md) — 本 change MODIFIED 的 capability
 - [`docs/specs/client-config-sync/spec.md`](../../specs/client-config-sync/spec.md) — 本 change MODIFIED 的 capability
-- [`docs/superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md`](../../superpowers/specs/2026-04-30-shadow-claude-settings-login-state-design.md) — settings 出口 redaction 不变量（本 change 的写回路径必须兼容）
+- [`docs/archive/2026-04-30-shadow-claude-settings-redaction/design.md`](../../archive/2026-04-30-shadow-claude-settings-redaction/design.md) — settings 出口 redaction 不变量（本 change 的写回路径必须兼容）

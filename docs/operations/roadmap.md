@@ -1,4 +1,8 @@
+<!-- doc-init template version: v1.0 -->
 # Cerelay 执行规划
+
+> **Owner**: 项目 Tech Lead
+> **Reviewers**: 架构组
 
 ## 架构全景
 

@@ -1,16 +1,20 @@
+<!-- doc-init template version: v1.0 -->
 # Capability: client-config-sync
+
+> **Owner**: server 架构组
+> **Reviewers**: 全员（修改 living spec 必须经 change archive 阶段）
 
 > 位置：`docs/specs/client-config-sync/spec.md`
 > 角色：本 capability 的 **living spec**（source of truth）。**只在归档阶段被修改**。
-> 历史变更可在 `docs/archive/` 中追溯。
+> 历史变更可在 [`../../archive/`](../../archive/) 中追溯。
 >
-> **Baseline 反向生成**于 2026-05-05，代码版本 `54f69d3`，由 change `baseline-shadow-mcp-clientcache` 产生。
+> **Baseline 反向生成**于 2026-05-05，代码版本 `54f69d3`，由 change `baseline-shadow-mcp-clientcache` 产生（已归档于 [`../../archive/2026-05-05-baseline-shadow-mcp-clientcache/`](../../archive/2026-05-05-baseline-shadow-mcp-clientcache/)）。
 
 ## 概述
 
 把 Client 本机的三个 Claude 配置 scope（`~/.claude/`、`~/.claude.json`、`{cwd}/.claude/`）以 device-only 维度同步到 Server，让 FUSE Host 读路径与 ConfigPreloader 启动期预热共享同一份 store；目的是降低启动期开销、跨 cwd 共享 manifest 与 blob 池，并保留缓存失败时的穿透降级路径。
 
-**架构两层**（plan `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md`）：
+**架构两层**（plan `docs/archive/2026-05-02-file-agent-and-config-preloader/plan.md`）：
 
 - **底座 FileAgent**（per-device 单例）：对外暴露 `read / stat / readdir / prefetch + ttlMs` 四接口；持有 store + TTL 表 + GC 周期。
 - **上层 ConfigPreloader**（per-session）：启动期一次性 prefetch home/.claude（dir-recursive）+ home/.claude.json + ancestor × {CLAUDE.md, CLAUDE.local.md}。
@@ -424,7 +428,7 @@ The system SHALL 通过 `scope-adapter` 把 FileAgent 的绝对路径接口（`a
 
 - **目标**：device 全局 manifest 持久化所有访问过的 path（含 home 路径名），运维清理时整 device 目录删除即可
 - **测量方式**：N/A（属于隐私声明，非功能性）
-- **当前覆盖**：通过 `docs/project.md` §2.5 与 `CLAUDE.md` §5 文档化
+- **当前覆盖**：通过 `docs/overview/project.md` §2.5 与 `CLAUDE.md` §5 文档化
 
 ---
 
@@ -432,7 +436,7 @@ The system SHALL 通过 `scope-adapter` 把 FileAgent 的绝对路径接口（`a
 
 | 日期 | Change | 变更摘要 |
 |---|---|---|
-| 2026-05-05 | [baseline-shadow-mcp-clientcache](../../changes/baseline-shadow-mcp-clientcache/) | Baseline 反向生成首次创建 |
+| 2026-05-05 | [baseline-shadow-mcp-clientcache](../../archive/2026-05-05-baseline-shadow-mcp-clientcache/) | Baseline 反向生成首次创建 |
 
 ---
 

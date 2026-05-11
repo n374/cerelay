@@ -1,4 +1,8 @@
+<!-- doc-init template version: v1.0 -->
 # Spec Delta: client-config-sync
+
+> **Owner**: server 架构组
+> **Reviewers**: 全员
 
 > 位置：`docs/changes/shadow-mcp-permission-integration/specs/client-config-sync/spec.md`
 > 角色：本 change 对 `client-config-sync` capability 的**变更声明**。归档时合并到 `docs/specs/client-config-sync/spec.md`。

@@ -1,4 +1,8 @@
+<!-- doc-init template version: v1.0 -->
 # Spec Delta: shadow-mcp-tools
+
+> **Owner**: server 架构组
+> **Reviewers**: 全员
 
 > 位置：`docs/changes/shadow-mcp-permission-integration/specs/shadow-mcp-tools/spec.md`
 > 角色：本 change 对 `shadow-mcp-tools` capability 的**变更声明**。归档时合并到 `docs/specs/shadow-mcp-tools/spec.md`。

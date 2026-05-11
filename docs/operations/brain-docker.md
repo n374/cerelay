@@ -1,4 +1,8 @@
+<!-- doc-init template version: v1.0 -->
 # Brain 容器化部署指南 / Brain Docker Deployment Guide
+
+> **Owner**: SRE / 运维组
+> **Reviewers**: server 架构组
 
 ## 概述 / Overview
 
