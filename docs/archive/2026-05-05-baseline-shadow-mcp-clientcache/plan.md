@@ -60,7 +60,7 @@
 | `client/src/cache-sync.ts` | Client 侧 manifest 计算与 pipeline 上传 |
 | `client/src/device-id.ts` | deviceId 生成与持久化 |
 | `client/src/ui.ts` | 双行进度 UI（`CacheSyncProgressView` + `Phase`） |
-| `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md` | FileAgent + ConfigPreloader 设计文档 |
+| `docs/archive/2026-05-02-file-agent-and-config-preloader/plan.md` | FileAgent + ConfigPreloader 设计文档 |
 
 ## 发现的债务
 

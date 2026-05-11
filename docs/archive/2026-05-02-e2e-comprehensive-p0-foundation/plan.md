@@ -17,7 +17,7 @@
 
 **Tech Stack:** Node 22 + TypeScript + node:test + Docker Compose + 现有 cerelay server/client 二进制
 
-**关联 spec：** [`docs/e2e-comprehensive-testing.md`](../../e2e-comprehensive-testing.md)
+**关联 spec：** [`docs/e2e-comprehensive-testing.md`](../../testing/e2e-comprehensive-testing.md)
 
 ---
 

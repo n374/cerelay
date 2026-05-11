@@ -23,7 +23,7 @@
 
 **Tech Stack:** TypeScript (Node.js ESM, server + client), Python (FUSE daemon, fuse-host-script.ts), JSON-RPC over stdio + control pipe, Node.js native test runner (`node --test`), WebSocket (existing, unchanged).
 
-**Spec:** [`docs/superpowers/specs/2026-05-01-access-ledger-driven-cache-design.md`](../specs/2026-05-01-access-ledger-driven-cache-design.md)
+**Spec:** [`./design.md`](./design.md)
 
 ---
 

@@ -3,8 +3,8 @@
 - **状态 / Status**: Implemented (master @ 1610514)
 - **日期 / Date**: 2026-05-01
 - **作者 / Author**: Claude (with @n374), peer-reviewed by Codex
-- **实施总结 / Implementation Summary**: 全 7 个 Phase 落地完成, 见 [`docs/superpowers/plans/2026-05-01-access-ledger-driven-cache.md`](../plans/2026-05-01-access-ledger-driven-cache.md). 31 个 commit (`9aba1e2` → `1610514`), server 305 tests / 300 pass / 5 skipped. V2 候选 (cwd-ancestor `CLAUDE.md` / dirIndex / blob 跨 cwd 去重) 见 §11.
-- **关联文档 / Related**: [`docs/architecture.md`](../../architecture.md) §11 子文档索引（已登记），[`CLAUDE.md`](../../../CLAUDE.md)
+- **实施总结 / Implementation Summary**: 全 7 个 Phase 落地完成, 见 [`./plan.md`](./plan.md). 31 个 commit (`9aba1e2` → `1610514`), server 305 tests / 300 pass / 5 skipped. V2 候选 (cwd-ancestor `CLAUDE.md` / dirIndex / blob 跨 cwd 去重) 见 §11.
+- **关联文档 / Related**: [`docs/architecture/README.md`](../../architecture/README.md), [`CLAUDE.md`](../../../CLAUDE.md)
 
 ---
 
@@ -1193,7 +1193,7 @@ CC 启动期会沿 cwd 父链向上一路找到 homedir，加载每一级的 `CL
 
 24. 删除"phase=syncing 时直接 fallback 走 client 全量"的旧分支（仅 phase=degraded/idle 时才 fallback）
 25. 删除 daemon Python 端 `_negative` dict + TTL 相关代码（`fuse-host-script.ts:80-86, 117-123, 126-130`）
-26. 文档：本 spec 已在 [`docs/architecture.md`](../../architecture.md) §11 子文档索引登记
+26. 文档：本 spec 已在 [`docs/architecture.md`](../../architecture/README.md) §11 子文档索引登记
 
 ---
 

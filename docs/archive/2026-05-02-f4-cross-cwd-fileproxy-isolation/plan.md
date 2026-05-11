@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript / Node.js native test runner / Docker compose e2e / Anthropic Claude Agent SDK / FUSE Python daemon
 
-**Spec:** [`docs/superpowers/specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md`](../specs/2026-05-02-f4-cross-cwd-fileproxy-isolation-design.md)
+**Spec:** [`./design.md`](./design.md)
 
 ---
 

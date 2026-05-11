@@ -36,7 +36,7 @@ Cerelay 仓库存量代码大、文档分散（CLAUDE.md / `docs/plan-d-mcp-shad
 1. `docs/specs/shadow-mcp-tools/spec.md` 与 `docs/specs/client-config-sync/spec.md` 两份 living spec 落盘
 2. 每条 Requirement 标注覆盖测试（grep 出对应测试文件）；无对应测试的 Requirement 标注 `[no-test]` 并记入「发现的债务」
 3. 本 change 归档后，下一个真实 change `shadow-mcp-permission-integration` 的 spec delta 可以正常按 `MODIFIED` 写入两份 living spec 的对应 Requirement
-4. 反向生成的 spec 与 CLAUDE.md / `docs/plan-d-mcp-shadow-tools.md` / `docs/superpowers/plans/2026-05-02-file-agent-and-config-preloader.md` 中的描述**一致**；如有出入，以**代码现状为准**并在 plan.md 记录差异
+4. 反向生成的 spec 与 CLAUDE.md / `docs/plan-d-mcp-shadow-tools.md` / `docs/archive/2026-05-02-file-agent-and-config-preloader/plan.md` 中的描述**一致**；如有出入，以**代码现状为准**并在 plan.md 记录差异
 
 ---
 
